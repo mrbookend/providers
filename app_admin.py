@@ -10,6 +10,13 @@ import streamlit as st
 from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
 
+# ---- register libsql dialect (must be AFTER "import streamlit as st") ----
+try:
+    import sqlalchemy_libsql  # ensures 'sqlite+libsql' dialect is registered
+except Exception:
+    pass
+# ---- end dialect registration ----
+
 # -----------------------------
 # Page config & CSS (full width, no left margin; nowrap table)
 # -----------------------------
@@ -56,16 +63,9 @@ if not st.session_state["auth_ok"]:
 # -----------------------------
 # DB helpers
 # -----------------------------
-def build_engine() -> Tuple[Engine, Dict]:
-    """Use Embedded Replica for Turso (syncs to remote), else fallback to local."""
-    info: Dict = {}
 
-# ---- register libsql dialect (must be AFTER "import streamlit as st") ----
-try:
-    import sqlalchemy_libsql  # ensures 'sqlite+libsql' dialect is registered
-except Exception:
-    pass
-# ---- end dialect registration ----
+
+
 
 # Small sanity check in Debug panel later:
 # st.write({"FORCE_LOCAL": os.getenv("FORCE_LOCAL")})
@@ -120,7 +120,7 @@ def build_engine() -> Tuple[Engine, Dict]:
             "driver": getattr(eng.dialect, "driver", ""),
             "sync_url": sync_url,
         })
-        return eng, info
+    return eng, info
 
      except Exception as e:
         info["remote_error"] = f"{e}"
