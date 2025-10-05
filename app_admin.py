@@ -31,6 +31,30 @@ st.markdown(
 )
 
 # -----------------------------
+# Admin sign-in gate
+# -----------------------------
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", st.secrets.get("ADMIN_PASSWORD", ""))
+
+if not ADMIN_PASSWORD:
+    st.error("ADMIN_PASSWORD is not set in Secrets. Add it in Settings → Secrets.")
+    st.stop()
+
+if "auth_ok" not in st.session_state:
+    st.session_state["auth_ok"] = False
+
+if not st.session_state["auth_ok"]:
+    st.subheader("Admin sign-in")
+    pw = st.text_input("Password", type="password", key="admin_pw")
+    if st.button("Sign in"):
+        if pw == ADMIN_PASSWORD:
+            st.session_state["auth_ok"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()
+
+
+# -----------------------------
 # DB Helpers
 # -----------------------------
 def _normalize_phone(val: str | None) -> str:
