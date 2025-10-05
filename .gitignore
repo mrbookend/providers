@@ -1,1 +1,16 @@
+# Bytecode & caches
+__pycache__/
+*.pyc
+
+# Virtual envs / local env files
+.venv/
+.env
+
+# Streamlit local secrets (Cloud uses UI secrets instead)
+.streamlit/secrets.toml
+
+# Turso embedded replica files (ignore all local copies)
+vendors-embedded.db
+vendors-embedded.db-wal
+vendors-embedded.db-shm
 
