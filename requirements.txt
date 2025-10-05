@@ -2,3 +2,4 @@ streamlit==1.38.0
 pandas==2.2.2
 SQLAlchemy==2.0.32
 sqlalchemy-libsql==0.1.0
+libsql-client==0.3.1
