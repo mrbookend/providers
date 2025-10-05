@@ -577,6 +577,53 @@ with _tabs[4]:
             ), {"now": now})
         st.success("Backfill complete.")
 
+# Trim extra whitespace across common text fields (preserves newlines in notes)
+if st.button("Trim whitespace in text fields (safe)"):
+    changed = 0
+    with engine.begin() as conn:
+        rows = conn.execute(sql_text("""
+            SELECT id, category, service, business_name, contact_name, address, website, notes, keywords, phone
+            FROM vendors
+        """)).fetchall()
+
+        def clean_soft(s: str | None) -> str:
+            s = (s or "").strip()
+            # collapse runs of spaces/tabs only; KEEP line breaks
+            s = re.sub(r"[ \t]+", " ", s)
+            return s
+
+        for r in rows:
+            pid = int(r[0])
+            vals = {
+                "category":      clean_soft(r[1]),
+                "service":       clean_soft(r[2]),
+                "business_name": clean_soft(r[3]),
+                "contact_name":  clean_soft(r[4]),
+                "address":       clean_soft(r[5]),
+                "website":       _sanitize_url(clean_soft(r[6])),
+                "notes":         clean_soft(r[7]),  # preserves newlines
+                "keywords":      clean_soft(r[8]),
+                # leave phone unchanged here; or use _normalize_phone(r[9]) if you want to normalize now
+                "phone":         r[9],
+                "id":            pid,
+            }
+            conn.execute(sql_text("""
+                UPDATE vendors
+                   SET category=:category,
+                       service=NULLIF(:service,''),
+                       business_name=:business_name,
+                       contact_name=:contact_name,
+                       phone=:phone,
+                       address=:address,
+                       website=:website,
+                       notes=:notes,
+                       keywords=:keywords
+                 WHERE id=:id
+            """), vals)
+            changed += 1
+    st.success(f"Whitespace trimmed on {changed} row(s).")
+
+
 
 # ---------- Debug
 with _tabs[5]:
