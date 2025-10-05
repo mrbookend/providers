@@ -11,20 +11,20 @@ from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
 
 # -----------------------------
-# Layout & Secrets
+# Page config & CSS (full width, no left margin; nowrap table)
 # -----------------------------
 PAGE_TITLE = st.secrets.get("page_title", "Vendors Admin") if hasattr(st, "secrets") else "Vendors Admin"
-PAGE_MAX_WIDTH_PX = int(st.secrets.get("page_max_width_px", 1400)) if hasattr(st, "secrets") else 1400
 SIDEBAR_STATE = st.secrets.get("sidebar_state", "expanded") if hasattr(st, "secrets") else "expanded"
 
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
 
-# Admin: nowrap table so you can manually resize and scroll both directions
 st.markdown(
-    f"""
+    """
     <style>
-      .block-container {{ max-width: {PAGE_MAX_WIDTH_PX}px; }}
-      div[data-testid="stDataFrame"] table {{ white-space: nowrap; }}
+      /* remove side margins, use full width */
+      .block-container { margin-left: 0; margin-right: 0; padding-left: 0; padding-right: 0; }
+      /* keep admin table on one line so you can horizontally scroll & manually resize */
+      div[data-testid="stDataFrame"] table { white-space: nowrap; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -33,7 +33,6 @@ st.markdown(
 # -----------------------------
 # Admin sign-in gate (robust)
 # -----------------------------
-# Prefer Secrets (Cloud), fall back to env var. Strip whitespace just in case.
 ADMIN_PASSWORD = (st.secrets.get("ADMIN_PASSWORD") or os.getenv("ADMIN_PASSWORD") or "").strip()
 
 if not isinstance(ADMIN_PASSWORD, str) or not ADMIN_PASSWORD:
@@ -47,7 +46,6 @@ if not st.session_state["auth_ok"]:
     st.subheader("Admin sign-in")
     pw = st.text_input("Password", type="password", key="admin_pw")
     if st.button("Sign in"):
-        # Compare trimmed, to ignore stray spaces pasted by accident.
         if (pw or "").strip() == ADMIN_PASSWORD:
             st.session_state["auth_ok"] = True
             st.rerun()
@@ -55,26 +53,9 @@ if not st.session_state["auth_ok"]:
             st.error("Incorrect password.")
     st.stop()
 
-
 # -----------------------------
-# DB Helpers
+# DB helpers
 # -----------------------------
-def _normalize_phone(val: str | None) -> str:
-    if not val:
-        return ""
-    digits = re.sub(r"\D", "", str(val))
-    if len(digits) == 11 and digits.startswith("1"):
-        digits = digits[1:]
-    return digits if len(digits) == 10 else digits  # store digits only if 10; else store as-is
-
-def _sanitize_url(url: str | None) -> str:
-    if not url:
-        return ""
-    url = url.strip()
-    if url and not re.match(r"^https?://", url, re.I):
-        url = "https://" + url
-    return url
-
 def build_engine() -> Tuple[Engine, Dict]:
     """Prefer Turso (libSQL); fallback to local SQLite. Returns (engine, info)."""
     info: Dict = {}
@@ -85,7 +66,7 @@ def build_engine() -> Tuple[Engine, Dict]:
     def _normalize(url: str) -> str:
         if not url:
             return ""
-        # Keep driver scheme; DO NOT convert to libsql:// (dialect)
+        # KEEP the driver scheme; do NOT convert to the 'libsql://' dialect
         if url.startswith("sqlite+libsql://") or url.startswith("libsql://"):
             norm = url
         else:
@@ -97,7 +78,7 @@ def build_engine() -> Tuple[Engine, Dict]:
 
     url = _normalize(raw_url)
 
-    # Try A: pass token as 'authToken'
+    # Try A: token as 'authToken'
     if url and token:
         try:
             eng = create_engine(url, connect_args={"authToken": token}, pool_pre_ping=True)
@@ -109,7 +90,7 @@ def build_engine() -> Tuple[Engine, Dict]:
         except Exception as e:
             info["remote_error_authToken_arg"] = str(e)
 
-        # Try B: pass token as 'auth_token'
+        # Try B: token as 'auth_token'
         try:
             eng = create_engine(url, connect_args={"auth_token": token}, pool_pre_ping=True)
             with eng.connect() as conn:
@@ -133,7 +114,7 @@ def build_engine() -> Tuple[Engine, Dict]:
         except Exception as e:
             info["remote_error_authToken_in_url"] = str(e)
 
-    # Try D: no token (shouldn’t work for private DBs, but harmless to try)
+    # Try D: no token (unlikely to work on private DBs, but harmless)
     if url and not token:
         try:
             eng = create_engine(url, pool_pre_ping=True)
@@ -150,15 +131,6 @@ def build_engine() -> Tuple[Engine, Dict]:
     info.update({"using_remote": False, "sqlalchemy_url": "sqlite:///vendors.db",
                  "dialect": eng.dialect.name, "driver": getattr(eng.dialect, "driver", "")})
     return eng, info
-
-
-        except Exception as e:
-            info["remote_error"] = str(e)
-
-    # Fallback to local SQLite file
-    engine = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
-    info.update({"using_remote": False, "sqlalchemy_url": "sqlite:///vendors.db", "dialect": engine.dialect.name, "driver": getattr(engine.dialect, "driver", "")})
-    return engine, info
 
 def ensure_schema(engine: Engine) -> None:
     stmts = [
@@ -199,12 +171,29 @@ def ensure_schema(engine: Engine) -> None:
         for s in stmts:
             conn.execute(sql_text(s))
 
+def _normalize_phone(val: str | None) -> str:
+    if not val:
+        return ""
+    digits = re.sub(r"\D", "", str(val))
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits if len(digits) == 10 else digits  # keep as-is if not 10 digits
+
+def _sanitize_url(url: str | None) -> str:
+    if not url:
+        return ""
+    url = url.strip()
+    if url and not re.match(r"^https?://", url, re.I):
+        url = "https://" + url
+    return url
+
 def load_df(engine: Engine) -> pd.DataFrame:
     with engine.begin() as conn:
-        df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(category), lower(business_name)"), conn)
+        df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
     for col in ["contact_name", "phone", "address", "website", "notes", "keywords", "service", "created_at", "updated_at", "updated_by"]:
         if col not in df.columns:
             df[col] = ""
+    # short previews for browse table (admin can edit in form)
     df["notes_short"] = df.get("notes", "").astype(str).str.replace("\n", " ").str.slice(0, 150)
     df["keywords_short"] = df.get("keywords", "").astype(str).str.replace("\n", " ").str.slice(0, 80)
     return df
@@ -269,7 +258,7 @@ with _tabs[0]:
         vdf,
         use_container_width=True,
         hide_index=True,
-        disabled=True,
+        disabled=True,  # read-only grid (no per-column header filters)
         column_config={
             "website": st.column_config.LinkColumn("website"),
             "notes": st.column_config.TextColumn(max_chars=150),
@@ -278,9 +267,9 @@ with _tabs[0]:
     )
 
     st.download_button(
-        "Download vendors.csv",
+        "Download providers.csv",
         data=vdf.to_csv(index=False).encode("utf-8"),
-        file_name="vendors.csv",
+        file_name="providers.csv",
         mime="text/csv",
     )
 
@@ -319,107 +308,105 @@ with _tabs[1]:
                     VALUES(:category, NULLIF(:service, ''), :business_name, :contact_name, :phone, :address, :website, :notes, :keywords, :now, :now, :user)
                     """
                 ), {
-                    "category": category.strip(),
+                    "category": (category or "").strip(),
                     "service": (service or "").strip(),
-                    "business_name": business_name.strip(),
-                    "contact_name": contact_name.strip(),
+                    "business_name": (business_name or "").strip(),
+                    "contact_name": (contact_name or "").strip(),
                     "phone": phone_norm,
-                    "address": address.strip(),
+                    "address": (address or "").strip(),
                     "website": url,
-                    "notes": notes.strip(),
-                    "keywords": keywords.strip(),
+                    "notes": (notes or "").strip(),
+                    "keywords": (keywords or "").strip(),
                     "now": now,
                     "user": os.getenv("USER", "admin"),
                 })
             st.success("Vendor added.")
             st.experimental_rerun()
-st.divider()
-st.subheader("Edit / Delete Vendor")
 
-df_all = load_df(engine)
+    st.divider()
+    st.subheader("Edit / Delete Vendor")
 
-# If no vendors yet, show a friendly hint and bail out safely
-if df_all.empty:
-    st.info("No vendors yet. Use 'Add Vendor' above to create your first record.")
-else:
-    id_list = df_all["id"].tolist()
-    sel_id = st.selectbox("Select Vendor ID", options=id_list, index=0 if id_list else None)
+    df_all = load_df(engine)
 
-    if sel_id is None:
-        st.info("Select a vendor to edit.")
+    if df_all.empty:
+        st.info("No vendors yet. Use 'Add Vendor' above to create your first record.")
     else:
-        row_sel = df_all.loc[df_all["id"] == sel_id]
-        if row_sel.empty:
-            st.warning("Selected vendor not found. Try refreshing the page.")
+        id_list = df_all["id"].tolist()
+        sel_id = st.selectbox("Select Vendor ID", options=id_list, index=0 if id_list else None)
+
+        if sel_id is None:
+            st.info("Select a vendor to edit.")
         else:
-            row = row_sel.iloc[0]
+            row_sel = df_all.loc[df_all["id"] == sel_id]
+            if row_sel.empty:
+                st.warning("Selected vendor not found. Try refreshing the page.")
+            else:
+                row = row_sel.iloc[0]
 
-            # Safe options for selects
-            cat_options = cats if cats else []
-            cat_index = (cat_options.index(row["category"])
-                         if row.get("category") in cat_options and cat_options else None)
+                cat_options = cats if cats else []
+                cat_index = (cat_options.index(row["category"])
+                             if row.get("category") in cat_options and cat_options else None)
 
-            svc_options = [""] + servs if servs else [""]
-            svc_index = (svc_options.index(row.get("service"))
-                         if str(row.get("service")) in svc_options else 0)
+                svc_options = [""] + servs if servs else [""]
+                svc_index = (svc_options.index(row.get("service"))
+                             if str(row.get("service")) in svc_options else 0)
 
-            with st.form("edit_vendor"):
-                col1, col2 = st.columns(2)
-                with col1:
-                    business_name_e = st.text_input("Business Name *", row.get("business_name", ""))
-                    category_e = st.selectbox("Category *", options=cat_options, index=cat_index)
-                    service_e = st.selectbox("Service (optional)", options=svc_options, index=svc_index)
-                    contact_name_e = st.text_input("Contact Name", row.get("contact_name", "") or "")
-                    phone_e = st.text_input("Phone (10 digits or blank)", row.get("phone", "") or "")
-                with col2:
-                    address_e = st.text_area("Address", row.get("address", "") or "", height=80)
-                    website_e = st.text_input("Website (https://…)", row.get("website", "") or "")
-                    notes_e = st.text_area("Notes", row.get("notes", "") or "", height=100)
-                    keywords_e = st.text_input("Keywords (comma separated)", row.get("keywords", "") or "")
-                c1, c2 = st.columns([1, 1])
-                update_btn = c1.form_submit_button("Save Changes")
-                delete_btn = c2.form_submit_button("Delete Vendor", type="secondary")
+                with st.form("edit_vendor"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        business_name_e = st.text_input("Business Name *", row.get("business_name", ""))
+                        category_e = st.selectbox("Category *", options=cat_options, index=cat_index)
+                        service_e = st.selectbox("Service (optional)", options=svc_options, index=svc_index)
+                        contact_name_e = st.text_input("Contact Name", row.get("contact_name", "") or "")
+                        phone_e = st.text_input("Phone (10 digits or blank)", row.get("phone", "") or "")
+                    with col2:
+                        address_e = st.text_area("Address", row.get("address", "") or "", height=80)
+                        website_e = st.text_input("Website (https://…)", row.get("website", "") or "")
+                        notes_e = st.text_area("Notes", row.get("notes", "") or "", height=100)
+                        keywords_e = st.text_input("Keywords (comma separated)", row.get("keywords", "") or "")
+                    c1, c2 = st.columns([1, 1])
+                    update_btn = c1.form_submit_button("Save Changes")
+                    delete_btn = c2.form_submit_button("Delete Vendor", type="secondary")
 
-            if update_btn:
-                if not business_name_e or not category_e:
-                    st.error("Business Name and Category are required.")
-                else:
-                    phone_norm = _normalize_phone(phone_e)
-                    url = _sanitize_url(website_e)
-                    now = datetime.utcnow().isoformat(timespec="seconds")
+                if update_btn:
+                    if not business_name_e or not category_e:
+                        st.error("Business Name and Category are required.")
+                    else:
+                        phone_norm = _normalize_phone(phone_e)
+                        url = _sanitize_url(website_e)
+                        now = datetime.utcnow().isoformat(timespec="seconds")
+                        with engine.begin() as conn:
+                            conn.execute(sql_text(
+                                """
+                                UPDATE vendors
+                                   SET category=:category, service=NULLIF(:service, ''), business_name=:business_name,
+                                       contact_name=:contact_name, phone=:phone, address=:address,
+                                       website=:website, notes=:notes, keywords=:keywords,
+                                       updated_at=:now, updated_by=:user
+                                 WHERE id=:id
+                                """
+                            ), {
+                                "category": (category_e or "").strip(),
+                                "service": (service_e or "").strip(),
+                                "business_name": (business_name_e or "").strip(),
+                                "contact_name": (contact_name_e or "").strip(),
+                                "phone": phone_norm,
+                                "address": (address_e or "").strip(),
+                                "website": url,
+                                "notes": (notes_e or "").strip(),
+                                "keywords": (keywords_e or "").strip(),
+                                "now": now,
+                                "user": os.getenv("USER", "admin"),
+                                "id": int(sel_id),
+                            })
+                        st.success("Vendor updated.")
+                        st.experimental_rerun()
+
+                if delete_btn:
                     with engine.begin() as conn:
-                        conn.execute(sql_text(
-                            """
-                            UPDATE vendors
-                               SET category=:category, service=NULLIF(:service, ''), business_name=:business_name,
-                                   contact_name=:contact_name, phone=:phone, address=:address,
-                                   website=:website, notes=:notes, keywords=:keywords,
-                                   updated_at=:now, updated_by=:user
-                             WHERE id=:id
-                            """
-                        ), {
-                            "category": (category_e or "").strip(),
-                            "service": (service_e or "").strip(),
-                            "business_name": (business_name_e or "").strip(),
-                            "contact_name": (contact_name_e or "").strip(),
-                            "phone": phone_norm,
-                            "address": (address_e or "").strip(),
-                            "website": url,
-                            "notes": (notes_e or "").strip(),
-                            "keywords": (keywords_e or "").strip(),
-                            "now": now,
-                            "user": os.getenv("USER", "admin"),
-                            "id": int(sel_id),
-                        })
-                    st.success("Vendor updated.")
+                        conn.execute(sql_text("DELETE FROM vendors WHERE id=:id"), {"id": int(sel_id)})
+                    st.success("Vendor deleted.")
                     st.experimental_rerun()
-
-            if delete_btn:
-                with engine.begin() as conn:
-                    conn.execute(sql_text("DELETE FROM vendors WHERE id=:id"), {"id": int(sel_id)})
-                st.success("Vendor deleted.")
-                st.experimental_rerun()
-
 
 # ---------- Category Admin
 with _tabs[2]:
@@ -553,6 +540,20 @@ with _tabs[4]:
                 "UPDATE vendors SET created_at=COALESCE(created_at, :now), updated_at=COALESCE(updated_at, :now)"
             ), {"now": now})
         st.success("Backfill complete.")
+
+    st.subheader("Apply seed.sql")
+    if st.button("Run seed.sql (categories/services)"):
+        try:
+            with open("seed.sql", "r", encoding="utf-8") as f:
+                sql_text_blob = f.read()
+            with engine.begin() as conn:
+                for stmt in sql_text_blob.split(";"):
+                    s = stmt.strip()
+                    if s:
+                        conn.execute(sql_text(s))
+            st.success("seed.sql applied.")
+        except Exception as e:
+            st.error(f"seed.sql failed: {e}")
 
 # ---------- Debug
 with _tabs[5]:
