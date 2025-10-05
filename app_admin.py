@@ -494,6 +494,19 @@ with _tabs[4]:
 
     st.subheader("Export / Import")
 
+# Export full, untruncated CSV of all columns/rows
+with engine.begin() as conn:
+    full = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
+st.download_button(
+    "Export all vendors (CSV)",
+    data=full.to_csv(index=False).encode("utf-8"),
+    file_name="providers.csv",
+    mime="text/csv",
+)
+
+    
+    st.subheader("Export / Import")
+
 # Export full, untruncated CSV
 if st.button("Export all vendors.csv"):
     with engine.begin() as conn:
