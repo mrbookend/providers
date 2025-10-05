@@ -91,10 +91,9 @@ def build_engine() -> Tuple[Engine, Dict]:
     # Embedded replica: local file that syncs to your remote Turso DB
     try:
         # Normalize sync_url: embedded REQUIRES libsql:// (no sqlite+libsql, no ?secure=true)
-        raw = url.strip()
+        raw = url
         if raw.startswith("sqlite+libsql://"):
-            host_and_maybe_q = raw.split("://", 1)[1]
-            host = host_and_maybe_q.split("?", 1)[0]   # drop any ?secure=true
+            host = raw.split("://", 1)[1].split("?", 1)[0]   # drop any ?secure=true
             sync_url = f"libsql://{host}"
         else:
             sync_url = raw  # assume already libsql://...
@@ -108,7 +107,8 @@ def build_engine() -> Tuple[Engine, Dict]:
             pool_pre_ping=True,
         )
         with eng.connect() as c:
-            c.execute(sql_text("SELECT 1"))
+            c.exec_driver_sql("select 1;")
+
         info.update({
             "using_remote": True,
             "strategy": "embedded_replica",
@@ -118,6 +118,18 @@ def build_engine() -> Tuple[Engine, Dict]:
             "sync_url": sync_url,
         })
         return eng, info
+
+    except Exception as e:
+        info["remote_error"] = f"{e}"
+        eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+        info.update({
+            "using_remote": False,
+            "sqlalchemy_url": "sqlite:///vendors.db",
+            "dialect": eng.dialect.name,
+            "driver": getattr(eng.dialect, "driver", ""),
+        })
+        return eng, info
+
 
 def ensure_schema(engine: Engine) -> None:
     stmts = [
