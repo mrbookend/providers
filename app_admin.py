@@ -264,24 +264,27 @@ with _tabs[0]:
         )
         return _df[mask]
 
-    view_cols = [
-        "id", "category", "service", "business_name", "contact_name", "phone",
-        "address", "website", "notes_short", "keywords_short"
-    ]
-    vdf = _filter(df, q)[view_cols].rename(columns={"notes_short": "notes", "keywords_short": "keywords"})
+view_cols = [
+    "id", "category", "service", "business_name", "contact_name", "phone",
+    "address", "website", "notes", "keywords"   # <-- use full fields
+]
+vdf = _filter(df, q)[view_cols]
 
-    st.data_editor(
-        vdf,
-        use_container_width=True,
-        hide_index=True,
-        disabled=True,
-        column_config={
-            "business_name": st.column_config.TextColumn("Provider"),
-            "website": st.column_config.LinkColumn("website"),
-            "notes": st.column_config.TextColumn(max_chars=150),
-            "keywords": st.column_config.TextColumn(max_chars=80),
-        },
-    )
+st.data_editor(
+    vdf,
+    use_container_width=False,  # <-- key change: allow horizontal scroll + user resizing
+    hide_index=True,
+    disabled=True,
+    column_config={
+        "business_name": st.column_config.TextColumn("Provider"),
+        # Keep Admin stable: website as plain text to avoid React hiccups
+        "website": st.column_config.TextColumn("website"),
+        # Seed generous starting widths; users can drag wider as needed
+        "notes": st.column_config.TextColumn(width=420),
+        "keywords": st.column_config.TextColumn(width=300),
+    },
+)
+
 
     st.download_button(
         "Download filtered view (CSV)",
