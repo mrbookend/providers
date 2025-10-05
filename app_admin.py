@@ -143,10 +143,6 @@ def build_engine() -> Tuple[Engine, Dict]:
         raise
 
 
-        # Prod: do NOT silently fall back
-        st.error("Remote DB unavailable and FORCE_LOCAL is not set. Aborting to protect data.")
-        raise
-
 
 
 def ensure_schema(engine: Engine) -> None:
