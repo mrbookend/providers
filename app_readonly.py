@@ -164,7 +164,7 @@ st.data_editor(
     hide_index=True,
     column_config={
         "category": st.column_config.TextColumn("Category"),
-        "business_name": st.column_config.TextColumn("Business Name"),
+        "business_name": st.column_config.TextColumn("Provider"),
         "contact_name": st.column_config.TextColumn("Contact Name"),
         "phone": st.column_config.TextColumn("Phone"),
         "address": st.column_config.TextColumn("Address"),
