@@ -101,17 +101,21 @@ def table_exists(engine: Engine, name: str) -> bool:
 # Data loading
 # -----------------------------
 def load_df(engine: Engine) -> pd.DataFrame:
+    # If initial sync hasn't brought the schema yet, render a friendly placeholder.
+    if not table_exists(engine, "vendors"):
+        st.info("Connecting to the database for the first time… initial sync may take a few seconds. Refresh to see data once available.")
+        expected = ["id","category","service","business_name","contact_name","phone","address","website","notes","keywords","created_at","updated_at","updated_by"]
+        return pd.DataFrame(columns=expected)
+
     # Default sort = Business Name (as requested)
     with engine.begin() as conn:
         df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
 
-    # Ensure expected columns exist & normalize NaNs to empty strings (for nicer display)
     expected = ["id","category","service","business_name","contact_name","phone","address","website","notes","keywords","created_at","updated_at","updated_by"]
     for col in expected:
         if col not in df.columns:
             df[col] = ""
     df = df.fillna("")
-
     return df
 
 # -----------------------------
