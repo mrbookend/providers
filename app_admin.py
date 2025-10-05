@@ -497,8 +497,9 @@ with _tabs[4]:
     st.subheader("Export / Import")
 
     # Export full, untruncated CSV of all columns/rows
+    query = "SELECT * FROM vendors ORDER BY lower(business_name)"
     with engine.begin() as conn:
-        full = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
+        full = pd.read_sql(sql_text(query), conn)
     st.download_button(
         "Export all vendors (CSV)",
         data=full.to_csv(index=False).encode("utf-8"),
@@ -531,7 +532,6 @@ with _tabs[4]:
                 "UPDATE vendors SET created_at=COALESCE(created_at, :now), updated_at=COALESCE(updated_at, :now)"
             ), {"now": now})
         st.success("Backfill complete.")
-
 
 
 # ---------- Debug
