@@ -63,72 +63,58 @@ def build_engine() -> Tuple[Engine, Dict]:
     url   = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
     token = (st.secrets.get("TURSO_AUTH_TOKEN")   or os.getenv("TURSO_AUTH_TOKEN")   or "").strip()
 
-    # Normalize URL to driver form for embedded replica "sync_url"
-    # Accept libsql://... (as returned by turso CLI)
+    # No remote URL? Use local file DB.
     if not url:
-        # No remote? fall back to local
         eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
-        info.update({"using_remote": False, "sqlalchemy_url": "sqlite:///vendors.db",
-                     "dialect": eng.dialect.name, "driver": getattr(eng.dialect, "driver", "")})
-        return eng, info
-
-    try:
-        # Embedded replica: local file + automatic sync to remote URL
-        eng = create_engine(
-            "sqlite+libsql:///vendors-embedded.db",
-            connect_args={
-                "auth_token": token,   # <- correct key for current client
-                "sync_url": url,       # <- the libsql://... from CLI
-            },
-            pool_pre_ping=True,
-        )
-        with eng.connect() as c:
-            c.execute(sql_text("SELECT 1"))
         info.update({
-            "using_remote": True,
-            "strategy": "embedded_replica",
-            "sqlalchemy_url": "sqlite+libsql:///vendors-embedded.db",
+            "using_remote": False,
+            "sqlalchemy_url": "sqlite:///vendors.db",
             "dialect": eng.dialect.name,
             "driver": getattr(eng.dialect, "driver", ""),
         })
         return eng, info
+
+    # Try embedded replica: local file that syncs to Turso
+    try:
+        eng = create_engine(
+            "sqlite+libsql:///vendors-embedded.db",
+            connect_args={
+                "auth_token": token,   # correct key for libsql-client 0.3.x
+                "sync_url": url,       # e.g. libsql://vendors-prod-...turso.io
+            },
+            pool_pre_ping=True,
+        )
     except Exception as e:
         info["remote_error"] = str(e)
+        eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+        info.update({
+            "using_remote": False,
+            "sqlalchemy_url": "sqlite:///vendors.db",
+            "dialect": eng.dialect.name,
+            "driver": getattr(eng.dialect, "driver", ""),
+        })
+        return eng, info
 
-    # Fallback to plain local file
-    eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
-    info.update({"using_remote": False, "sqlalchemy_url": "sqlite:///vendors.db",
-                 "dialect": eng.dialect.name, "driver": getattr(eng.dialect, "driver", "")})
-    return eng, info
+    # Sanity check connection
+    try:
+        with eng.connect() as c:
+            c.execute(sql_text("SELECT 1"))
+    except Exception as e:
+        info["remote_error"] = str(e)
+        eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+        info.update({
+            "using_remote": False,
+            "sqlalchemy_url": "sqlite:///vendors.db",
+            "dialect": eng.dialect.name,
+            "driver": getattr(eng.dialect, "driver", ""),
+        })
+        return eng, info
 
-        except Exception as e:
-            err = str(e)
-
-        # Fallback: embed token in URL as 'authToken' param
-        try:
-            url2 = f"{url}{'&' if '?' in url else '?'}authToken={token}"
-            eng = create_engine(url2, pool_pre_ping=True)
-            with eng.connect() as conn:
-                conn.execute(sql_text("SELECT 1"))
-            info.update({
-                "using_remote": True,
-                "strategy": "authToken_in_url",
-                "sqlalchemy_url": url2,
-                "dialect": eng.dialect.name,
-                "driver": getattr(eng.dialect, "driver", ""),
-            })
-            return eng, info
-        except Exception as e:
-            err = f"{err} | embed:{e}"
-
-
-    # Fallback to local SQLite
-    if err:
-        info["remote_error"] = err
-    eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+    # Success: using embedded replica
     info.update({
-        "using_remote": False,
-        "sqlalchemy_url": "sqlite:///vendors.db",
+        "using_remote": True,
+        "strategy": "embedded_replica",
+        "sqlalchemy_url": "sqlite+libsql:///vendors-embedded.db",
         "dialect": eng.dialect.name,
         "driver": getattr(eng.dialect, "driver", ""),
     })
