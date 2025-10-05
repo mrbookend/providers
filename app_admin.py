@@ -67,6 +67,9 @@ except Exception:
     pass
 # ---- end dialect registration ----
 
+# Small sanity check in Debug panel later:
+# st.write({"FORCE_LOCAL": os.getenv("FORCE_LOCAL")})
+
 
 # -----------------------------
 # DB helpers
@@ -119,16 +122,23 @@ def build_engine() -> Tuple[Engine, Dict]:
         })
         return eng, info
 
-    except Exception as e:
+     except Exception as e:
         info["remote_error"] = f"{e}"
-        eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
-        info.update({
-            "using_remote": False,
-            "sqlalchemy_url": "sqlite:///vendors.db",
-            "dialect": eng.dialect.name,
-            "driver": getattr(eng.dialect, "driver", ""),
-        })
-        return eng, info
+        allow_local = os.getenv("FORCE_LOCAL") == "1"
+        if allow_local:
+            eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+            info.update({
+                "using_remote": False,
+                "sqlalchemy_url": "sqlite:///vendors.db",
+                "dialect": eng.dialect.name,
+                "driver": getattr(eng.dialect, "driver", ""),
+            })
+            return eng, info
+
+        # Prod: do NOT silently fall back
+        st.error("Remote DB unavailable and FORCE_LOCAL is not set. Aborting to protect data.")
+        raise
+
 
 
 def ensure_schema(engine: Engine) -> None:
