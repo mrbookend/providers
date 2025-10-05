@@ -245,8 +245,7 @@ with _tabs[1]:
             st.success("Vendor added.")
             st.experimental_rerun()
 
-    st.divider()
- st.divider()
+st.divider()
 st.subheader("Edit / Delete Vendor")
 
 df_all = load_df(engine)
