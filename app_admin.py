@@ -253,7 +253,7 @@ with _tabs[1]:
     with st.form("add_vendor"):
         col1, col2 = st.columns(2)
         with col1:
-            business_name = st.text_input("Business Name *")
+            business_name = st.text_input("Provider *")
             category = st.selectbox("Category *", options=cats, index=0 if cats else None, placeholder="Select category")
             service = st.selectbox("Service (optional)", options=[""] + servs, index=0)
             contact_name = st.text_input("Contact Name")
