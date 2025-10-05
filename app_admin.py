@@ -246,68 +246,92 @@ with _tabs[1]:
             st.experimental_rerun()
 
     st.divider()
-    st.subheader("Edit / Delete Vendor")
-    df_all = load_df(engine)
+ st.divider()
+st.subheader("Edit / Delete Vendor")
+
+df_all = load_df(engine)
+
+# If no vendors yet, show a friendly hint and bail out safely
+if df_all.empty:
+    st.info("No vendors yet. Use 'Add Vendor' above to create your first record.")
+else:
     id_list = df_all["id"].tolist()
-    sel_id = st.selectbox("Select Vendor ID", options=id_list)
-    row = df_all[df_all["id"] == sel_id].iloc[0]
+    sel_id = st.selectbox("Select Vendor ID", options=id_list, index=0 if id_list else None)
 
-    with st.form("edit_vendor"):
-        col1, col2 = st.columns(2)
-        with col1:
-            business_name_e = st.text_input("Business Name *", row["business_name"])
-            category_e = st.selectbox("Category *", options=cats, index=(cats.index(row["category"]) if row["category"] in cats else 0))
-            service_e = st.selectbox("Service (optional)", options=[""] + servs, index=(([""] + servs).index(row["service"]) if str(row["service"]) in ([""] + servs) else 0))
-            contact_name_e = st.text_input("Contact Name", row["contact_name"] or "")
-            phone_e = st.text_input("Phone (10 digits or blank)", row["phone"] or "")
-        with col2:
-            address_e = st.text_area("Address", row["address"] or "", height=80)
-            website_e = st.text_input("Website (https://…)", row["website"] or "")
-            notes_e = st.text_area("Notes", row["notes"] or "", height=100)
-            keywords_e = st.text_input("Keywords (comma separated)", row["keywords"] or "")
-        c1, c2 = st.columns([1,1])
-        update_btn = c1.form_submit_button("Save Changes")
-        delete_btn = c2.form_submit_button("Delete Vendor", type="secondary")
-
-    if update_btn:
-        if not business_name_e or not category_e:
-            st.error("Business Name and Category are required.")
+    if sel_id is None:
+        st.info("Select a vendor to edit.")
+    else:
+        row_sel = df_all.loc[df_all["id"] == sel_id]
+        if row_sel.empty:
+            st.warning("Selected vendor not found. Try refreshing the page.")
         else:
-            phone_norm = _normalize_phone(phone_e)
-            url = _sanitize_url(website_e)
-            now = datetime.utcnow().isoformat(timespec="seconds")
-            with engine.begin() as conn:
-                conn.execute(sql_text(
-                    """
-                    UPDATE vendors
-                       SET category=:category, service=NULLIF(:service, ''), business_name=:business_name,
-                           contact_name=:contact_name, phone=:phone, address=:address,
-                           website=:website, notes=:notes, keywords=:keywords,
-                           updated_at=:now, updated_by=:user
-                     WHERE id=:id
-                    """
-                ), {
-                    "category": category_e.strip(),
-                    "service": (service_e or "").strip(),
-                    "business_name": business_name_e.strip(),
-                    "contact_name": contact_name_e.strip(),
-                    "phone": phone_norm,
-                    "address": address_e.strip(),
-                    "website": url,
-                    "notes": notes_e.strip(),
-                    "keywords": keywords_e.strip(),
-                    "now": now,
-                    "user": os.getenv("USER", "admin"),
-                    "id": int(sel_id),
-                })
-            st.success("Vendor updated.")
-            st.experimental_rerun()
+            row = row_sel.iloc[0]
 
-    if delete_btn:
-        with engine.begin() as conn:
-            conn.execute(sql_text("DELETE FROM vendors WHERE id=:id"), {"id": int(sel_id)})
-        st.success("Vendor deleted.")
-        st.experimental_rerun()
+            # Safe options for selects
+            cat_options = cats if cats else []
+            cat_index = (cat_options.index(row["category"])
+                         if row.get("category") in cat_options and cat_options else None)
+
+            svc_options = [""] + servs if servs else [""]
+            svc_index = (svc_options.index(row.get("service"))
+                         if str(row.get("service")) in svc_options else 0)
+
+            with st.form("edit_vendor"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    business_name_e = st.text_input("Business Name *", row.get("business_name", ""))
+                    category_e = st.selectbox("Category *", options=cat_options, index=cat_index)
+                    service_e = st.selectbox("Service (optional)", options=svc_options, index=svc_index)
+                    contact_name_e = st.text_input("Contact Name", row.get("contact_name", "") or "")
+                    phone_e = st.text_input("Phone (10 digits or blank)", row.get("phone", "") or "")
+                with col2:
+                    address_e = st.text_area("Address", row.get("address", "") or "", height=80)
+                    website_e = st.text_input("Website (https://…)", row.get("website", "") or "")
+                    notes_e = st.text_area("Notes", row.get("notes", "") or "", height=100)
+                    keywords_e = st.text_input("Keywords (comma separated)", row.get("keywords", "") or "")
+                c1, c2 = st.columns([1, 1])
+                update_btn = c1.form_submit_button("Save Changes")
+                delete_btn = c2.form_submit_button("Delete Vendor", type="secondary")
+
+            if update_btn:
+                if not business_name_e or not category_e:
+                    st.error("Business Name and Category are required.")
+                else:
+                    phone_norm = _normalize_phone(phone_e)
+                    url = _sanitize_url(website_e)
+                    now = datetime.utcnow().isoformat(timespec="seconds")
+                    with engine.begin() as conn:
+                        conn.execute(sql_text(
+                            """
+                            UPDATE vendors
+                               SET category=:category, service=NULLIF(:service, ''), business_name=:business_name,
+                                   contact_name=:contact_name, phone=:phone, address=:address,
+                                   website=:website, notes=:notes, keywords=:keywords,
+                                   updated_at=:now, updated_by=:user
+                             WHERE id=:id
+                            """
+                        ), {
+                            "category": (category_e or "").strip(),
+                            "service": (service_e or "").strip(),
+                            "business_name": (business_name_e or "").strip(),
+                            "contact_name": (contact_name_e or "").strip(),
+                            "phone": phone_norm,
+                            "address": (address_e or "").strip(),
+                            "website": url,
+                            "notes": (notes_e or "").strip(),
+                            "keywords": (keywords_e or "").strip(),
+                            "now": now,
+                            "user": os.getenv("USER", "admin"),
+                            "id": int(sel_id),
+                        })
+                    st.success("Vendor updated.")
+                    st.experimental_rerun()
+
+            if delete_btn:
+                with engine.begin() as conn:
+                    conn.execute(sql_text("DELETE FROM vendors WHERE id=:id"), {"id": int(sel_id)})
+                st.success("Vendor deleted.")
+                st.experimental_rerun()
 
 # ---------- Category Admin
 with _tabs[2]:
