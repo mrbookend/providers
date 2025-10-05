@@ -30,15 +30,15 @@ LEFT_PAD_PX = int(st.secrets.get("page_left_padding_px", 40)) if hasattr(st, "se
 st.markdown(
     f"""
     <style>
-      /* add a comfortable left gutter; keep right tight */
-      .block-container {{ margin-left: 0; margin-right: 0; padding-left: {LEFT_PAD_PX}px; padding-right: 0; }}
-      /* keep admin table on one line so you can horizontally scroll & manually resize */
+      [data-testid="stAppViewContainer"] .main .block-container {{
+        padding-left: {LEFT_PAD_PX}px !important;
+        padding-right: 0 !important;
+      }}
       div[data-testid="stDataFrame"] table {{ white-space: nowrap; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
-
 
 # -----------------------------
 # Admin sign-in gate (robust)
