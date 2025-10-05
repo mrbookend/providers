@@ -57,40 +57,50 @@ if not st.session_state["auth_ok"]:
 # DB helpers
 # -----------------------------
 def build_engine() -> Tuple[Engine, Dict]:
-    """Prefer Turso (libSQL) via sqlite+libsql driver; fallback to local SQLite."""
+    """Use Embedded Replica for Turso (syncs to remote), else fallback to local."""
     info: Dict = {}
 
-    # Prefer Secrets, then env
-    raw_url = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
-    token   = (st.secrets.get("TURSO_AUTH_TOKEN")   or os.getenv("TURSO_AUTH_TOKEN")   or "").strip()
+    url   = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
+    token = (st.secrets.get("TURSO_AUTH_TOKEN")   or os.getenv("TURSO_AUTH_TOKEN")   or "").strip()
 
-    # Normalize to the DRIVER form (NOT the libsql:// dialect)
-    # Accepts bare/wss/https/libsql and coerces to sqlite+libsql://... ?secure=true
-    url = raw_url
-    if url.startswith("libsql://"):
-        url = "sqlite+libsql://" + url[len("libsql://"):]
-    if not (url.startswith("sqlite+libsql://")):
-        host = url.replace("wss://", "").replace("https://", "")
-        if host:
-            url = f"sqlite+libsql://{host}"
-    if url and ("secure=" not in url and "tls=" not in url):
-        url = f"{url}{'&' if '?' in url else '?'}secure=true"
+    # Normalize URL to driver form for embedded replica "sync_url"
+    # Accept libsql://... (as returned by turso CLI)
+    if not url:
+        # No remote? fall back to local
+        eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+        info.update({"using_remote": False, "sqlalchemy_url": "sqlite:///vendors.db",
+                     "dialect": eng.dialect.name, "driver": getattr(eng.dialect, "driver", "")})
+        return eng, info
 
-      # Try remote with correct key for libsql-client 0.3.x: 'auth_token'
-    err = None
-    if url and token:
-        try:
-            eng = create_engine(url, connect_args={"auth_token": token}, pool_pre_ping=True)
-            with eng.connect() as conn:
-                conn.execute(sql_text("SELECT 1"))
-            info.update({
-                "using_remote": True,
-                "strategy": "auth_token_arg",
-                "sqlalchemy_url": url,
-                "dialect": eng.dialect.name,
-                "driver": getattr(eng.dialect, "driver", ""),
-            })
-            return eng, info
+    try:
+        # Embedded replica: local file + automatic sync to remote URL
+        eng = create_engine(
+            "sqlite+libsql:///vendors-embedded.db",
+            connect_args={
+                "auth_token": token,   # <- correct key for current client
+                "sync_url": url,       # <- the libsql://... from CLI
+            },
+            pool_pre_ping=True,
+        )
+        with eng.connect() as c:
+            c.execute(sql_text("SELECT 1"))
+        info.update({
+            "using_remote": True,
+            "strategy": "embedded_replica",
+            "sqlalchemy_url": "sqlite+libsql:///vendors-embedded.db",
+            "dialect": eng.dialect.name,
+            "driver": getattr(eng.dialect, "driver", ""),
+        })
+        return eng, info
+    except Exception as e:
+        info["remote_error"] = str(e)
+
+    # Fallback to plain local file
+    eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+    info.update({"using_remote": False, "sqlalchemy_url": "sqlite:///vendors.db",
+                 "dialect": eng.dialect.name, "driver": getattr(eng.dialect, "driver", "")})
+    return eng, info
+
         except Exception as e:
             err = str(e)
 
