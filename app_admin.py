@@ -264,27 +264,24 @@ with _tabs[0]:
         )
         return _df[mask]
 
-view_cols = [
-    "id", "category", "service", "business_name", "contact_name", "phone",
-    "address", "website", "notes", "keywords"   # <-- use full fields
-]
-vdf = _filter(df, q)[view_cols]
+    view_cols = [
+        "id", "category", "service", "business_name", "contact_name", "phone",
+        "address", "website", "notes", "keywords"
+    ]
+    vdf = _filter(df, q)[view_cols]
 
-st.data_editor(
-    vdf,
-    use_container_width=False,  # <-- key change: allow horizontal scroll + user resizing
-    hide_index=True,
-    disabled=True,
-    column_config={
-        "business_name": st.column_config.TextColumn("Provider"),
-        # Keep Admin stable: website as plain text to avoid React hiccups
-        "website": st.column_config.TextColumn("website"),
-        # Seed generous starting widths; users can drag wider as needed
-        "notes": st.column_config.TextColumn(width=420),
-        "keywords": st.column_config.TextColumn(width=300),
-    },
-)
-
+    st.data_editor(
+        vdf,
+        use_container_width=False,  # allow horizontal scroll + manual resizing
+        hide_index=True,
+        disabled=True,
+        column_config={
+            "business_name": st.column_config.TextColumn("Provider"),
+            "website": st.column_config.TextColumn("website"),
+            "notes": st.column_config.TextColumn(width=420),
+            "keywords": st.column_config.TextColumn(width=300),
+        },
+    )
 
     st.download_button(
         "Download filtered view (CSV)",
@@ -292,6 +289,7 @@ st.data_editor(
         file_name="providers.csv",
         mime="text/csv",
     )
+
 
 # ---------- Add/Edit/Delete Vendor
 
