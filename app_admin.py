@@ -325,7 +325,7 @@ with _tabs[1]:
                 with st.form("edit_vendor"):
                     col1, col2 = st.columns(2)
                     with col1:
-                        business_name_e = st.text_input("Business Name *", row.get("business_name", ""))
+                        business_name_e = st.text_input("Provider *", row.get("business_name", ""))
                         category_e = st.selectbox("Category *", options=cat_options, index=cat_index)
                         service_e = st.selectbox("Service (optional)", options=svc_options, index=svc_index)
                         contact_name_e = st.text_input("Contact Name", row.get("contact_name", "") or "")
