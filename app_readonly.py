@@ -85,6 +85,18 @@ def build_engine() -> tuple[Engine, dict]:
         })
         return engine, info
 
+def table_exists(engine: Engine, name: str) -> bool:
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                sql_text("SELECT name FROM sqlite_master WHERE type='table' AND name=:n"),
+                {"n": name},
+            ).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
 # -----------------------------
 # Data loading
 # -----------------------------
