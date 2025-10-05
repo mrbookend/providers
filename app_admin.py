@@ -226,7 +226,6 @@ def usage_count(engine: Engine, col: str, name: str) -> int:
 engine, engine_info = build_engine()
 ensure_schema(engine)
 
-st.title("Vendors — Admin")
 
 _tabs = st.tabs([
     "Browse Vendors",
