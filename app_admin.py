@@ -1,23 +1,3 @@
-# Fresh Start Bundle — Vendors App (Admin + Read‑only)
-
-> Drop these files into a clean GitHub repo. Follow the step‑by‑step in chat for setup.
-
----
-
-## app_admin.py
-
-```python
-# app_admin.py — Vendors Admin
-# Stable, no-AgGrid build. Remote Turso (libSQL) with safe local SQLite fallback.
-# Features
-# - Wide layout via secrets (page_title, page_max_width_px, sidebar_state)
-# - DB: Turso/libSQL via sqlite+libsql://… with auth token; guarded fallback to local SQLite vendors.db
-# - Browse Vendors: global search, sort, download CSV; Website shows as clickable link (native Streamlit LinkColumn)
-# - Add / Edit / Delete Vendor with validation
-# - Category Admin & Service Admin: add, rename, delete, usage counts, safe reassignment
-# - Maintenance: normalize phones, title-case names, backfill audit cols
-# - Debug: engine status and schema snapshot
-
 from __future__ import annotations
 
 import os
