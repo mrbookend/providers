@@ -484,13 +484,11 @@ with _tabs[5]:
         "services_columns": [c[1] for c in services_cols],
         "counts": counts,
     })
-```
 
 ---
 
 ## app_readonly.py
 
-```python
 # app_readonly.py — Read-only Vendors view
 # Stable, no-AgGrid build. Uses native Streamlit components with a global search and clickable website links.
 
@@ -625,13 +623,11 @@ if st.secrets.get("ADMIN_DEBUG", "false").lower() in ("1", "true", "yes"):  # op
         "vendors_columns": [c[1] for c in vendors_cols],
         "counts": counts,
     })
-```
 
 ---
 
 ## .streamlit/secrets.toml (template)
 
-```toml
 # Place this in a folder named ".streamlit" at the repo root for local runs.
 # On Streamlit Cloud, paste these as App Secrets (same keys; no need to include the [sections]).
 
@@ -655,19 +651,16 @@ ADMIN_DEBUG = "false"  # set to "true" to show readonly debug block
 # IMPORTANT: Use the *sqlite+libsql* DSN and include ?secure=true
 TURSO_DATABASE_URL = "sqlite+libsql://YOUR-DB-INSTANCE.turso.io?secure=true"
 TURSO_AUTH_TOKEN = "YOUR_LONG_JWT_TOKEN"
-```
 
 ---
 
 ## requirements.txt
 
-```txt
 streamlit==1.38.0
 pandas==2.2.2
 SQLAlchemy==2.0.32
 sqlalchemy-libsql==0.1.0
 libsql-client==0.3.9
-```
 
 > Notes:
 >
@@ -678,15 +671,12 @@ libsql-client==0.3.9
 
 ## runtime.txt
 
-```txt
 3.11
-```
-
+    
 ---
 
 ## Optional: seed.sql (create minimal libs)
 
-```sql
 INSERT OR IGNORE INTO categories(name) VALUES
   ("Home Repair & Trades"),
   ("Landscaping"),
@@ -696,32 +686,27 @@ INSERT OR IGNORE INTO services(name) VALUES
   ("Installations"),
   ("Repairs"),
   ("Maintenance");
-```
 
 ---
 
 ## README-QUICKSTART.md (mini)
 
-````markdown
 # Vendors App — Quick Start
 
 ## 1) New repo
-```bash
+
 git init vendors-app && cd vendors-app
 echo "# Vendors App" > README.md
 mkdir -p .streamlit
-````
 
 Copy files from this bundle into the repo (both apps, requirements.txt, runtime.txt, .streamlit/secrets.toml).
 
 ## 2) Local run (Python 3.11)
 
-```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 # (Optional) if no remote DB yet, a local vendors.db will be created on first run
 python -m streamlit run app_readonly.py
-```
 
 ## 3) Turso (libSQL) setup (once)
 
@@ -732,13 +717,11 @@ python -m streamlit run app_readonly.py
 
 ## 4) GitHub push
 
-```bash
 git add .
 git commit -m "fresh start: admin + readonly"
 git branch -M main
 git remote add origin https://github.com/<you>/vendors-app.git
 git push -u origin main
-```
 
 ## 5) Streamlit Cloud
 
@@ -752,5 +735,3 @@ git push -u origin main
 * Use **Read-only** for the community view.
 * Export CSV any time from either app.
 
-```
-```
