@@ -96,10 +96,10 @@ def build_engine() -> Tuple[Engine, Dict]:
         # Normalize sync_url: embedded REQUIRES libsql:// (no sqlite+libsql, no ?secure=true)
         raw = url
         if raw.startswith("sqlite+libsql://"):
-            host = raw.split("://", 1)[1].split("?", 1)[0]   # drop any ?secure=true
+            host = raw.split("://", 1)[1].split("?", 1)[0]  # drop any ?secure=true
             sync_url = f"libsql://{host}"
         else:
-            sync_url = raw  # assume already libsql://...
+            sync_url = raw  # already libsql://...
 
         eng = create_engine(
             "sqlite+libsql:///vendors-embedded.db",
@@ -120,9 +120,9 @@ def build_engine() -> Tuple[Engine, Dict]:
             "driver": getattr(eng.dialect, "driver", ""),
             "sync_url": sync_url,
         })
-    return eng, info
+        return eng, info
 
-     except Exception as e:
+    except Exception as e:
         info["remote_error"] = f"{e}"
         allow_local = os.getenv("FORCE_LOCAL") == "1"
         if allow_local:
@@ -134,6 +134,11 @@ def build_engine() -> Tuple[Engine, Dict]:
                 "driver": getattr(eng.dialect, "driver", ""),
             })
             return eng, info
+
+        # Prod: do NOT silently fall back
+        st.error("Remote DB unavailable and FORCE_LOCAL is not set. Aborting to protect data.")
+        raise
+
 
         # Prod: do NOT silently fall back
         st.error("Remote DB unavailable and FORCE_LOCAL is not set. Aborting to protect data.")
