@@ -398,7 +398,7 @@ with _tabs[2]:
                 with engine.begin() as conn:
                     conn.execute(sql_text("INSERT OR IGNORE INTO categories(name) VALUES(:n)"), {"n": new_cat.strip()})
                 st.success("Added (or already existed).")
-                st.experimental_rerun()
+                st.rerun()
 
         st.subheader("Rename Category")
         if cats:
@@ -412,7 +412,7 @@ with _tabs[2]:
                         conn.execute(sql_text("UPDATE categories SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
                         conn.execute(sql_text("UPDATE vendors SET category=:new WHERE category=:old"), {"new": new.strip(), "old": old})
                     st.success("Renamed and reassigned.")
-                    st.experimental_rerun()
+                    st.rerun()
 
     with colB:
         st.subheader("Delete / Reassign")
@@ -425,7 +425,7 @@ with _tabs[2]:
                     with engine.begin() as conn:
                         conn.execute(sql_text("DELETE FROM categories WHERE name=:n"), {"n": tgt})
                     st.success("Deleted.")
-                    st.experimental_rerun()
+                    st.rerun()
             else:
                 repl_options = [c for c in cats if c != tgt]
                 repl = st.selectbox("Reassign vendors to…", options=repl_options)
@@ -434,7 +434,7 @@ with _tabs[2]:
                         conn.execute(sql_text("UPDATE vendors SET category=:r WHERE category=:t"), {"r": repl, "t": tgt})
                         conn.execute(sql_text("DELETE FROM categories WHERE name=:t"), {"t": tgt})
                     st.success("Reassigned and deleted.")
-                    st.experimental_rerun()
+                    st.rerun()
 
 # ---------- Service Admin
 with _tabs[3]:
@@ -452,7 +452,7 @@ with _tabs[3]:
                 with engine.begin() as conn:
                     conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new_s.strip()})
                 st.success("Added (or already existed).")
-                st.experimental_rerun()
+                st.rerun()
 
         st.subheader("Rename Service")
         if servs:
@@ -466,7 +466,7 @@ with _tabs[3]:
                         conn.execute(sql_text("UPDATE services SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
                         conn.execute(sql_text("UPDATE vendors SET service=:new WHERE service=:old"), {"new": new.strip(), "old": old})
                     st.success("Renamed and reassigned.")
-                    st.experimental_rerun()
+                    st.rerun()
 
     with colB:
         st.subheader("Delete / Reassign")
@@ -479,7 +479,7 @@ with _tabs[3]:
                     with engine.begin() as conn:
                         conn.execute(sql_text("DELETE FROM services WHERE name=:n"), {"n": tgt})
                     st.success("Deleted.")
-                    st.experimental_rerun()
+                    st.rerun()
             else:
                 repl_options = [s for s in servs if s != tgt]
                 repl = st.selectbox("Reassign vendors to…", options=repl_options)
@@ -488,7 +488,7 @@ with _tabs[3]:
                         conn.execute(sql_text("UPDATE vendors SET service=:r WHERE service=:t"), {"r": repl, "t": tgt})
                         conn.execute(sql_text("DELETE FROM services WHERE name=:t"), {"t": tgt})
                     st.success("Reassigned and deleted.")
-                    st.experimental_rerun()
+                    st.rerun()
 
 # ---------- Maintenance
 with _tabs[4]:
