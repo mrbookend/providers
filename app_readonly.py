@@ -44,16 +44,21 @@ st.markdown(
     f"""
     <style>
       .block-container {{
-        max-width: {PAGE_MAX_WIDTH_PX}px;
+        margin-left: 0; margin-right: 0;
+        padding-left: 0; padding-right: 0;
+        max-width: 100%;
       }}
-      /* keep data editor readable */
+      /* Readonly: wrap text at words, allow tall rows as needed */
       div[data-testid="stDataFrame"] table {{
-        white-space: normal; /* allow wrap */
+        white-space: normal;
+        word-break: normal;
+        overflow-wrap: anywhere;
       }}
     </style>
     """,
     unsafe_allow_html=True,
 )
+
 
 # -----------------------------
 # DB Helpers
