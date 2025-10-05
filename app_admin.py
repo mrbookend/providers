@@ -238,11 +238,12 @@ with _tabs[0]:
     )
 
     st.download_button(
-        "Download vendors.csv",
-        data=vdf.to_csv(index=False).encode("utf-8"),
-        file_name="vendors.csv",
-        mime="text/csv",
-    )
+    "Download filtered view (CSV)",
+    data=vdf.to_csv(index=False).encode("utf-8"),
+    file_name="providers.csv",
+    mime="text/csv",
+)
+
 
 # ---------- Add/Edit/Delete
 with _tabs[1]:
