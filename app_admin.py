@@ -31,11 +31,12 @@ st.markdown(
 )
 
 # -----------------------------
-# Admin sign-in gate
+# Admin sign-in gate (robust)
 # -----------------------------
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", st.secrets.get("ADMIN_PASSWORD", ""))
+# Prefer Secrets (Cloud), fall back to env var. Strip whitespace just in case.
+ADMIN_PASSWORD = (st.secrets.get("ADMIN_PASSWORD") or os.getenv("ADMIN_PASSWORD") or "").strip()
 
-if not ADMIN_PASSWORD:
+if not isinstance(ADMIN_PASSWORD, str) or not ADMIN_PASSWORD:
     st.error("ADMIN_PASSWORD is not set in Secrets. Add it in Settings → Secrets.")
     st.stop()
 
@@ -46,7 +47,8 @@ if not st.session_state["auth_ok"]:
     st.subheader("Admin sign-in")
     pw = st.text_input("Password", type="password", key="admin_pw")
     if st.button("Sign in"):
-        if pw == ADMIN_PASSWORD:
+        # Compare trimmed, to ignore stray spaces pasted by accident.
+        if (pw or "").strip() == ADMIN_PASSWORD:
             st.session_state["auth_ok"] = True
             st.rerun()
         else:
