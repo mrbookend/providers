@@ -60,6 +60,12 @@ def build_engine() -> Tuple[Engine, Dict]:
     """Use Embedded Replica for Turso (syncs to remote), else fallback to local."""
     info: Dict = {}
 
+    try:
+    import sqlalchemy_libsql  # ensures 'sqlite+libsql' dialect is registered
+except Exception:
+    pass
+
+
     url   = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
     token = (st.secrets.get("TURSO_AUTH_TOKEN")   or os.getenv("TURSO_AUTH_TOKEN")   or "").strip()
 
