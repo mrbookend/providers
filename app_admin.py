@@ -56,8 +56,6 @@ if not st.session_state["auth_ok"]:
 # -----------------------------
 # DB helpers
 # -----------------------------
-
-    
 def build_engine() -> Tuple[Engine, Dict]:
     """Prefer Turso (libSQL) via sqlite+libsql driver; fallback to local SQLite."""
     info: Dict = {}
@@ -108,41 +106,6 @@ def build_engine() -> Tuple[Engine, Dict]:
     })
     return eng, info
 
-
-        except Exception as e:
-            info["remote_error_auth_token_arg"] = str(e)
-
-        # Try C: embed token in URL
-        try:
-            joiner = "&" if "?" in url else "?"
-            url2 = f"{url}{joiner}authToken={token}"
-            eng = create_engine(url2, pool_pre_ping=True)
-            with eng.connect() as conn:
-                conn.execute(sql_text("SELECT 1"))
-            info.update({"using_remote": True, "strategy": "authToken_in_url", "sqlalchemy_url": url2,
-                         "dialect": eng.dialect.name, "driver": getattr(eng.dialect, "driver", "")})
-            return eng, info
-        except Exception as e:
-            info["remote_error_authToken_in_url"] = str(e)
-
-    # Try D: no token (unlikely to work on private DBs, but harmless)
-    if url and not token:
-        try:
-            eng = create_engine(url, pool_pre_ping=True)
-            with eng.connect() as conn:
-                conn.execute(sql_text("SELECT 1"))
-            info.update({"using_remote": True, "strategy": "no_token", "sqlalchemy_url": url,
-                         "dialect": eng.dialect.name, "driver": getattr(eng.dialect, "driver", "")})
-            return eng, info
-        except Exception as e:
-            info["remote_error_no_token"] = str(e)
-
-    # Fallback to local SQLite file
-    eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
-    info.update({"using_remote": False, "sqlalchemy_url": "sqlite:///vendors.db",
-                 "dialect": eng.dialect.name, "driver": getattr(eng.dialect, "driver", "")})
-    return eng, info
-
 def ensure_schema(engine: Engine) -> None:
     stmts = [
         """
@@ -188,7 +151,7 @@ def _normalize_phone(val: str | None) -> str:
     digits = re.sub(r"\D", "", str(val))
     if len(digits) == 11 and digits.startswith("1"):
         digits = digits[1:]
-    return digits if len(digits) == 10 else digits  # keep as-is if not 10 digits
+    return digits if len(digits) == 10 else digits
 
 def _sanitize_url(url: str | None) -> str:
     if not url:
@@ -204,7 +167,6 @@ def load_df(engine: Engine) -> pd.DataFrame:
     for col in ["contact_name", "phone", "address", "website", "notes", "keywords", "service", "created_at", "updated_at", "updated_by"]:
         if col not in df.columns:
             df[col] = ""
-    # short previews for browse table (admin can edit in form)
     df["notes_short"] = df.get("notes", "").astype(str).str.replace("\n", " ").str.slice(0, 150)
     df["keywords_short"] = df.get("keywords", "").astype(str).str.replace("\n", " ").str.slice(0, 80)
     return df
@@ -269,7 +231,7 @@ with _tabs[0]:
         vdf,
         use_container_width=True,
         hide_index=True,
-        disabled=True,  # read-only grid (no per-column header filters)
+        disabled=True,
         column_config={
             "website": st.column_config.LinkColumn("website"),
             "notes": st.column_config.TextColumn(max_chars=150),
@@ -278,9 +240,9 @@ with _tabs[0]:
     )
 
     st.download_button(
-        "Download providers.csv",
+        "Download vendors.csv",
         data=vdf.to_csv(index=False).encode("utf-8"),
-        file_name="providers.csv",
+        file_name="vendors.csv",
         mime="text/csv",
     )
 
