@@ -241,7 +241,11 @@ _tabs = st.tabs([
 with _tabs[0]:
     df = load_df(engine)
     st.caption("Global search across key fields (case-insensitive; partial words).")
-    q = st.text_input("Search", placeholder="e.g., plumb returns any record with 'plumb' anywhere")
+    q = st.text_input(
+        "",
+        placeholder="Search — e.g., plumb returns any record with 'plumb' anywhere",
+        label_visibility="collapsed",
+    )
 
     def _filter(_df: pd.DataFrame, q: str) -> pd.DataFrame:
         if not q:
@@ -268,7 +272,7 @@ with _tabs[0]:
 
     st.data_editor(
         vdf,
-        use_container_width=False,  # allow horizontal scroll + manual resizing
+        use_container_width=False,
         hide_index=True,
         disabled=True,
         column_config={
@@ -285,7 +289,6 @@ with _tabs[0]:
         file_name="providers.csv",
         mime="text/csv",
     )
-
 
 # ---------- Add/Edit/Delete Vendor
 
