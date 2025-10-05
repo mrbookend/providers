@@ -76,16 +76,16 @@ def build_engine() -> Tuple[Engine, Dict]:
     if url and ("secure=" not in url and "tls=" not in url):
         url = f"{url}{'&' if '?' in url else '?'}secure=true"
 
-    # Try remote once with the official key 'authToken'
+      # Try remote with correct key for libsql-client 0.3.x: 'auth_token'
     err = None
     if url and token:
         try:
-            eng = create_engine(url, connect_args={"authToken": token}, pool_pre_ping=True)
+            eng = create_engine(url, connect_args={"auth_token": token}, pool_pre_ping=True)
             with eng.connect() as conn:
                 conn.execute(sql_text("SELECT 1"))
             info.update({
                 "using_remote": True,
-                "strategy": "authToken_arg",
+                "strategy": "auth_token_arg",
                 "sqlalchemy_url": url,
                 "dialect": eng.dialect.name,
                 "driver": getattr(eng.dialect, "driver", ""),
@@ -93,6 +93,24 @@ def build_engine() -> Tuple[Engine, Dict]:
             return eng, info
         except Exception as e:
             err = str(e)
+
+        # Fallback: embed token in URL as 'authToken' param
+        try:
+            url2 = f"{url}{'&' if '?' in url else '?'}authToken={token}"
+            eng = create_engine(url2, pool_pre_ping=True)
+            with eng.connect() as conn:
+                conn.execute(sql_text("SELECT 1"))
+            info.update({
+                "using_remote": True,
+                "strategy": "authToken_in_url",
+                "sqlalchemy_url": url2,
+                "dialect": eng.dialect.name,
+                "driver": getattr(eng.dialect, "driver", ""),
+            })
+            return eng, info
+        except Exception as e:
+            err = f"{err} | embed:{e}"
+
 
     # Fallback to local SQLite
     if err:
