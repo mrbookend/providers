@@ -78,17 +78,58 @@ def _sanitize_url(url: str | None) -> str:
 def build_engine() -> Tuple[Engine, Dict]:
     """Prefer Turso (libSQL); fallback to local SQLite. Returns (engine, info)."""
     info: Dict = {}
-    turso_url = os.getenv("TURSO_DATABASE_URL", st.secrets.get("TURSO_DATABASE_URL", ""))
-    turso_token = os.getenv("TURSO_AUTH_TOKEN", st.secrets.get("TURSO_AUTH_TOKEN", ""))
 
-    engine: Engine | None = None
-    if turso_url and turso_token:
+    raw_url = (os.getenv("TURSO_DATABASE_URL") or st.secrets.get("TURSO_DATABASE_URL") or "").strip()
+    token   = (os.getenv("TURSO_AUTH_TOKEN")   or st.secrets.get("TURSO_AUTH_TOKEN")   or "").strip()
+
+    def _normalize(url: str) -> str:
+        if not url:
+            return ""
+        # KEEP the driver scheme if provided; do NOT convert to 'libsql://'
+        if url.startswith("sqlite+libsql://") or url.startswith("libsql://"):
+            norm = url
+        else:
+            # Allow bare/wss/https host; prefer driver scheme
+            host = url.replace("wss://", "").replace("https://", "")
+            norm = f"sqlite+libsql://{host}"
+        # Ensure secure=true param exists
+        if "secure=" not in norm and "tls=" not in norm:
+            norm = f"{norm}{'&' if '?' in norm else '?'}secure=true"
+        return norm
+
+    url = _normalize(raw_url)
+
+    # Try strategies with proper token passing
+    attempts: list[tuple[str, dict]] = []
+    if url and token:
+        attempts.append(("authToken_arg",     dict(url=url, connect_args={"authToken": token})))
+        attempts.append(("auth_token_arg",    dict(url=url, connect_args={"auth_token": token})))
+        # As a last resort, embed token in URL
+        attempts.append(("authToken_in_url",  dict(url=f"{url}{'&' if '?' in url else '?'}authToken={token}", connect_args={})))
+    elif url:
+        attempts.append(("no_token",          dict(url=url, connect_args={})))
+
+    for name, cfg in attempts:
         try:
-            engine = create_engine(turso_url, connect_args={"auth_token": turso_token}, pool_pre_ping=True)
-            with engine.connect() as conn:
+            eng = create_engine(cfg["url"], connect_args=cfg.get("connect_args", {}), pool_pre_ping=True)
+            with eng.connect() as conn:
                 conn.execute(sql_text("SELECT 1"))
-            info.update({"using_remote": True, "sqlalchemy_url": turso_url, "dialect": engine.dialect.name, "driver": getattr(engine.dialect, "driver", "")})
-            return engine, info
+            info.update({
+                "using_remote": True,
+                "strategy": name,
+                "sqlalchemy_url": cfg["url"],
+                "dialect": eng.dialect.name,
+                "driver": getattr(eng.dialect, "driver", ""),
+            })
+            return eng, info
+        except Exception as e:
+            info[f"remote_error_{name}"] = str(e)
+
+    # Fallback to local SQLite file
+    eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+    info.update({"using_remote": False, "sqlalchemy_url": "sqlite:///vendors.db", "dialect": eng.dialect.name, "driver": getattr(eng.dialect, "driver", "")})
+    return eng, info
+
         except Exception as e:
             info["remote_error"] = str(e)
 
