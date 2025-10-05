@@ -553,20 +553,3 @@ def load_df(engine: Engine) -> pd.DataFrame:
     df["keywords"] = df["keywords"].astype(str).str.replace("\n", " ").str.slice(0, 80)
     return df
 
-
-
-# Debug at bottom (optional)
-if st.secrets.get("ADMIN_DEBUG", "false").lower() in ("1", "true", "yes"):  # opt-in
-    st.divider()
-    st.subheader("Status & Secrets (debug)")
-    st.json(engine_info)
-
-    with engine.begin() as conn:
-        vendors_cols = conn.execute(sql_text("PRAGMA table_info(vendors)")).fetchall()
-        counts = {"vendors": conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0}
-    st.write("DB Probe")
-    st.json({
-        "vendors_columns": [c[1] for c in vendors_cols],
-        "counts": counts,
-    })
-
