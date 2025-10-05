@@ -553,61 +553,7 @@ def load_df(engine: Engine) -> pd.DataFrame:
     df["keywords"] = df["keywords"].astype(str).str.replace("\n", " ").str.slice(0, 80)
     return df
 
-# -----------------------------
-# UI
-# -----------------------------
-engine, engine_info = build_engine()
-st.title("Vendors — Read‑only")
 
-help_title = st.secrets.get("READONLY_HELP_TITLE", "Provider Help / Tips")
-help_md = st.secrets.get("READONLY_HELP_MD", "")
-with st.expander(help_title, expanded=False):
-    st.markdown(help_md or "Use the search box to find vendors by name, category, service, or keywords.")
-
-st.caption("Global search (case-insensitive; partial words ok). No per-column filters.")
-q = st.text_input("Search", placeholder="e.g., plumb returns any record with 'plumb' anywhere")
-
-raw = load_df(engine)
-
-if q:
-    qq = re.escape(q)
-    m = (
-        raw["category"].str.contains(qq, case=False, na=False) |
-        raw["service"].astype(str).str.contains(qq, case=False, na=False) |
-        raw["business_name"].str.contains(qq, case=False, na=False) |
-        raw["contact_name"].astype(str).str.contains(qq, case=False, na=False) |
-        raw["phone"].astype(str).str.contains(qq, case=False, na=False) |
-        raw["address"].astype(str).str.contains(qq, case=False, na=False) |
-        raw["website"].astype(str).str.contains(qq, case=False, na=False) |
-        raw["notes"].astype(str).str.contains(qq, case=False, na=False) |
-        raw["keywords"].astype(str).str.contains(qq, case=False, na=False)
-    )
-    df = raw[m]
-else:
-    df = raw
-
-cols = ["category", "business_name", "contact_name", "phone", "address", "website", "notes", "service", "keywords", "id"]
-view = df[cols]
-
-st.data_editor(
-    view,
-    use_container_width=True,
-    disabled=True,
-    hide_index=True,
-    column_config={
-        "website": st.column_config.LinkColumn("website"),
-        "phone": st.column_config.TextColumn("phone"),
-        "notes": st.column_config.TextColumn(max_chars=150),
-        "keywords": st.column_config.TextColumn(max_chars=80),
-    },
-)
-
-st.download_button(
-    "Download providers.csv",
-    data=view.to_csv(index=False).encode("utf-8"),
-    file_name="providers.csv",
-    mime="text/csv",
-)
 
 # Debug at bottom (optional)
 if st.secrets.get("ADMIN_DEBUG", "false").lower() in ("1", "true", "yes"):  # opt-in
