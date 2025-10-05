@@ -294,7 +294,8 @@ with _tabs[1]:
                     "user": os.getenv("USER", "admin"),
                 })
             st.success("Vendor added.")
-            st.experimental_rerun()
+            st.rerun()
+
 
     st.divider()
     st.subheader("Edit / Delete Vendor")
