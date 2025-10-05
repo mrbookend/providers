@@ -374,7 +374,7 @@ with _tabs[1]:
                                 "id": int(sel_id),
                             })
                         st.success("Vendor updated.")
-                        st.experimental_rerun()
+                        st.rerun()
 
                 if delete_btn:
                     with engine.begin() as conn:
