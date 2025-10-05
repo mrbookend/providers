@@ -68,6 +68,12 @@ except Exception:
 # ---- end dialect registration ----
 
 
+# -----------------------------
+# DB helpers
+# -----------------------------
+def build_engine() -> Tuple[Engine, Dict]:
+    """Use Embedded Replica for Turso (syncs to remote), else fallback to local."""
+    info: Dict = {}
 
     url   = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
     token = (st.secrets.get("TURSO_AUTH_TOKEN")   or os.getenv("TURSO_AUTH_TOKEN")   or "").strip()
@@ -112,6 +118,7 @@ except Exception:
             "driver": getattr(eng.dialect, "driver", ""),
         })
         return eng, info
+
 
 def ensure_schema(engine: Engine) -> None:
     stmts = [
