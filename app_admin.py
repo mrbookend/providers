@@ -25,17 +25,20 @@ SIDEBAR_STATE = st.secrets.get("sidebar_state", "expanded") if hasattr(st, "secr
 
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
 
+LEFT_PAD_PX = int(st.secrets.get("page_left_padding_px", 40)) if hasattr(st, "secrets") else 40
+
 st.markdown(
-    """
+    f"""
     <style>
-      /* remove side margins, use full width */
-      .block-container { margin-left: 0; margin-right: 0; padding-left: 0; padding-right: 0; }
+      /* add a comfortable left gutter; keep right tight */
+      .block-container {{ margin-left: 0; margin-right: 0; padding-left: {LEFT_PAD_PX}px; padding-right: 0; }}
       /* keep admin table on one line so you can horizontally scroll & manually resize */
-      div[data-testid="stDataFrame"] table { white-space: nowrap; }
+      div[data-testid="stDataFrame"] table {{ white-space: nowrap; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
+
 
 # -----------------------------
 # Admin sign-in gate (robust)
