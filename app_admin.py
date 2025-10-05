@@ -494,31 +494,20 @@ with _tabs[4]:
 
     st.subheader("Export / Import")
 
-# Export full, untruncated CSV of all columns/rows
-with engine.begin() as conn:
-    full = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
-st.download_button(
-    "Export all vendors (CSV)",
-    data=full.to_csv(index=False).encode("utf-8"),
-    file_name="providers.csv",
-    mime="text/csv",
-)
-
-    
-    st.subheader("Export / Import")
-
-# Export full, untruncated CSV
-if st.button("Export all vendors.csv"):
+    # Export full, untruncated CSV of all columns/rows
     with engine.begin() as conn:
         full = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
     st.download_button(
-        "Download vendors.csv",
+        "Export all vendors (CSV)",
         data=full.to_csv(index=False).encode("utf-8"),
         file_name="providers.csv",
         mime="text/csv",
     )
 
+    st.divider()
+    st.subheader("Data cleanup")
 
+    # Normalize phones and title-case names
     if st.button("Normalize phones (digits only) & title-case business/contacts"):
         with engine.begin() as conn:
             rows = conn.execute(sql_text("SELECT id, phone, business_name, contact_name FROM vendors")).fetchall()
@@ -532,6 +521,7 @@ if st.button("Export all vendors.csv"):
                 ), {"p": phone_norm, "b": bname, "c": cname, "id": pid})
         st.success("Normalization complete.")
 
+    # Backfill timestamps
     if st.button("Backfill created_at/updated_at when missing"):
         now = datetime.utcnow().isoformat(timespec="seconds")
         with engine.begin() as conn:
@@ -540,19 +530,6 @@ if st.button("Export all vendors.csv"):
             ), {"now": now})
         st.success("Backfill complete.")
 
-    st.subheader("Apply seed.sql")
-    if st.button("Run seed.sql (categories/services)"):
-        try:
-            with open("seed.sql", "r", encoding="utf-8") as f:
-                sql_text_blob = f.read()
-            with engine.begin() as conn:
-                for stmt in sql_text_blob.split(";"):
-                    s = stmt.strip()
-                    if s:
-                        conn.execute(sql_text(s))
-            st.success("seed.sql applied.")
-        except Exception as e:
-            st.error(f"seed.sql failed: {e}")
 
 # ---------- Debug
 with _tabs[5]:
