@@ -56,72 +56,49 @@ if not st.session_state["auth_ok"]:
 # -----------------------------
 # DB helpers
 # -----------------------------
+
+    
 def build_engine() -> Tuple[Engine, Dict]:
     """Prefer Turso (libSQL) via sqlite+libsql driver; fallback to local SQLite."""
     info: Dict = {}
 
-    # Prefer Secrets (Cloud), then env as fallback
+    # Prefer Secrets, then env
     raw_url = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
     token   = (st.secrets.get("TURSO_AUTH_TOKEN")   or os.getenv("TURSO_AUTH_TOKEN")   or "").strip()
 
-    def _force_driver_scheme(url: str) -> str:
-        if not url:
-            return ""
-        # If user pasted the dialect form, convert it to the driver form
-        if url.startswith("libsql://"):
-            url = "sqlite+libsql://" + url[len("libsql://"):]
-        # If bare host or wss/https, coerce to driver form
-        if not (url.startswith("sqlite+libsql://")):
-            host = url.replace("wss://", "").replace("https://", "")
-            if not host.startswith("sqlite+libsql://"):
-                url = f"sqlite+libsql://{host}"
-        # Ensure secure parameter
-        if "secure=" not in url and "tls=" not in url:
-            url = f"{url}{'&' if '?' in url else '?'}secure=true"
-        return url
+    # Normalize to the DRIVER form (NOT the libsql:// dialect)
+    # Accepts bare/wss/https/libsql and coerces to sqlite+libsql://... ?secure=true
+    url = raw_url
+    if url.startswith("libsql://"):
+        url = "sqlite+libsql://" + url[len("libsql://"):]
+    if not (url.startswith("sqlite+libsql://")):
+        host = url.replace("wss://", "").replace("https://", "")
+        if host:
+            url = f"sqlite+libsql://{host}"
+    if url and ("secure=" not in url and "tls=" not in url):
+        url = f"{url}{'&' if '?' in url else '?'}secure=true"
 
-    url = _force_driver_scheme(raw_url)
-
-    # Try with token as 'authToken' (preferred), then 'auth_token', then token in URL
+    # Try remote once with the official key 'authToken'
+    err = None
     if url and token:
-        for strategy, connect_args, url_over in [
-            ("authToken_arg",   {"authToken": token}, url),
-            ("auth_token_arg",  {"auth_token": token}, url),
-            ("authToken_in_url", {}, f"{url}{'&' if '?' in url else '?'}authToken={token}"),
-        ]:
-            try:
-                eng = create_engine(url_over, connect_args=connect_args, pool_pre_ping=True)
-                with eng.connect() as conn:
-                    conn.execute(sql_text("SELECT 1"))
-                info.update({
-                    "using_remote": True,
-                    "strategy": strategy,
-                    "sqlalchemy_url": url_over,
-                    "dialect": eng.dialect.name,
-                    "driver": getattr(eng.dialect, "driver", ""),
-                })
-                return eng, info
-            except Exception as e:
-                info[f"remote_error_{strategy}"] = str(e)
-
-    # Optional: try no token (public DBs only; usually fails)
-    if url and not token:
         try:
-            eng = create_engine(url, pool_pre_ping=True)
+            eng = create_engine(url, connect_args={"authToken": token}, pool_pre_ping=True)
             with eng.connect() as conn:
                 conn.execute(sql_text("SELECT 1"))
             info.update({
                 "using_remote": True,
-                "strategy": "no_token",
+                "strategy": "authToken_arg",
                 "sqlalchemy_url": url,
                 "dialect": eng.dialect.name,
                 "driver": getattr(eng.dialect, "driver", ""),
             })
             return eng, info
         except Exception as e:
-            info["remote_error_no_token"] = str(e)
+            err = str(e)
 
-    # Fallback to local
+    # Fallback to local SQLite
+    if err:
+        info["remote_error"] = err
     eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
     info.update({
         "using_remote": False,
@@ -130,6 +107,7 @@ def build_engine() -> Tuple[Engine, Dict]:
         "driver": getattr(eng.dialect, "driver", ""),
     })
     return eng, info
+
 
         except Exception as e:
             info["remote_error_auth_token_arg"] = str(e)
