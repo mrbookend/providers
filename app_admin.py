@@ -380,7 +380,7 @@ with _tabs[1]:
                     with engine.begin() as conn:
                         conn.execute(sql_text("DELETE FROM vendors WHERE id=:id"), {"id": int(sel_id)})
                     st.success("Vendor deleted.")
-                    st.experimental_rerun()
+                    st.rerun()
 
 # ---------- Category Admin
 with _tabs[2]:
