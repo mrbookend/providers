@@ -231,6 +231,7 @@ with _tabs[0]:
         hide_index=True,
         disabled=True,
         column_config={
+            "business_name": st.column_config.TextColumn("Provider"),
             "website": st.column_config.LinkColumn("website"),
             "notes": st.column_config.TextColumn(max_chars=150),
             "keywords": st.column_config.TextColumn(max_chars=80),
