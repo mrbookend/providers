@@ -491,6 +491,20 @@ with _tabs[3]:
 with _tabs[4]:
     st.caption("One-click cleanups for legacy data.")
 
+    st.subheader("Export / Import")
+
+# Export full, untruncated CSV
+if st.button("Export all vendors.csv"):
+    with engine.begin() as conn:
+        full = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
+    st.download_button(
+        "Download vendors.csv",
+        data=full.to_csv(index=False).encode("utf-8"),
+        file_name="providers.csv",
+        mime="text/csv",
+    )
+
+
     if st.button("Normalize phones (digits only) & title-case business/contacts"):
         with engine.begin() as conn:
             rows = conn.execute(sql_text("SELECT id, phone, business_name, contact_name FROM vendors")).fetchall()
