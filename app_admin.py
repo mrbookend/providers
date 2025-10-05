@@ -63,7 +63,6 @@ def build_engine() -> Tuple[Engine, Dict]:
     url   = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
     token = (st.secrets.get("TURSO_AUTH_TOKEN")   or os.getenv("TURSO_AUTH_TOKEN")   or "").strip()
 
-    # No remote URL? Use local file DB.
     if not url:
         eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
         info.update({
@@ -74,31 +73,26 @@ def build_engine() -> Tuple[Engine, Dict]:
         })
         return eng, info
 
-    # Try embedded replica: local file that syncs to Turso
+    # Embedded replica: local file that syncs to your remote Turso DB
     try:
         eng = create_engine(
             "sqlite+libsql:///vendors-embedded.db",
             connect_args={
-                "auth_token": token,   # correct key for libsql-client 0.3.x
-                "sync_url": url,       # e.g. libsql://vendors-prod-...turso.io
+                "auth_token": token,
+                "sync_url": url,   # e.g. libsql://vendors-prod-...turso.io
             },
             pool_pre_ping=True,
         )
-    except Exception as e:
-        info["remote_error"] = str(e)
-        eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
-        info.update({
-            "using_remote": False,
-            "sqlalchemy_url": "sqlite:///vendors.db",
-            "dialect": eng.dialect.name,
-            "driver": getattr(eng.dialect, "driver", ""),
-        })
-        return eng, info
-
-    # Sanity check connection
-    try:
         with eng.connect() as c:
             c.execute(sql_text("SELECT 1"))
+        info.update({
+            "using_remote": True,
+            "strategy": "embedded_replica",
+            "sqlalchemy_url": "sqlite+libsql:///vendors-embedded.db",
+            "dialect": eng.dialect.name,
+            "driver": getattr(eng.dialect, "driver", ""),
+        })
+        return eng, info
     except Exception as e:
         info["remote_error"] = str(e)
         eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
@@ -109,16 +103,6 @@ def build_engine() -> Tuple[Engine, Dict]:
             "driver": getattr(eng.dialect, "driver", ""),
         })
         return eng, info
-
-    # Success: using embedded replica
-    info.update({
-        "using_remote": True,
-        "strategy": "embedded_replica",
-        "sqlalchemy_url": "sqlite+libsql:///vendors-embedded.db",
-        "dialect": eng.dialect.name,
-        "driver": getattr(eng.dialect, "driver", ""),
-    })
-    return eng, info
 
 def ensure_schema(engine: Engine) -> None:
     stmts = [
