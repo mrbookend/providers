@@ -85,50 +85,72 @@ def build_engine() -> Tuple[Engine, Dict]:
     def _normalize(url: str) -> str:
         if not url:
             return ""
-        # KEEP the driver scheme if provided; do NOT convert to 'libsql://'
+        # Keep driver scheme; DO NOT convert to libsql:// (dialect)
         if url.startswith("sqlite+libsql://") or url.startswith("libsql://"):
             norm = url
         else:
-            # Allow bare/wss/https host; prefer driver scheme
             host = url.replace("wss://", "").replace("https://", "")
             norm = f"sqlite+libsql://{host}"
-        # Ensure secure=true param exists
         if "secure=" not in norm and "tls=" not in norm:
             norm = f"{norm}{'&' if '?' in norm else '?'}secure=true"
         return norm
 
     url = _normalize(raw_url)
 
-    # Try strategies with proper token passing
-    attempts: list[tuple[str, dict]] = []
+    # Try A: pass token as 'authToken'
     if url and token:
-        attempts.append(("authToken_arg",     dict(url=url, connect_args={"authToken": token})))
-        attempts.append(("auth_token_arg",    dict(url=url, connect_args={"auth_token": token})))
-        # As a last resort, embed token in URL
-        attempts.append(("authToken_in_url",  dict(url=f"{url}{'&' if '?' in url else '?'}authToken={token}", connect_args={})))
-    elif url:
-        attempts.append(("no_token",          dict(url=url, connect_args={})))
-
-    for name, cfg in attempts:
         try:
-            eng = create_engine(cfg["url"], connect_args=cfg.get("connect_args", {}), pool_pre_ping=True)
+            eng = create_engine(url, connect_args={"authToken": token}, pool_pre_ping=True)
             with eng.connect() as conn:
                 conn.execute(sql_text("SELECT 1"))
-            info.update({
-                "using_remote": True,
-                "strategy": name,
-                "sqlalchemy_url": cfg["url"],
-                "dialect": eng.dialect.name,
-                "driver": getattr(eng.dialect, "driver", ""),
-            })
+            info.update({"using_remote": True, "strategy": "authToken_arg", "sqlalchemy_url": url,
+                         "dialect": eng.dialect.name, "driver": getattr(eng.dialect, "driver", "")})
             return eng, info
         except Exception as e:
-            info[f"remote_error_{name}"] = str(e)
+            info["remote_error_authToken_arg"] = str(e)
+
+        # Try B: pass token as 'auth_token'
+        try:
+            eng = create_engine(url, connect_args={"auth_token": token}, pool_pre_ping=True)
+            with eng.connect() as conn:
+                conn.execute(sql_text("SELECT 1"))
+            info.update({"using_remote": True, "strategy": "auth_token_arg", "sqlalchemy_url": url,
+                         "dialect": eng.dialect.name, "driver": getattr(eng.dialect, "driver", "")})
+            return eng, info
+        except Exception as e:
+            info["remote_error_auth_token_arg"] = str(e)
+
+        # Try C: embed token in URL
+        try:
+            joiner = "&" if "?" in url else "?"
+            url2 = f"{url}{joiner}authToken={token}"
+            eng = create_engine(url2, pool_pre_ping=True)
+            with eng.connect() as conn:
+                conn.execute(sql_text("SELECT 1"))
+            info.update({"using_remote": True, "strategy": "authToken_in_url", "sqlalchemy_url": url2,
+                         "dialect": eng.dialect.name, "driver": getattr(eng.dialect, "driver", "")})
+            return eng, info
+        except Exception as e:
+            info["remote_error_authToken_in_url"] = str(e)
+
+    # Try D: no token (shouldn’t work for private DBs, but harmless to try)
+    if url and not token:
+        try:
+            eng = create_engine(url, pool_pre_ping=True)
+            with eng.connect() as conn:
+                conn.execute(sql_text("SELECT 1"))
+            info.update({"using_remote": True, "strategy": "no_token", "sqlalchemy_url": url,
+                         "dialect": eng.dialect.name, "driver": getattr(eng.dialect, "driver", "")})
+            return eng, info
+        except Exception as e:
+            info["remote_error_no_token"] = str(e)
 
     # Fallback to local SQLite file
     eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
-    info.update({"using_remote": False, "sqlalchemy_url": "sqlite:///vendors.db", "dialect": eng.dialect.name, "driver": getattr(eng.dialect, "driver", "")})
+    info.update({"using_remote": False, "sqlalchemy_url": "sqlite:///vendors.db",
+                 "dialect": eng.dialect.name, "driver": getattr(eng.dialect, "driver", "")})
     return eng, info
+
 
         except Exception as e:
             info["remote_error"] = str(e)
