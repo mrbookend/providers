@@ -244,7 +244,6 @@ with _tabs[1]:
                 })
             st.success("Vendor added.")
             st.experimental_rerun()
-
 st.divider()
 st.subheader("Edit / Delete Vendor")
 
@@ -331,6 +330,7 @@ else:
                     conn.execute(sql_text("DELETE FROM vendors WHERE id=:id"), {"id": int(sel_id)})
                 st.success("Vendor deleted.")
                 st.experimental_rerun()
+
 
 # ---------- Category Admin
 with _tabs[2]:
