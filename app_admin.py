@@ -62,9 +62,6 @@ if not st.session_state["auth_ok"]:
             st.error("Incorrect password.")
     st.stop()
 
-# -----------------------------
-# DB helpers
-# -----------------------------
 
 
 
@@ -696,7 +693,6 @@ with _tabs[3]:
                     st.success("Reassigned and deleted.")
                     st.rerun()
 
-# ---------- Maintenance
 # ---------- Maintenance
 with _tabs[4]:
     st.caption("One-click cleanups for legacy data.")
