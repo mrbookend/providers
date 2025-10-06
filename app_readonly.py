@@ -233,11 +233,11 @@ if wrap_cols:
 # Startup column widths (adjust here)
 widths = {
     "category":      "140px",
-    "service":       "120px",
-    "provider":      "240px",  # was "business_name"
-    "contact_name":  "160px",
-    "phone":         "120px",
-    "address":       "2200px",
+    "service":       "90px",
+    "provider":      "200px",  # was "business_name"
+    "contact_name":  "120px",
+    "phone":         "140px",
+    "address":       "200px",
     "website":       "320px",
     "notes":         "420px",
 }
