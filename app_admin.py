@@ -359,7 +359,7 @@ with _tabs[1]:
     st.divider()
     st.subheader("Edit / Delete Vendor")
 
-      df_all = load_df(engine)
+    df_all = load_df(engine)
 
     if df_all.empty:
         st.info("No vendors yet. Use 'Add Vendor' above to create your first record.")
