@@ -198,10 +198,9 @@ def _execute_append_only(
     return inserted
 # --- /CSV Restore helpers ---
 
-
-def build_engine() -> tuple[Engine, Dict]:
+def build_engine() -> tuple[Engine, dict]:
     """Use Embedded Replica for Turso (syncs to remote), else fallback to local."""
-    info: Dict = {}
+    info: dict = {}
 
     url   = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
     token = (st.secrets.get("TURSO_AUTH_TOKEN")   or os.getenv("TURSO_AUTH_TOKEN")   or "").strip()
@@ -588,12 +587,6 @@ with _tabs[1]:
                     st.success("Vendor deleted.")
                     st.rerun()
 
-
-                if delete_btn:
-                    with engine.begin() as conn:
-                        conn.execute(sql_text("DELETE FROM vendors WHERE id=:id"), {"id": int(sel_id)})
-                    st.success("Vendor deleted.")
-                    st.rerun()
 
 # ---------- Category Admin
 with _tabs[2]:
