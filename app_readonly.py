@@ -199,7 +199,7 @@ with _tabs[0]:
 
     # Clickable website links in the static table (don’t escape HTML here)
     if "website" in grid_df.columns:
-        styled = styled.format({"website": _linkify}, escape=False)
+        styled = styled.format({"website": _linkify}, escape=None)
 
     # Hide the index in the rendered table
     styled = styled.hide(axis="index")
