@@ -248,9 +248,10 @@ if "website" in grid_df.columns:
 # Hide the index (first unlabeled column)
 styled = styled.hide(axis="index")
 
-# Render as static HTML (keeps wrap + auto row height)
+# Render as static HTML (keeps wrap + auto row height)  [REPLACED]
 html = styled.to_html()
-st.markdown(html, unsafe_allow_html=True)
+st.markdown(f'<div class="providers-scroll">{html}</div>', unsafe_allow_html=True)
+
 
 # CSV download (formatted phone; no 'id' or 'keywords')
 st.download_button(
