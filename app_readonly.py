@@ -16,7 +16,7 @@ except Exception:
     pass
 
 # -----------------------------
-# Page config & left padding
+# Page config & left padding (no title rendered)
 # -----------------------------
 PAGE_TITLE = st.secrets.get("page_title", "Providers (Read-only)") if hasattr(st, "secrets") else "Providers (Read-only)"
 SIDEBAR_STATE = st.secrets.get("sidebar_state", "expanded") if hasattr(st, "secrets") else "expanded"
@@ -110,7 +110,7 @@ def _format_phone(val: str | None) -> str:
 def load_df(engine: Engine) -> pd.DataFrame:
     with engine.begin() as conn:
         df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
-    # Robust: ensure columns exist if schema differs
+    # Ensure columns exist (robustness)
     for col in ["category","service","business_name","contact_name","phone","address","website","notes","keywords","created_at","updated_at","updated_by"]:
         if col not in df.columns:
             df[col] = ""
@@ -119,104 +119,129 @@ def load_df(engine: Engine) -> pd.DataFrame:
     return df
 
 # -----------------------------
-# UI
+# UI (single page; no title; no tabs)
 # -----------------------------
-# (No page title per your request)
+if "show_debug" not in st.session_state:
+    st.session_state["show_debug"] = False
 
-_tabs = st.tabs(["Browse", "Debug"])
+df = load_df(engine)
 
-# -------- Browse
-with _tabs[0]:
-    df = load_df(engine)
+# Search (label hidden; placeholder carries "Search")
+st.caption("Global search across key fields (case-insensitive; partial words).")
+q = st.text_input(
+    "",
+    placeholder="Search — e.g., plumb returns any record with 'plumb' anywhere",
+    label_visibility="collapsed",
+)
 
-    # Search (label hidden; placeholder carries "Search")
-    st.caption("Global search across key fields (case-insensitive; partial words).")
-    q = st.text_input(
-        "",
-        placeholder="Search — e.g., plumb returns any record with 'plumb' anywhere",
-        label_visibility="collapsed",
+def _filter(_df: pd.DataFrame, q: str) -> pd.DataFrame:
+    if not q:
+        return _df
+    qq = re.escape(q)
+    mask = (
+        _df["category"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["service"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["business_name"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["contact_name"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["phone"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["address"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["website"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["notes"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["keywords"].astype(str).str.contains(qq, case=False, na=False)
     )
+    return _df[mask]
 
-    def _filter(_df: pd.DataFrame, q: str) -> pd.DataFrame:
-        if not q:
-            return _df
-        qq = re.escape(q)
-        mask = (
-            _df["category"].astype(str).str.contains(qq, case=False, na=False) |
-            _df["service"].astype(str).str.contains(qq, case=False, na=False) |
-            _df["business_name"].astype(str).str.contains(qq, case=False, na=False) |
-            _df["contact_name"].astype(str).str.contains(qq, case=False, na=False) |
-            _df["phone"].astype(str).str.contains(qq, case=False, na=False) |
-            _df["address"].astype(str).str.contains(qq, case=False, na=False) |
-            _df["website"].astype(str).str.contains(qq, case=False, na=False) |
-            _df["notes"].astype(str).str.contains(qq, case=False, na=False) |
-            _df["keywords"].astype(str).str.contains(qq, case=False, na=False)
-        )
-        return _df[mask]
+# Columns to show (hide 'id' and 'keywords'); use formatted phone
+view_cols = [
+    "category", "service", "business_name", "contact_name", "phone_fmt",
+    "address", "website", "notes",
+]
+grid_df = _filter(df, q)[view_cols].rename(columns={"phone_fmt": "phone"})
 
-    # Columns to show (HIDE 'keywords' by excluding it); use formatted phone
-    view_cols = [
-        "id", "category", "service", "business_name", "contact_name", "phone_fmt",
-        "address", "website", "notes",
-    ]
-    grid_df = _filter(df, q)[view_cols].rename(columns={"phone_fmt": "phone"})
+# ---- Server-side sorting controls ----
+sort_options = [c for c in ["business_name","category","service","contact_name","phone","address","website","notes"] if c in grid_df.columns]
+col1, col2 = st.columns([3,1])
+with col1:
+    sort_col = st.selectbox("Sort by", options=sort_options, index=0)
+with col2:
+    sort_desc = st.checkbox("Descending", value=False, help="Sort in descending order")
 
-    # --- Make website clickable in a static rendered table ---
-    def _linkify(u: str | None) -> str:
-        u = (u or "").strip()
-        if not u:
-            return ""
-        if not re.match(r"^https?://", u, re.I):
-            u = "https://" + u
-        disp = u.replace("https://", "").replace("http://", "")
-        return f'<a href="{u}" target="_blank" rel="noopener noreferrer">{disp}</a>'
+def _sort_key(s: pd.Series):
+    try:
+        return s.astype(str).str.lower()
+    except Exception:
+        return s
 
-    # --- Build a Pandas Styler so we can FORCE WRAP and AUTO ROW HEIGHT ---
-    styled = grid_df.style
+grid_df = grid_df.sort_values(by=sort_col, ascending=not sort_desc, key=_sort_key)
 
-    # Wrap long text for these columns; allow rows to grow automatically
-    wrap_cols = [c for c in ["address", "website", "notes"] if c in grid_df.columns]
-    if wrap_cols:
-        styled = styled.set_properties(
-            subset=wrap_cols,
-            **{"white-space": "normal", "word-break": "break-word"}
-        )
+# ---- Linkify website (for HTML render) ----
+def _linkify(u: str | None) -> str:
+    u = (u or "").strip()
+    if not u:
+        return ""
+    if not re.match(r"^https?://", u, re.I):
+        u = "https://" + u
+    disp = u.replace("https://", "").replace("http://", "")
+    return f'<a href="{u}" target="_blank" rel="noopener noreferrer">{disp}</a>'
 
-    # Startup column widths (tweak to taste)
-    widths = {
-        "category":       "140px",
-        "service":        "160px",
-        "business_name":  "240px",
-        "contact_name":   "180px",
-        "phone":          "140px",
-        "address":        "260px",
-        "website":        "220px",
-        "notes":          "420px",
-    }
-    for col, w in widths.items():
-        if col in grid_df.columns:
-            styled = styled.set_properties(subset=[col], **{"min-width": w})
+# ---- Build a Pandas Styler (wrap + auto row height + widths) ----
+styled = grid_df.style
 
-    # Clickable website links in the static table (don’t escape HTML here)
-    if "website" in grid_df.columns:
-        styled = styled.format({"website": _linkify}, escape=None)
+# Wrap long text; let rows auto-grow
+wrap_cols = [c for c in ["address", "website", "notes"] if c in grid_df.columns]
+if wrap_cols:
+    styled = styled.set_properties(subset=wrap_cols, **{"white-space": "normal", "word-break": "break-word"})
 
-    # Hide the index in the rendered table
-    styled = styled.hide(axis="index")
+# Startup column widths (adjust here)
+widths = {
+    "category":       "140px",
+    "service":        "160px",
+    "business_name":  "240px",
+    "contact_name":   "180px",
+    "phone":          "140px",
+    "address":        "260px",
+    "website":        "220px",
+    "notes":          "420px",
+}
+for col, w in widths.items():
+    if col in grid_df.columns:
+        styled = styled.set_properties(subset=[col], **{"min-width": w, "width": w})
 
-    # Render as a static, styled table (guaranteed wrap + auto row height)
-    st.dataframe(styled, use_container_width=True)
+# Table layout + vertical alignment
+styled = styled.set_table_styles([
+    {"selector": "table", "props": [("table-layout", "fixed"), ("width", "100%")]},
+    {"selector": "th, td", "props": [("vertical-align", "top")]}
+])
 
-    # CSV download (formatted phone; still no 'keywords' column)
-    st.download_button(
-        "Download filtered view (CSV)",
-        data=grid_df.to_csv(index=False).encode("utf-8"),
-        file_name="providers_readonly.csv",
-        mime="text/csv",
-    )
+# Clickable website links in HTML table (escape=None required)
+if "website" in grid_df.columns:
+    styled = styled.format({"website": _linkify}, escape=None)
 
-# -------- Debug
-with _tabs[1]:
+# Hide the index (first unlabeled column)
+styled = styled.hide(axis="index")
+
+# Render as static HTML (keeps wrap + auto row height)
+html = styled.to_html()
+st.markdown(html, unsafe_allow_html=True)
+
+# CSV download (formatted phone; no 'id' or 'keywords')
+st.download_button(
+    "Download filtered view (CSV)",
+    data=grid_df.to_csv(index=False).encode("utf-8"),
+    file_name="providers_readonly.csv",
+    mime="text/csv",
+)
+
+# -----------------------------
+# Debug (button toggled at bottom)
+# -----------------------------
+btn_label = "Show debug" if not st.session_state["show_debug"] else "Hide debug"
+if st.button(btn_label):
+    st.session_state["show_debug"] = not st.session_state["show_debug"]
+    st.rerun()
+
+if st.session_state["show_debug"]:
+    st.divider()
     st.subheader("Status & Secrets (debug)")
     st.json(engine_info)
 
