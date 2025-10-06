@@ -706,6 +706,7 @@ with _tabs[3]:
                     st.rerun()
 
 # ---------- Maintenance
+# ---------- Maintenance
 with _tabs[4]:
     st.caption("One-click cleanups for legacy data.")
 
@@ -722,78 +723,66 @@ with _tabs[4]:
         mime="text/csv",
     )
 
+    # >>> CSV Restore UI (Append-only, ID-checked) — INSERTED HERE <<<
+    with st.expander("CSV Restore (Append-only, ID-checked)", expanded=False):
+        st.caption(
+            "WARNING: This tool only **appends** rows. "
+            "Rows whose `id` already exists are **rejected**. No updates, no deletes."
+        )
+        uploaded = st.file_uploader("Upload CSV to append into `vendors`", type=["csv"], accept_multiple_files=False)
+
+        colA, colB, colC, colD = st.columns([1, 1, 1, 1])
+        with colA:
+            dry_run = st.checkbox("Dry run (validate only)", value=True)
+        with colB:
+            trim_strings = st.checkbox("Trim strings", value=True)
+        with colC:
+            normalize_phone = st.checkbox("Normalize phone to digits", value=True)
+        with colD:
+            auto_id = st.checkbox("Missing `id` ➜ autoincrement", value=True)
+
+        if uploaded is not None:
+            try:
+                df_in = pd.read_csv(uploaded)
+                with_id_df, without_id_df, rejected_ids, insertable_cols = _prepare_csv_for_append(
+                    engine,
+                    df_in,
+                    normalize_phone=normalize_phone,
+                    trim_strings=trim_strings,
+                    treat_missing_id_as_autoincrement=auto_id,
+                )
+
+                planned_inserts = len(with_id_df) + len(without_id_df)
+
+                st.write("**Validation summary**")
+                st.write(
+                    {
+                        "csv_rows": int(len(df_in)),
+                        "insertable_columns": insertable_cols,
+                        "rows_with_explicit_id": int(len(with_id_df)),
+                        "rows_autoincrement_id": int(len(without_id_df)),
+                        "rows_rejected_due_to_existing_id": rejected_ids,
+                        "planned_inserts": int(planned_inserts),
+                    }
+                )
+
+                if dry_run:
+                    st.success("Dry run complete. No changes applied.")
+                else:
+                    if planned_inserts == 0:
+                        st.info("Nothing to insert (all rows rejected or CSV empty after filters).")
+                    else:
+                        inserted = _execute_append_only(engine, with_id_df, without_id_df, insertable_cols)
+                        st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
+            except Exception as e:
+                st.error(f"CSV restore failed: {e}")
+    # <<< /CSV Restore UI >>>
+
     st.divider()
     st.subheader("Data cleanup")
 
     # Normalize phones and title-case names
     if st.button("Normalize phones (digits only) & title-case business/contacts"):
-        with engine.begin() as conn:
-            rows = conn.execute(sql_text("SELECT id, phone, business_name, contact_name FROM vendors")).fetchall()
-            for r in rows:
-                pid = int(r[0])
-                phone_norm = _normalize_phone(r[1] or "")
-                bname = (r[2] or "").strip().title()
-                cname = (r[3] or "").strip().title()
-                conn.execute(sql_text(
-                    "UPDATE vendors SET phone=:p, business_name=:b, contact_name=:c WHERE id=:id"
-                ), {"p": phone_norm, "b": bname, "c": cname, "id": pid})
-        st.success("Normalization complete.")
-
-    # Backfill timestamps
-    if st.button("Backfill created_at/updated_at when missing"):
-        now = datetime.utcnow().isoformat(timespec="seconds")
-        with engine.begin() as conn:
-            conn.execute(sql_text(
-                "UPDATE vendors SET created_at=COALESCE(created_at, :now), updated_at=COALESCE(updated_at, :now)"
-            ), {"now": now})
-        st.success("Backfill complete.")
-
-# Trim extra whitespace across common text fields (preserves newlines in notes)
-if st.button("Trim whitespace in text fields (safe)"):
-    changed = 0
-    with engine.begin() as conn:
-        rows = conn.execute(sql_text("""
-            SELECT id, category, service, business_name, contact_name, address, website, notes, keywords, phone
-            FROM vendors
-        """)).fetchall()
-
-        def clean_soft(s: str | None) -> str:
-            s = (s or "").strip()
-            # collapse runs of spaces/tabs only; KEEP line breaks
-            s = re.sub(r"[ \t]+", " ", s)
-            return s
-
-        for r in rows:
-            pid = int(r[0])
-            vals = {
-                "category":      clean_soft(r[1]),
-                "service":       clean_soft(r[2]),
-                "business_name": clean_soft(r[3]),
-                "contact_name":  clean_soft(r[4]),
-                "address":       clean_soft(r[5]),
-                "website":       _sanitize_url(clean_soft(r[6])),
-                "notes":         clean_soft(r[7]),  # preserves newlines
-                "keywords":      clean_soft(r[8]),
-                # leave phone unchanged here; or use _normalize_phone(r[9]) if you want to normalize now
-                "phone":         r[9],
-                "id":            pid,
-            }
-            conn.execute(sql_text("""
-                UPDATE vendors
-                   SET category=:category,
-                       service=NULLIF(:service,''),
-                       business_name=:business_name,
-                       contact_name=:contact_name,
-                       phone=:phone,
-                       address=:address,
-                       website=:website,
-                       notes=:notes,
-                       keywords=:keywords
-                 WHERE id=:id
-            """), vals)
-            changed += 1
-    st.success(f"Whitespace trimmed on {changed} row(s).")
-
 
 
 # ---------- Debug
