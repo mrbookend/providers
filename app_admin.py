@@ -788,51 +788,66 @@ with _tabs[4]:
     st.divider()
     st.subheader("Data cleanup")
 
-   # Normalize phones and Title Case most text columns
-if st.button("Normalize phone numbers & Title Case text columns"):
+ # Normalize phone numbers & Title Case (vendors + categories/services)
+if st.button("Normalize phone numbers & Title Case (vendors + categories/services)"):
+    def to_title(s: str | None) -> str:
+        return ((s or "").strip()).title()
+
     TEXT_COLS_TO_TITLE = [
         "category", "service", "business_name", "contact_name",
         "address", "notes", "keywords",
     ]
 
-    changed = 0
+    changed_vendors = 0
     with engine.begin() as conn:
+        # --- vendors table ---
         rows = conn.execute(sql_text("SELECT * FROM vendors")).fetchall()
         for r in rows:
             row = dict(r._mapping) if hasattr(r, "_mapping") else dict(r)
             pid = int(row["id"])
 
-            phone_norm = _normalize_phone(row.get("phone", "") or "")
-
-            vals = {}
-            for c in TEXT_COLS_TO_TITLE:
-                vals[c] = ((row.get(c) or "").strip()).title()
-
+            vals = {c: to_title(row.get(c)) for c in TEXT_COLS_TO_TITLE}
             vals["website"] = _sanitize_url((row.get("website") or "").strip())
-            vals["phone"] = phone_norm
-            vals["id"] = pid
+            vals["phone"]   = _normalize_phone(row.get("phone") or "")
+            vals["id"]      = pid
 
-            conn.execute(
-                sql_text(
-                    """
-                    UPDATE vendors
-                       SET category=:category,
-                           service=NULLIF(:service,''),
-                           business_name=:business_name,
-                           contact_name=:contact_name,
-                           phone=:phone,
-                           address=:address,
-                           website=:website,
-                           notes=:notes,
-                           keywords=:keywords
-                     WHERE id=:id
-                    """
-                ),
-                vals,
-            )
-            changed += 1
+            conn.execute(sql_text("""
+                UPDATE vendors
+                   SET category=:category,
+                       service=NULLIF(:service,''),
+                       business_name=:business_name,
+                       contact_name=:contact_name,
+                       phone=:phone,
+                       address=:address,
+                       website=:website,
+                       notes=:notes,
+                       keywords=:keywords
+                 WHERE id=:id
+            """), vals)
+            changed_vendors += 1
 
-    st.success(f"Normalized & title-cased {changed} row(s).")
+        # --- categories table: retitle + reconcile duplicates by case ---
+        cat_rows = conn.execute(sql_text("SELECT name FROM categories")).fetchall()
+        for (old_name,) in cat_rows:
+            new_name = to_title(old_name)
+            if new_name != old_name:
+                conn.execute(sql_text("INSERT OR IGNORE INTO categories(name) VALUES(:n)"), {"n": new_name})
+                conn.execute(sql_text("UPDATE vendors SET category=:new WHERE category=:old"),
+                             {"new": new_name, "old": old_name})
+                conn.execute(sql_text("DELETE FROM categories WHERE name=:old"), {"old": old_name})
+
+        # --- services table: retitle + reconcile duplicates by case ---
+        svc_rows = conn.execute(sql_text("SELECT name FROM services")).fetchall()
+        for (old_name,) in svc_rows:
+            new_name = to_title(old_name)
+            if new_name != old_name:
+                conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new_name})
+                conn.execute(sql_text("UPDATE vendors SET service=:new WHERE service=:old"),
+                             {"new": new_name, "old": old_name})
+                conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"old": old_name})
+
+    st.success(f"Vendors normalized: {changed_vendors}. Categories/services retitled and reconciled.")
+
 
 
     # Backfill timestamps
