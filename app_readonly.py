@@ -160,6 +160,16 @@ q = st.text_input(
     placeholder="Search — e.g., plumb returns any record with 'plumb' anywhere",
     label_visibility="collapsed",
 )
+# Provider dropdown filter
+_provider_options = sorted(
+    df["business_name"].dropna().astype(str).str.strip().unique(),
+    key=str.casefold
+)
+selected_provider = st.selectbox(
+    "Provider",
+    options=["All providers"] + _provider_options,
+    index=0,
+)
 
 def _filter(_df: pd.DataFrame, q: str) -> pd.DataFrame:
     if not q:
@@ -183,6 +193,10 @@ view_cols = [
     "category", "service", "business_name", "contact_name", "phone_fmt",
     "address", "website", "notes",
 ]
+
+# Safety fallback if the dropdown block didn't run for any reason
+if "selected_provider" not in locals():
+    selected_provider = "All providers"
 
 _filtered = _filter(df, q)
 if selected_provider != "All providers":
@@ -231,14 +245,14 @@ if wrap_cols:
 
 # Startup column widths (adjust here)
 widths = {
-    "category":       "140px",
-    "service":        "160px",
-    "provider":       "240px",
-    "contact_name":   "180px",
-    "phone":          "140px",
-    "address":        "260px",
-    "website":        "220px",
-    "notes":          "420px",
+    "category":      "140px",
+    "service":       "160px",
+    "provider":      "240px",  # was "business_name"
+    "contact_name":  "180px",
+    "phone":         "140px",
+    "address":       "260px",
+    "website":       "220px",
+    "notes":         "420px",
 }
 for col, w in widths.items():
     if col in grid_df.columns:
