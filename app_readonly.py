@@ -35,6 +35,34 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# --- Sticky header css (ADD ONCE) ---
+STICKY_HEADER_CSS = """
+<style>
+/* Scroll container for providers table */
+.providers-scroll {
+  max-height: 70vh;        /* adjust if you want taller/shorter viewport */
+  overflow-y: auto;
+  border: 0;               /* placeholder to keep layout stable */
+}
+/* Ensure borders don’t collapse so sticky paints cleanly */
+.providers-scroll table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+/* Make the header row sticky */
+.providers-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: white;       /* keep it readable over rows while scrolling */
+  z-index: 3;
+  box-shadow: 0 1px 0 rgba(0,0,0,.06);
+}
+</style>
+"""
+st.markdown(STICKY_HEADER_CSS, unsafe_allow_html=True)
+# --- /Sticky header css ---
+
+
 # -----------------------------
 # Engine (embedded replica) + gated fallback
 # -----------------------------
