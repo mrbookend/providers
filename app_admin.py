@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import re
 from datetime import datetime
-from typing import List, Dict, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -79,7 +78,6 @@ if not st.session_state["auth_ok"]:
 # -----------------------------
 
 # --- CSV Restore helpers (ADD) ---
-from typing import Tuple
 
 REQUIRED_VENDOR_COLUMNS = ["business_name", "category"]  # service optional
 
@@ -100,7 +98,7 @@ def _prepare_csv_for_append(
     normalize_phone: bool,
     trim_strings: bool,
     treat_missing_id_as_autoincrement: bool,
-) -> Tuple[pd.DataFrame, pd.DataFrame, list[int], list[str]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, list[int], list[str]]:
     """
     Returns: (with_id_df, without_id_df, rejected_existing_ids, insertable_columns)
     DataFrames are already filtered to allowed columns and safe to insert.
@@ -201,7 +199,7 @@ def _execute_append_only(
 # --- /CSV Restore helpers ---
 
 
-def build_engine() -> Tuple[Engine, Dict]:
+def build_engine() -> tuple[Engine, Dict]:
     """Use Embedded Replica for Turso (syncs to remote), else fallback to local."""
     info: Dict = {}
 
@@ -348,7 +346,7 @@ def load_df(engine: Engine) -> pd.DataFrame:
 
     return df
 
-def list_names(engine: Engine, table: str) -> List[str]:
+def list_names(engine: Engine, table: str) -> list[str]:
     with engine.begin() as conn:
         rows = conn.execute(sql_text(f"SELECT name FROM {table} ORDER BY lower(name)")).fetchall()
     return [r[0] for r in rows]
