@@ -266,27 +266,12 @@ st.markdown(f'<div class="providers-scroll">{html}</div>', unsafe_allow_html=Tru
 # If grid_df somehow still has columns you don't want, drop them here:
 # grid_df = grid_df.drop(columns=[c for c in ["id", "keywords"] if c in grid_df.columns])
 
-col1, col2 = st.columns([1, 1])
-
-with col1:
-    st.download_button(
-        "Download filtered (formatted phones)",
-        data=grid_df.to_csv(index=False).encode("utf-8"),
-        file_name="providers.csv",
-        mime="text/csv",
-    )
-
-with col2:
-    df_digits = grid_df.copy()
-    if "phone" in df_digits.columns:
-        # Strip all non-digits so downstream tools get canonical phone data
-        df_digits["phone"] = df_digits["phone"].astype(str).str.replace(r"\D+", "", regex=True)
-    st.download_button(
-        "Download filtered (digits-only phones)",
-        data=df_digits.to_csv(index=False).encode("utf-8"),
-        file_name="providers_raw.csv",
-        mime="text/csv",
-    )
+st.download_button(
+    "Download CSV file of Providers",
+    data=grid_df.to_csv(index=False).encode("utf-8"),
+    file_name="providers.csv",
+    mime="text/csv",
+)
 
 # -----------------------------
 # Debug (button toggled at bottom)
