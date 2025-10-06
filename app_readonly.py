@@ -66,7 +66,7 @@ st.markdown(STICKY_HEADER_CSS, unsafe_allow_html=True)
 # -----------------------------
 # Engine (embedded replica) + gated fallback
 # -----------------------------
-def build_engine() -> Tuple[Engine, Dict]:
+def build_engine() -> tuple[Engine, Dict]:
     """Embedded replica to Turso. Fall back to local ONLY if FORCE_LOCAL=1."""
     info: Dict = {}
     url   = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
