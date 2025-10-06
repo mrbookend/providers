@@ -386,25 +386,28 @@ with _tabs[1]:
             placeholder="Type to search a provider name",
         )
 
-    if not sel_label:
-        st.info("Select a provider to edit.")
-    else:
-        sel_id = int(id_lookup[sel_label])
-        row_sel = df_all.loc[df_all["id"] == sel_id]
-        if row_sel.empty:
-            st.warning("Selected provider not found. Try refreshing the page.")
+        if not sel_label:
+            st.info("Select a provider to edit.")
         else:
-            row = row_sel.iloc[0]
-            # (the rest of your form code stays the same)
+            sel_id = int(id_lookup[sel_label])
+            row_sel = df_all.loc[df_all["id"] == sel_id]
+            if row_sel.empty:
+                st.warning("Selected provider not found. Try refreshing the page.")
+            else:
+                row = row_sel.iloc[0]
 
-
+                # Preselects for category/service
                 cat_options = cats if cats else []
-                cat_index = (cat_options.index(row["category"])
-                             if row.get("category") in cat_options and cat_options else None)
+                cat_index = (
+                    cat_options.index(row["category"])
+                    if (row.get("category") in cat_options and cat_options) else None
+                )
 
                 svc_options = [""] + servs if servs else [""]
-                svc_index = (svc_options.index(row.get("service"))
-                             if str(row.get("service")) in svc_options else 0)
+                svc_index = (
+                    svc_options.index(row.get("service"))
+                    if str(row.get("service")) in svc_options else 0
+                )
 
                 with st.form("edit_vendor"):
                     col1, col2 = st.columns(2)
@@ -456,6 +459,13 @@ with _tabs[1]:
                             })
                         st.success("Vendor updated.")
                         st.rerun()
+
+                if delete_btn:
+                    with engine.begin() as conn:
+                        conn.execute(sql_text("DELETE FROM vendors WHERE id=:id"), {"id": int(sel_id)})
+                    st.success("Vendor deleted.")
+                    st.rerun()
+
 
                 if delete_btn:
                     with engine.begin() as conn:
