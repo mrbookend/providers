@@ -121,7 +121,7 @@ def load_df(engine: Engine) -> pd.DataFrame:
 # -----------------------------
 # UI
 # -----------------------------
-st.title(PAGE_TITLE)
+# (No page title per your request)
 
 _tabs = st.tabs(["Browse", "Debug"])
 
@@ -154,52 +154,60 @@ with _tabs[0]:
         )
         return _df[mask]
 
-    # Wrap toggle (read-only only)
-    wrap = st.checkbox("Wrap long text", value=True)
-    if wrap:
-        st.markdown(
-            """
-            <style>
-            /* allow wrapping + auto row height in st.dataframe */
-            div[data-testid="stDataFrame"] td, div[data-testid="stDataFrame"] th {
-                white-space: normal !important;
-                word-break: break-word;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            """
-            <style>
-            /* single-line cells */
-            div[data-testid="stDataFrame"] table { white-space: nowrap; }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    # Columns to show; phone is formatted
+    # Columns to show (HIDE 'keywords' by excluding it); use formatted phone
     view_cols = [
         "id", "category", "service", "business_name", "contact_name", "phone_fmt",
-        "address", "website", "notes", "keywords",
+        "address", "website", "notes",
     ]
     grid_df = _filter(df, q)[view_cols].rename(columns={"phone_fmt": "phone"})
 
-    # Read-only table
-    st.dataframe(
-        grid_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "business_name": st.column_config.TextColumn("Provider"),
-            "website": st.column_config.LinkColumn("website"),
-            "phone": st.column_config.TextColumn("phone", width=140),
-        },
-    )
+    # --- Make website clickable in a static rendered table ---
+    def _linkify(u: str | None) -> str:
+        u = (u or "").strip()
+        if not u:
+            return ""
+        if not re.match(r"^https?://", u, re.I):
+            u = "https://" + u
+        disp = u.replace("https://", "").replace("http://", "")
+        return f'<a href="{u}" target="_blank" rel="noopener noreferrer">{disp}</a>'
 
-    # CSV download (formatted phone)
+    # --- Build a Pandas Styler so we can FORCE WRAP and AUTO ROW HEIGHT ---
+    styled = grid_df.style
+
+    # Wrap long text for these columns; allow rows to grow automatically
+    wrap_cols = [c for c in ["address", "website", "notes"] if c in grid_df.columns]
+    if wrap_cols:
+        styled = styled.set_properties(
+            subset=wrap_cols,
+            **{"white-space": "normal", "word-break": "break-word"}
+        )
+
+    # Startup column widths (tweak to taste)
+    widths = {
+        "category":       "140px",
+        "service":        "160px",
+        "business_name":  "240px",
+        "contact_name":   "180px",
+        "phone":          "140px",
+        "address":        "260px",
+        "website":        "220px",
+        "notes":          "420px",
+    }
+    for col, w in widths.items():
+        if col in grid_df.columns:
+            styled = styled.set_properties(subset=[col], **{"min-width": w})
+
+    # Clickable website links in the static table (don’t escape HTML here)
+    if "website" in grid_df.columns:
+        styled = styled.format({"website": _linkify}, escape=False)
+
+    # Hide the index in the rendered table
+    styled = styled.hide(axis="index")
+
+    # Render as a static, styled table (guaranteed wrap + auto row height)
+    st.dataframe(styled, use_container_width=True)
+
+    # CSV download (formatted phone; still no 'keywords' column)
     st.download_button(
         "Download filtered view (CSV)",
         data=grid_df.to_csv(index=False).encode("utf-8"),
