@@ -46,6 +46,9 @@ ADMIN_PASSWORD = (st.secrets.get("ADMIN_PASSWORD") or os.getenv("ADMIN_PASSWORD"
 # Dev bypass: set DISABLE_ADMIN_PASSWORD=1 in the environment to skip sign-in
 if os.getenv("DISABLE_ADMIN_PASSWORD") == "1":
     st.session_state["auth_ok"] = True
+# right after the bypass block in app_admin.py
+if os.getenv("DISABLE_ADMIN_PASSWORD") == "1":
+    st.info("⚠️ Admin password is DISABLED for this session (DEV).")
 
 if os.getenv("DISABLE_ADMIN_PASSWORD") != "1" and (not isinstance(ADMIN_PASSWORD, str) or not ADMIN_PASSWORD):
     st.error("ADMIN_PASSWORD is not set in Secrets. Add it in Settings → Secrets.")
@@ -367,7 +370,6 @@ _tabs = st.tabs([
 # ---------- Browse
 with _tabs[0]:
     df = load_df(engine)
-    st.caption("Global search across key fields (case-insensitive; partial words).")
     q = st.text_input(
         "",
         placeholder="Search — e.g., plumb returns any record with 'plumb' anywhere",
@@ -871,8 +873,6 @@ with _tabs[4]:
                 )
                 changed += 1
         st.success(f"Whitespace trimmed on {changed} row(s).")
-# ---------- Debug
-
 # ---------- Debug
 with _tabs[5]:
     st.subheader("Status & Secrets (debug)")
