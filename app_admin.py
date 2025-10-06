@@ -43,8 +43,11 @@ st.markdown(
 # Admin sign-in gate (robust)
 # -----------------------------
 ADMIN_PASSWORD = (st.secrets.get("ADMIN_PASSWORD") or os.getenv("ADMIN_PASSWORD") or "").strip()
+# Dev bypass: set DISABLE_ADMIN_PASSWORD=1 in the environment to skip sign-in
+if os.getenv("DISABLE_ADMIN_PASSWORD") == "1":
+    st.session_state["auth_ok"] = True
 
-if not isinstance(ADMIN_PASSWORD, str) or not ADMIN_PASSWORD:
+if os.getenv("DISABLE_ADMIN_PASSWORD") != "1" and (not isinstance(ADMIN_PASSWORD, str) or not ADMIN_PASSWORD):
     st.error("ADMIN_PASSWORD is not set in Secrets. Add it in Settings → Secrets.")
     st.stop()
 
