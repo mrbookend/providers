@@ -716,10 +716,31 @@ with _tabs[4]:
     query = "SELECT * FROM vendors ORDER BY lower(business_name)"
     with engine.begin() as conn:
         full = pd.read_sql(sql_text(query), conn)
+    # Dual exports: full dataset (digits) + full dataset (formatted phones)
+# full is straight from DB; phone is already digits (by your design)
+# Build a formatted copy for the convenience export
+full_formatted = full.copy()
+
+def _format_phone_digits(x: str | int | None) -> str:
+    s = re.sub(r"\D+", "", str(x or ""))
+    return f"({s[0:3]}) {s[3:6]}-{s[6:10]}" if len(s) == 10 else s
+
+if "phone" in full_formatted.columns:
+    full_formatted["phone"] = full_formatted["phone"].apply(_format_phone_digits)
+
+colA, colB = st.columns([1, 1])
+with colA:
     st.download_button(
-        "Export all vendors (CSV)",
-        data=full.to_csv(index=False).encode("utf-8"),
+        "Export all vendors (formatted phones)",
+        data=full_formatted.to_csv(index=False).encode("utf-8"),
         file_name="providers.csv",
+        mime="text/csv",
+    )
+with colB:
+    st.download_button(
+        "Export all vendors (digits-only phones)",
+        data=full.to_csv(index=False).encode("utf-8"),
+        file_name="providers_raw.csv",
         mime="text/csv",
     )
 
