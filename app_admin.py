@@ -192,6 +192,14 @@ def _normalize_phone(val: str | None) -> str:
         digits = digits[1:]
     return digits if len(digits) == 10 else digits
 
+def _format_phone(val: str | None) -> str:
+    s = re.sub(r"\D", "", str(val or ""))
+    if len(s) == 10:
+        return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
+    # If it's not a clean 10 digits, show the original as-is
+    return (val or "").strip()
+
+
 def _sanitize_url(url: str | None) -> str:
     if not url:
         return ""
@@ -203,11 +211,17 @@ def _sanitize_url(url: str | None) -> str:
 def load_df(engine: Engine) -> pd.DataFrame:
     with engine.begin() as conn:
         df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
+
     for col in ["contact_name", "phone", "address", "website", "notes", "keywords", "service", "created_at", "updated_at", "updated_by"]:
         if col not in df.columns:
             df[col] = ""
+
     df["notes_short"] = df.get("notes", "").astype(str).str.replace("\n", " ").str.slice(0, 150)
     df["keywords_short"] = df.get("keywords", "").astype(str).str.replace("\n", " ").str.slice(0, 80)
+
+    # Display-friendly phone; storage remains digits
+    df["phone_fmt"] = df["phone"].apply(_format_phone)
+
     return df
 
 def list_names(engine: Engine, table: str) -> List[str]:
@@ -263,11 +277,12 @@ with _tabs[0]:
         )
         return _df[mask]
 
+
     view_cols = [
-        "id", "category", "service", "business_name", "contact_name", "phone",
-        "address", "website", "notes", "keywords"
+        "id", "category", "service", "business_name", "contact_name", "phone_fmt",
+        "address", "website", "notes", "keywords",
     ]
-    vdf = _filter(df, q)[view_cols]
+    vdf = _filter(df, q)[view_cols].rename(columns={"phone_fmt": "phone"})
 
     st.data_editor(
         vdf,
