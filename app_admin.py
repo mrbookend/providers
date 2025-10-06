@@ -716,35 +716,34 @@ with _tabs[4]:
     query = "SELECT * FROM vendors ORDER BY lower(business_name)"
     with engine.begin() as conn:
         full = pd.read_sql(sql_text(query), conn)
-    # Dual exports: full dataset (digits) + full dataset (formatted phones)
-# full is straight from DB; phone is already digits (by your design)
-# Build a formatted copy for the convenience export
-full_formatted = full.copy()
 
-def _format_phone_digits(x: str | int | None) -> str:
-    s = re.sub(r"\D+", "", str(x or ""))
-    return f"({s[0:3]}) {s[3:6]}-{s[6:10]}" if len(s) == 10 else s
+    # Dual exports: full dataset — formatted phones and digits-only
+    full_formatted = full.copy()
 
-if "phone" in full_formatted.columns:
-    full_formatted["phone"] = full_formatted["phone"].apply(_format_phone_digits)
+    def _format_phone_digits(x: str | int | None) -> str:
+        s = re.sub(r"\D+", "", str(x or ""))
+        return f"({s[0:3]}) {s[3:6]}-{s[6:10]}" if len(s) == 10 else s
 
-colA, colB = st.columns([1, 1])
-with colA:
-    st.download_button(
-        "Export all vendors (formatted phones)",
-        data=full_formatted.to_csv(index=False).encode("utf-8"),
-        file_name="providers.csv",
-        mime="text/csv",
-    )
-with colB:
-    st.download_button(
-        "Export all vendors (digits-only phones)",
-        data=full.to_csv(index=False).encode("utf-8"),
-        file_name="providers_raw.csv",
-        mime="text/csv",
-    )
+    if "phone" in full_formatted.columns:
+        full_formatted["phone"] = full_formatted["phone"].apply(_format_phone_digits)
 
-    # >>> CSV Restore UI (Append-only, ID-checked) — INSERTED HERE <<<
+    colA, colB = st.columns([1, 1])
+    with colA:
+        st.download_button(
+            "Export all vendors (formatted phones)",
+            data=full_formatted.to_csv(index=False).encode("utf-8"),
+            file_name="providers.csv",
+            mime="text/csv",
+        )
+    with colB:
+        st.download_button(
+            "Export all vendors (digits-only phones)",
+            data=full.to_csv(index=False).encode("utf-8"),
+            file_name="providers_raw.csv",
+            mime="text/csv",
+        )
+
+    # CSV Restore UI (Append-only, ID-checked)
     with st.expander("CSV Restore (Append-only, ID-checked)", expanded=False):
         st.caption(
             "WARNING: This tool only **appends** rows. "
@@ -752,14 +751,14 @@ with colB:
         )
         uploaded = st.file_uploader("Upload CSV to append into `vendors`", type=["csv"], accept_multiple_files=False)
 
-        colA, colB, colC, colD = st.columns([1, 1, 1, 1])
-        with colA:
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+        with col1:
             dry_run = st.checkbox("Dry run (validate only)", value=True)
-        with colB:
+        with col2:
             trim_strings = st.checkbox("Trim strings", value=True)
-        with colC:
+        with col3:
             normalize_phone = st.checkbox("Normalize phone to digits", value=True)
-        with colD:
+        with col4:
             auto_id = st.checkbox("Missing `id` ➜ autoincrement", value=True)
 
         if uploaded is not None:
@@ -797,14 +796,96 @@ with colB:
                         st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
             except Exception as e:
                 st.error(f"CSV restore failed: {e}")
-    # <<< /CSV Restore UI >>>
 
     st.divider()
     st.subheader("Data cleanup")
 
     # Normalize phones and title-case names
     if st.button("Normalize phones (digits only) & title-case business/contacts"):
+        with engine.begin() as conn:
+            rows = conn.execute(
+                sql_text("SELECT id, phone, business_name, contact_name FROM vendors")
+            ).fetchall()
+            for r in rows:
+                pid = int(r[0])
+                phone_norm = _normalize_phone(r[1] or "")
+                bname = (r[2] or "").strip().title()
+                cname = (r[3] or "").strip().title()
+                conn.execute(
+                    sql_text(
+                        "UPDATE vendors SET phone=:p, business_name=:b, contact_name=:c WHERE id=:id"
+                    ),
+                    {"p": phone_norm, "b": bname, "c": cname, "id": pid},
+                )
+        st.success("Normalization complete.")
 
+    # Backfill timestamps
+    if st.button("Backfill created_at/updated_at when missing"):
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        with engine.begin() as conn:
+            conn.execute(
+                sql_text(
+                    "UPDATE vendors SET created_at=COALESCE(created_at, :now), updated_at=COALESCE(updated_at, :now)"
+                ),
+                {"now": now},
+            )
+        st.success("Backfill complete.")
+
+    # Trim extra whitespace across common text fields (preserves newlines in notes)
+    if st.button("Trim whitespace in text fields (safe)"):
+        changed = 0
+        with engine.begin() as conn:
+            rows = conn.execute(
+                sql_text(
+                    """
+                    SELECT id, category, service, business_name, contact_name, address, website, notes, keywords, phone
+                    FROM vendors
+                    """
+                )
+            ).fetchall()
+
+            def clean_soft(s: str | None) -> str:
+                s = (s or "").strip()
+                # collapse runs of spaces/tabs only; KEEP line breaks
+                s = re.sub(r"[ \t]+", " ", s)
+                return s
+
+            for r in rows:
+                pid = int(r[0])
+                vals = {
+                    "category":      clean_soft(r[1]),
+                    "service":       clean_soft(r[2]),
+                    "business_name": clean_soft(r[3]),
+                    "contact_name":  clean_soft(r[4]),
+                    "address":       clean_soft(r[5]),
+                    "website":       _sanitize_url(clean_soft(r[6])),
+                    "notes":         clean_soft(r[7]),  # preserves newlines
+                    "keywords":      clean_soft(r[8]),
+                    # leave phone unchanged here; or use _normalize_phone(r[9]) if you want to normalize now
+                    "phone":         r[9],
+                    "id":            pid,
+                }
+                conn.execute(
+                    sql_text(
+                        """
+                        UPDATE vendors
+                           SET category=:category,
+                               service=NULLIF(:service,''),
+                               business_name=:business_name,
+                               contact_name=:contact_name,
+                               phone=:phone,
+                               address=:address,
+                               website=:website,
+                               notes=:notes,
+                               keywords=:keywords
+                         WHERE id=:id
+                        """
+                    ),
+                    vals,
+                )
+                changed += 1
+        st.success(f"Whitespace trimmed on {changed} row(s).")
+# ---------- Debug
 
 # ---------- Debug
 with _tabs[5]:
