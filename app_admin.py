@@ -359,22 +359,44 @@ with _tabs[1]:
     st.divider()
     st.subheader("Edit / Delete Vendor")
 
-    df_all = load_df(engine)
+      df_all = load_df(engine)
 
     if df_all.empty:
         st.info("No vendors yet. Use 'Add Vendor' above to create your first record.")
     else:
-        id_list = df_all["id"].tolist()
-        sel_id = st.selectbox("Select Vendor ID", options=id_list, index=0 if id_list else None)
+        # Build a Provider (business_name) dropdown to select which vendor to edit
+        opts = df_all[["id", "business_name"]].copy()
+        opts["business_name"] = opts["business_name"].astype(str).str.strip()
 
-        if sel_id is None:
-            st.info("Select a vendor to edit.")
+        # Disambiguate duplicates by appending (ID NNN)
+        dups = opts["business_name"].duplicated(keep=False)
+        opts["label"] = opts["business_name"]
+        opts.loc[dups, "label"] = opts["business_name"] + "  (ID " + opts["id"].astype(str) + ")"
+
+        # Sort by label, case-insensitive
+        opts = opts.sort_values("label", key=lambda s: s.str.lower())
+
+        labels = opts["label"].tolist()
+        id_lookup = dict(zip(labels, opts["id"].tolist()))
+
+        sel_label = st.selectbox(
+            "Select provider",
+            options=labels,
+            index=0 if labels else None,
+            placeholder="Type to search a provider name",
+        )
+
+    if not sel_label:
+        st.info("Select a provider to edit.")
+    else:
+        sel_id = int(id_lookup[sel_label])
+        row_sel = df_all.loc[df_all["id"] == sel_id]
+        if row_sel.empty:
+            st.warning("Selected provider not found. Try refreshing the page.")
         else:
-            row_sel = df_all.loc[df_all["id"] == sel_id]
-            if row_sel.empty:
-                st.warning("Selected vendor not found. Try refreshing the page.")
-            else:
-                row = row_sel.iloc[0]
+            row = row_sel.iloc[0]
+            # (the rest of your form code stays the same)
+
 
                 cat_options = cats if cats else []
                 cat_index = (cat_options.index(row["category"])
