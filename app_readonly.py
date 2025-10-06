@@ -155,7 +155,6 @@ if "show_debug" not in st.session_state:
 df = load_df(engine)
 
 # Search (label hidden; placeholder carries "Search")
-st.caption("Global search across key fields (case-insensitive; partial words).")
 q = st.text_input(
     "",
     placeholder="Search — e.g., plumb returns any record with 'plumb' anywhere",
