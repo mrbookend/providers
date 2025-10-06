@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Tuple, Dict
 
 import pandas as pd
 import streamlit as st
@@ -66,9 +65,10 @@ st.markdown(STICKY_HEADER_CSS, unsafe_allow_html=True)
 # -----------------------------
 # Engine (embedded replica) + gated fallback
 # -----------------------------
-def build_engine() -> tuple[Engine, Dict]:
+def build_engine() -> tuple[Engine, dict]:
     """Embedded replica to Turso. Fall back to local ONLY if FORCE_LOCAL=1."""
-    info: Dict = {}
+    info: dict = {}
+
     url   = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
     token = (st.secrets.get("TURSO_AUTH_TOKEN")   or os.getenv("TURSO_AUTH_TOKEN")   or "").strip()
 
