@@ -62,10 +62,6 @@ if not st.session_state["auth_ok"]:
             st.error("Incorrect password.")
     st.stop()
 
-
-
-
-
 # Small sanity check in Debug panel later:
 # st.write({"FORCE_LOCAL": os.getenv("FORCE_LOCAL")})
 
@@ -334,9 +330,6 @@ def load_df(engine: Engine) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = ""
 
-    df["notes_short"] = df.get("notes", "").astype(str).str.replace("\n", " ").str.slice(0, 150)
-    df["keywords_short"] = df.get("keywords", "").astype(str).str.replace("\n", " ").str.slice(0, 80)
-
     # Display-friendly phone; storage remains digits
     df["phone_fmt"] = df["phone"].apply(_format_phone)
 
@@ -383,9 +376,9 @@ with _tabs[0]:
             return _df
         qq = re.escape(q)
         mask = (
-            _df["category"].str.contains(qq, case=False, na=False) |
+            _df["category"].astype(str).str.contains(qq, case=False, na=False) |
             _df["service"].astype(str).str.contains(qq, case=False, na=False) |
-            _df["business_name"].str.contains(qq, case=False, na=False) |
+            _df["business_name"].astype(str).str.contains(qq, case=False, na=False) |
             _df["contact_name"].astype(str).str.contains(qq, case=False, na=False) |
             _df["phone"].astype(str).str.contains(qq, case=False, na=False) |
             _df["address"].astype(str).str.contains(qq, case=False, na=False) |
@@ -395,6 +388,9 @@ with _tabs[0]:
         )
         return _df[mask]
 
+    # These two are already created in load_df(); remove if redundant:
+    # df["notes_short"] = df["notes"].astype(str).str.replace("\n", " ").str.slice(0, 150)
+    # df["keywords_short"] = df["keywords"].astype(str).str.replace("\n", " ").str.slice(0, 80)
 
     view_cols = [
         "id", "category", "service", "business_name", "contact_name", "phone_fmt",
