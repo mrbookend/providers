@@ -788,24 +788,52 @@ with _tabs[4]:
     st.divider()
     st.subheader("Data cleanup")
 
-    # Normalize phones and title-case names
-    if st.button("Normalize phones (digits only) & title-case business/contacts"):
-        with engine.begin() as conn:
-            rows = conn.execute(
-                sql_text("SELECT id, phone, business_name, contact_name FROM vendors")
-            ).fetchall()
-            for r in rows:
-                pid = int(r[0])
-                phone_norm = _normalize_phone(r[1] or "")
-                bname = (r[2] or "").strip().title()
-                cname = (r[3] or "").strip().title()
-                conn.execute(
-                    sql_text(
-                        "UPDATE vendors SET phone=:p, business_name=:b, contact_name=:c WHERE id=:id"
-                    ),
-                    {"p": phone_norm, "b": bname, "c": cname, "id": pid},
-                )
-        st.success("Normalization complete.")
+   # Normalize phones and Title Case most text columns
+if st.button("Normalize phone numbers & Title Case text columns"):
+    TEXT_COLS_TO_TITLE = [
+        "category", "service", "business_name", "contact_name",
+        "address", "notes", "keywords",
+    ]
+
+    changed = 0
+    with engine.begin() as conn:
+        rows = conn.execute(sql_text("SELECT * FROM vendors")).fetchall()
+        for r in rows:
+            row = dict(r._mapping) if hasattr(r, "_mapping") else dict(r)
+            pid = int(row["id"])
+
+            phone_norm = _normalize_phone(row.get("phone", "") or "")
+
+            vals = {}
+            for c in TEXT_COLS_TO_TITLE:
+                vals[c] = ((row.get(c) or "").strip()).title()
+
+            vals["website"] = _sanitize_url((row.get("website") or "").strip())
+            vals["phone"] = phone_norm
+            vals["id"] = pid
+
+            conn.execute(
+                sql_text(
+                    """
+                    UPDATE vendors
+                       SET category=:category,
+                           service=NULLIF(:service,''),
+                           business_name=:business_name,
+                           contact_name=:contact_name,
+                           phone=:phone,
+                           address=:address,
+                           website=:website,
+                           notes=:notes,
+                           keywords=:keywords
+                     WHERE id=:id
+                    """
+                ),
+                vals,
+            )
+            changed += 1
+
+    st.success(f"Normalized & title-cased {changed} row(s).")
+
 
     # Backfill timestamps
     if st.button("Backfill created_at/updated_at when missing"):
