@@ -165,11 +165,6 @@ _provider_options = sorted(
     df["business_name"].dropna().astype(str).str.strip().unique(),
     key=str.casefold
 )
-selected_provider = st.selectbox(
-    "Provider",
-    options=["All providers"] + _provider_options,
-    index=0,
-)
 
 def _filter(_df: pd.DataFrame, q: str) -> pd.DataFrame:
     if not q:
@@ -188,22 +183,14 @@ def _filter(_df: pd.DataFrame, q: str) -> pd.DataFrame:
     )
     return _df[mask]
 
+# Build filtered view
+_filtered = _filter(df, q)
+
 # Columns to show (hide 'id' and 'keywords'); use formatted phone
 view_cols = [
     "category", "service", "business_name", "contact_name", "phone_fmt",
     "address", "website", "notes",
 ]
-
-# Safety fallback if the dropdown block didn't run for any reason
-if "selected_provider" not in locals():
-    selected_provider = "All providers"
-
-_filtered = _filter(df, q)
-if selected_provider != "All providers":
-    _filtered = _filtered[
-        _filtered["business_name"].astype(str).str.strip() == selected_provider
-    ]
-
 grid_df = (
     _filtered[view_cols]
     .rename(columns={"business_name": "provider", "phone_fmt": "phone"})
