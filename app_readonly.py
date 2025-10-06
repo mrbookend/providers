@@ -183,10 +183,20 @@ view_cols = [
     "category", "service", "business_name", "contact_name", "phone_fmt",
     "address", "website", "notes",
 ]
-grid_df = _filter(df, q)[view_cols].rename(columns={"phone_fmt": "phone"})
+
+_filtered = _filter(df, q)
+if selected_provider != "All providers":
+    _filtered = _filtered[
+        _filtered["business_name"].astype(str).str.strip() == selected_provider
+    ]
+
+grid_df = (
+    _filtered[view_cols]
+    .rename(columns={"business_name": "provider", "phone_fmt": "phone"})
+)
 
 # ---- Server-side sorting controls ----
-sort_options = [c for c in ["business_name","category","service","contact_name","phone","address","website","notes"] if c in grid_df.columns]
+sort_options = [c for c in ["provider","category","service","contact_name","phone","address","website","notes"] if c in grid_df.columns]
 col1, col2 = st.columns([3,1])
 with col1:
     sort_col = st.selectbox("Sort by", options=sort_options, index=0)
@@ -223,7 +233,7 @@ if wrap_cols:
 widths = {
     "category":       "140px",
     "service":        "160px",
-    "business_name":  "240px",
+    "provider":       "240px",
     "contact_name":   "180px",
     "phone":          "140px",
     "address":        "260px",
