@@ -77,6 +77,130 @@ if not st.session_state["auth_ok"]:
 # -----------------------------
 # DB helpers
 # -----------------------------
+
+# --- CSV Restore helpers (ADD) ---
+from typing import Tuple
+
+REQUIRED_VENDOR_COLUMNS = ["business_name", "category"]  # service optional
+
+def _get_table_columns(engine: Engine, table: str) -> list[str]:
+    with engine.connect() as conn:
+        res = conn.execute(sql_text(f"SELECT * FROM {table} LIMIT 0"))
+        return list(res.keys())
+
+def _fetch_existing_ids(engine: Engine, table: str = "vendors") -> set[int]:
+    with engine.connect() as conn:
+        rows = conn.execute(sql_text(f"SELECT id FROM {table}")).all()
+    return {int(r[0]) for r in rows if r[0] is not None}
+
+def _prepare_csv_for_append(
+    engine: Engine,
+    csv_df: pd.DataFrame,
+    *,
+    normalize_phone: bool,
+    trim_strings: bool,
+    treat_missing_id_as_autoincrement: bool,
+) -> Tuple[pd.DataFrame, pd.DataFrame, list[int], list[str]]:
+    """
+    Returns: (with_id_df, without_id_df, rejected_existing_ids, insertable_columns)
+    DataFrames are already filtered to allowed columns and safe to insert.
+    """
+    df = csv_df.copy()
+
+    # Trim strings
+    if trim_strings:
+        for c in df.columns:
+            if pd.api.types.is_object_dtype(df[c]):
+                df[c] = df[c].astype(str).str.strip()
+
+    # Normalize phone to digits
+    if normalize_phone and "phone" in df.columns:
+        df["phone"] = df["phone"].astype(str).str.replace(r"\D+", "", regex=True)
+
+    db_cols = _get_table_columns(engine, "vendors")
+    insertable_cols = [c for c in df.columns if c in db_cols]
+
+    # Required columns present?
+    missing_req = [c for c in REQUIRED_VENDOR_COLUMNS if c not in df.columns]
+    if missing_req:
+        raise ValueError(f"Missing required column(s) in CSV: {missing_req}")
+
+    # Handle id column
+    has_id = "id" in df.columns
+    existing_ids = _fetch_existing_ids(engine)
+
+    if has_id:
+        df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
+        # Reject rows colliding with existing ids
+        mask_conflict = df["id"].notna() & df["id"].astype("Int64").astype("int", errors="ignore").isin(existing_ids)
+        rejected_existing_ids = df.loc[mask_conflict, "id"].dropna().astype(int).tolist()
+        df_ok = df.loc[~mask_conflict].copy()
+
+        # Split by having id vs. not
+        with_id_df = df_ok[df_ok["id"].notna()].copy()
+        without_id_df = df_ok[df_ok["id"].isna()].copy() if treat_missing_id_as_autoincrement else pd.DataFrame(columns=df.columns)
+    else:
+        rejected_existing_ids = []
+        with_id_df = pd.DataFrame(columns=df.columns)
+        without_id_df = df.copy()
+
+    # Limit to insertable columns and coerce NaN->None for DB
+    def _prep_cols(d: pd.DataFrame, drop_id: bool) -> pd.DataFrame:
+        cols = [c for c in insertable_cols if (c != "id" if drop_id else True)]
+        if not cols:
+            return pd.DataFrame(columns=[])
+        dd = d[cols].copy()
+        for c in cols:
+            dd[c] = dd[c].where(pd.notnull(dd[c]), None)
+        return dd
+
+    with_id_df = _prep_cols(with_id_df, drop_id=False)
+    without_id_df = _prep_cols(without_id_df, drop_id=True)
+
+    # Duplicate ids inside the CSV itself?
+    if "id" in csv_df.columns:
+        dup_ids = (
+            csv_df["id"]
+            .pipe(pd.to_numeric, errors="coerce")
+            .dropna()
+            .astype(int)
+            .duplicated(keep=False)
+        )
+        if dup_ids.any():
+            dups = sorted(csv_df.loc[dup_ids, "id"].dropna().astype(int).unique().tolist())
+            raise ValueError(f"Duplicate id(s) inside CSV: {dups}")
+
+    return with_id_df, without_id_df, rejected_existing_ids, insertable_cols
+
+def _execute_append_only(
+    engine: Engine,
+    with_id_df: pd.DataFrame,
+    without_id_df: pd.DataFrame,
+    insertable_cols: list[str],
+) -> int:
+    """Executes INSERTs in a single transaction. Returns total inserted rows."""
+    inserted = 0
+    with engine.begin() as conn:
+        # with explicit id
+        if not with_id_df.empty:
+            cols = list(with_id_df.columns)  # includes 'id' by construction
+            placeholders = ", ".join(":" + c for c in cols)
+            stmt = sql_text(f"INSERT INTO vendors ({', '.join(cols)}) VALUES ({placeholders})")
+            conn.execute(stmt, with_id_df.to_dict(orient="records"))
+            inserted += len(with_id_df)
+
+        # without id (autoincrement)
+        if not without_id_df.empty:
+            cols = list(without_id_df.columns)  # 'id' removed already
+            placeholders = ", ".join(":" + c for c in cols)
+            stmt = sql_text(f"INSERT INTO vendors ({', '.join(cols)}) VALUES ({placeholders})")
+            conn.execute(stmt, without_id_df.to_dict(orient="records"))
+            inserted += len(without_id_df)
+
+    return inserted
+# --- /CSV Restore helpers ---
+
+
 def build_engine() -> Tuple[Engine, Dict]:
     """Use Embedded Replica for Turso (syncs to remote), else fallback to local."""
     info: Dict = {}
