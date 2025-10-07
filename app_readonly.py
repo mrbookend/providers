@@ -120,7 +120,7 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
             pass
         return e, info
 
-        if turso_url and turso_token:
+    if turso_url and turso_token:
         # Normalize DSN safely without collapsing sqlite file paths.
         dsn = str(turso_url).strip()
 
