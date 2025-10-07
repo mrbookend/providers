@@ -176,60 +176,10 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
     return _fallback_sqlite("TURSO_DATABASE_URL / TURSO_AUTH_TOKEN missing.")
 
 
-engine, engine_info = build_engine()
-
-# -----------------------------
-# Embedded replica warm-up + automatic failover to direct remote
-# -----------------------------
-def _extract_sync_host_from_dsn(dsn: str) -> str | None:
-    # Looks for sync_url=... in the DSN and returns the host (no scheme, no path)
-    try:
-        qpos = dsn.find("?")
-        if qpos == -1:
-            return None
-        for part in dsn[qpos + 1 :].split("&"):
-            if not part:
-                continue
-            k, _, v = part.partition("=")
-            if k != "sync_url":
-                continue
-            # v may be 'libsql://host' or 'https://host[/...]'
-            v = v.strip()
-            if "://" in v:
-                v = v.split("://", 1)[1]
-            # strip path/fragments if present
-            v = v.split("/", 1)[0]
-            return v or None
-    except Exception:
-        return None
-
-def _warmup_embedded_replica(max_wait_seconds: float = 30.0) -> bool:
-    """Touch the schema and wait for vendors to appear; True if present, else False."""
-    url = str(engine_info.get("sqlalchemy_url", ""))
-    if not url.startswith("sqlite+libsql:///"):
-        return True  # warm-up only applies to embedded file DSNs
-    import time
-    try:
-        with engine.connect() as conn:
-            # Touch the schema to trigger replication
-            conn.exec_driver_sql("SELECT name FROM sqlite_master LIMIT 1")
-            deadline = time.time() + max_wait_seconds
-            while time.time() < deadline:
-                row = conn.exec_driver_sql(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                    ("vendors",),
-                ).fetchone()
-                if row:
-                    return True
-                time.sleep(0.5)
-    except Exception as e:
-        st.warning(f"Replica warm-up warning: {e}")
-    return False
-
 def _failover_to_direct_remote_if_needed() -> None:
-    global engine  # must be first line if we rebind engine in this function
+    global engine  # must be the first executable statement in this function
 
-    """If embedded vendors table is still missing, switch engine to direct remote."""
+    # If embedded vendors table is still missing, switch engine to direct remote.
     url = str(engine_info.get("sqlalchemy_url", ""))
     if not url.startswith("sqlite+libsql:///"):
         return  # not embedded; nothing to do
@@ -282,7 +232,7 @@ def _failover_to_direct_remote_if_needed() -> None:
             }
         )
         st.warning(
-            "Embedded replica not ready; temporarily serving from **direct remote**. "
+            "Embedded replica not ready; temporarily serving from direct remote. "
             "Reads are live; the app will use the embedded replica again once it catches up."
         )
         # Clear any cached failures
@@ -293,59 +243,6 @@ def _failover_to_direct_remote_if_needed() -> None:
 
     except Exception as ex:
         st.error(f"Failover to remote DB failed: {type(ex).__name__}: {ex}")
-
-
-    sync_host = _extract_sync_host_from_dsn(url)
-    if not sync_host:
-        st.error("Embedded replica not ready and no sync_url host found; cannot fail over.")
-        return
-
-    remote_dsn = f"sqlite+libsql://{sync_host}?secure=true"
-    try:
-        remote_token = str(_get_secret("TURSO_AUTH_TOKEN") or "")
-        if not remote_token:
-            st.error("Embedded replica not ready and TURSO_AUTH_TOKEN missing; cannot fail over.")
-            return
-
-        # Build and probe a remote engine
-        e = create_engine(
-            remote_dsn,
-            connect_args={"auth_token": remote_token},
-            pool_pre_ping=True,
-            pool_recycle=180,
-        )
-        with e.connect() as conn:
-            conn.exec_driver_sql("SELECT 1")
-
-        # Swap global engine and update info so downstream code uses remote
-        global engine
-        engine = e
-        engine_info.update(
-            {
-                "using_remote": True,
-                "sqlalchemy_url": remote_dsn,
-                "dialect": "sqlite",
-                "driver": "libsql",
-                "sync_url": remote_dsn,  # informational
-                "strategy": "failover_remote",
-            }
-        )
-        st.warning(
-            "Embedded replica not ready; temporarily serving from **direct remote**. "
-            "Reads are live; the app will use the embedded replica again once it catches up."
-        )
-        # Clear any cached failures
-        try:
-            st.cache_data.clear()
-        except Exception:
-            pass
-
-    except Exception as ex:
-        st.error(f"Failover to remote DB failed: {type(ex).__name__}: {ex}")
-
-# Run warm-up; if schema still missing, fail over to direct remote
-if not _warmup_embedded_replica():
-    _failover_to_direct_remote_if_needed()
 
 # -----------------------------
 # Data helpers
