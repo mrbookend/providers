@@ -190,7 +190,10 @@ def fetch_df(sql: str, params: Dict | None = None) -> pd.DataFrame:
     # Use exec_driver_sql to avoid pandas/libsql cursor quirks
     try:
         with engine.connect() as conn:
-            result = conn.exec_driver_sql(sql, params or {})
+            if params:
+    result = conn.exec_driver_sql(sql, params)
+else:
+    result = conn.exec_driver_sql(sql)
             rows = result.fetchall()
             cols = result.keys()
         return pd.DataFrame(rows, columns=list(cols))
