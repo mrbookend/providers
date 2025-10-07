@@ -167,12 +167,28 @@ if not engine_info.get("using_remote"):
 # -----------------------------
 # Auth gate
 # -----------------------------
+ADMIN_PASSWORD = _get_secret("ADMIN_PASSWORD")
 
+if ADMIN_PASSWORD:
+    if not st.session_state.get("_admin_ok", False):
         with st.form("admin_login", clear_on_submit=False):
             st.subheader("Admin Login")
             pw = st.text_input("Password", type="password", placeholder="Enter admin password")
-            # Tip: pressing Enter in the password field will trigger this button
+            # Pressing Enter submits when a submit button exists
             ok = st.form_submit_button("Enter", type="primary")
+
+        if ok:
+            if pw == str(ADMIN_PASSWORD):
+                st.session_state["_admin_ok"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+                st.stop()
+        else:
+            # No submit yet; stop rendering the rest of the app
+            st.stop()
+else:
+    st.info("No admin password set in secrets — gate is OFF.")
 
 # -----------------------------
 # Utilities
