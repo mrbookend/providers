@@ -1,3 +1,12 @@
+# -*- coding: utf-8 -*-
+# app_readonly.py - Providers Read-Only (embedded replica first, remote failover)
+from __future__ import annotations
+
+import os
+import html
+import time
+from typing import Dict, Tuple
+
 app_readonly.py — Providers Read‑Only (embedded replica first, remote failover)
 
 Traits:
