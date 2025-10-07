@@ -187,10 +187,12 @@ if not engine_info.get("using_remote"):
 
 @st.cache_data(ttl=60)
 def fetch_df(sql: str, params: Dict | None = None) -> pd.DataFrame:
+    # Use SQLAlchemy execute instead of pandas.read_sql to avoid libsql ValueError paths
     with engine.connect() as conn:
-        df = pd.read_sql(sql_text(sql), conn, params=params)
-    return df
-
+        result = conn.execute(sql_text(sql), params or {})
+        rows = result.fetchall()
+        cols = result.keys()
+    return pd.DataFrame(rows, columns=list(cols))
 
 def vendors_df() -> pd.DataFrame:
     sql = (
@@ -198,7 +200,6 @@ def vendors_df() -> pd.DataFrame:
         "FROM vendors ORDER BY lower(business_name)"
     )
     return fetch_df(sql)
-
 
 # -----------------------------
 # Table renderer (HTML)
