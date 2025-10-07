@@ -21,7 +21,6 @@ import streamlit as st
 from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
 import sqlalchemy_libsql  # registers 'sqlite+libsql' dialect entrypoint
-from sqlalchemy.engine import Engine
 
 # -----------------------------
 # Page layout FIRST
@@ -92,6 +91,7 @@ ADMIN_DEBUG = str(_get_secret("ADMIN_DEBUG", "0")).lower() in ("1", "true", "yes
 ALLOW_SQLITE_FALLBACK = str(_get_secret("ALLOW_SQLITE_FALLBACK", "0")).lower() in ("1", "true", "yes")
 
 # -----------------------------
+# -----------------------------
 # Engine builder (Turso/libSQL first)
 # -----------------------------
 def build_engine() -> Tuple[Engine, Dict[str, str]]:
@@ -109,7 +109,7 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
         if not ALLOW_SQLITE_FALLBACK:
             st.error(
                 reason
-                + " Also, SQLite fallback is disabled. Add `sqlalchemy-libsql>=0.2.2` to requirements.txt "
+                + " Also, SQLite fallback is disabled. Add `sqlalchemy-libsql==0.2.0` to requirements.txt "
                   "and ensure the DSN uses `sqlite+libsql://` (not `libsql://`). "
                   "Or set `ALLOW_SQLITE_FALLBACK=true` for local/dev only."
             )
@@ -151,7 +151,7 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
             msg = f"Turso init failed ({name}: {ex})"
             return _fallback_sqlite(
                 "SQLAlchemy couldn't load the 'libsql' dialect or connect. "
-                "Verify `sqlalchemy-libsql>=0.2.2` is installed and DSN uses `sqlite+libsql://`. "
+                "Verify `sqlalchemy-libsql==0.2.0` is installed and DSN uses `sqlite+libsql://`. "
                 f"Details: {msg}"
             )
 
