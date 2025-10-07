@@ -227,11 +227,14 @@ def _warmup_embedded_replica(max_wait_seconds: float = 30.0) -> bool:
     return False
 
 def _failover_to_direct_remote_if_needed() -> None:
+    global engine  # must be first line if we rebind engine in this function
+
     """If embedded vendors table is still missing, switch engine to direct remote."""
     url = str(engine_info.get("sqlalchemy_url", ""))
     if not url.startswith("sqlite+libsql:///"):
         return  # not embedded; nothing to do
-    # check table presence one more time; if absent, fail over
+
+    # Check table presence one more time; if present, do nothing
     try:
         with engine.connect() as conn:
             row = conn.exec_driver_sql(
@@ -243,6 +246,54 @@ def _failover_to_direct_remote_if_needed() -> None:
     except Exception:
         # ignore and proceed to failover attempt
         pass
+
+    sync_host = _extract_sync_host_from_dsn(url)
+    if not sync_host:
+        st.error("Embedded replica not ready and no sync_url host found; cannot fail over.")
+        return
+
+    remote_dsn = f"sqlite+libsql://{sync_host}?secure=true"
+    try:
+        remote_token = str(_get_secret("TURSO_AUTH_TOKEN") or "")
+        if not remote_token:
+            st.error("Embedded replica not ready and TURSO_AUTH_TOKEN missing; cannot fail over.")
+            return
+
+        # Build and probe a remote engine
+        e = create_engine(
+            remote_dsn,
+            connect_args={"auth_token": remote_token},
+            pool_pre_ping=True,
+            pool_recycle=180,
+        )
+        with e.connect() as conn:
+            conn.exec_driver_sql("SELECT 1")
+
+        # Swap global engine and update info so downstream code uses remote
+        engine = e
+        engine_info.update(
+            {
+                "using_remote": True,
+                "sqlalchemy_url": remote_dsn,
+                "dialect": "sqlite",
+                "driver": "libsql",
+                "sync_url": remote_dsn,  # informational
+                "strategy": "failover_remote",
+            }
+        )
+        st.warning(
+            "Embedded replica not ready; temporarily serving from **direct remote**. "
+            "Reads are live; the app will use the embedded replica again once it catches up."
+        )
+        # Clear any cached failures
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+
+    except Exception as ex:
+        st.error(f"Failover to remote DB failed: {type(ex).__name__}: {ex}")
+
 
     sync_host = _extract_sync_host_from_dsn(url)
     if not sync_host:
