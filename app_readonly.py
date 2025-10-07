@@ -120,18 +120,22 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
             pass
         return e, info
 
-    if turso_url and turso_token:
-        # Normalize DSN and enforce TLS (?secure=true)
-        from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+        if turso_url and turso_token:
+        # Normalize DSN safely without collapsing sqlite file paths.
+        dsn = str(turso_url).strip()
 
-        dsn = str(turso_url)
+        # Accept both forms: libsql://…  → sqlite+libsql://…
         if dsn.startswith("libsql://"):
             dsn = "sqlite+libsql://" + dsn.split("://", 1)[1]
-        _u = urlparse(dsn)
-        _q = dict(parse_qsl(_u.query, keep_blank_values=True))
-        if _q.get("secure", "").lower() not in ("true", "1", "yes"):
-            _q["secure"] = "true"
-        dsn = urlunparse((_u.scheme, _u.netloc, _u.path, _u.params, urlencode(_q, doseq=True), _u.fragment))
+
+        # If it's a local file DSN and someone used a single slash, fix it to triple slashes:
+        # sqlite+libsql:/vendors-embedded.db → sqlite+libsql:///vendors-embedded.db
+        if dsn.startswith("sqlite+libsql:/") and not dsn.startswith("sqlite+libsql://"):
+            dsn = "sqlite+libsql:///" + dsn.split(":/", 1)[1].lstrip("/")
+
+        # Enforce TLS param without urlunparse (don’t alter other query params like sync_url)
+        if "secure=" not in dsn.lower():
+            dsn += ("&secure=true" if "?" in dsn else "?secure=true")
 
         try:
             e = create_engine(
