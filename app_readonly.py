@@ -177,6 +177,31 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
 
 
 engine, engine_info = build_engine()
+# Warm-up for embedded replica: trigger sync and wait briefly for schema
+def _warmup_embedded_replica():
+    url = str(engine_info.get("sqlalchemy_url", ""))
+    if not url.startswith("sqlite+libsql:///"):
+        return  # only applies to embedded file DSNs
+
+    try:
+        with engine.connect() as conn:
+            # Touch the schema to trigger a sync
+            conn.exec_driver_sql("SELECT name FROM sqlite_master LIMIT 1")
+
+            # Wait up to ~5s for the 'vendors' table to exist
+            for _ in range(10):
+                row = conn.exec_driver_sql(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='vendors'"
+                ).fetchone()
+                if row:
+                    return  # table exists; we're good
+                import time
+                time.sleep(0.5)
+    except Exception as e:
+        # Non-fatal: show a hint but don't crash—downstream code will still surface errors if any
+        st.warning(f"Replica warm-up warning: {e}")
+
+_warmup_embedded_replica()
 
 if not engine_info.get("using_remote"):
     st.warning("Running on local SQLite fallback (remote DB unavailable or disabled).", icon="⚠️")
