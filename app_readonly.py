@@ -16,13 +16,6 @@ import sqlalchemy_libsql  # registers 'sqlite+libsql' dialect entrypoint
 
 
 # -----------------------------
-# Early globals (avoid NameError on first run)
-# -----------------------------
-engine: Engine | None = None           # set by build_engine()
-engine_info: Dict[str, str] = {}       # connection & debug metadata
-
-
-# -----------------------------
 # Page layout FIRST
 # -----------------------------
 def _read_secret_early(name: str, default=None):
@@ -67,7 +60,6 @@ def _get_secret(name: str, default=None):
         pass
     return os.environ.get(name, default)
 
-# Column widths (px) for the read-only grid
 RAW_COL_WIDTHS = _get_secret("COLUMN_WIDTHS_PX_READONLY") or _get_secret("COLUMN_WIDTHS_PX") or {
     "id": 40,
     "business_name": 160,
@@ -91,95 +83,101 @@ ALLOW_SQLITE_FALLBACK = str(_get_secret("ALLOW_SQLITE_FALLBACK", "0")).lower() i
 # -----------------------------
 # Engine builder (Turso/libSQL first)
 # -----------------------------
-def build_engine() -> Tuple[Engine, Dict[str, str]]:
-    turso_url = _get_secret("TURSO_DATABASE_URL")
-    turso_token = _get_secret("TURSO_AUTH_TOKEN")
+def _normalize_dsn(raw: str) -> tuple[str, bool]:
+    """Normalize DSN. Returns (dsn, is_embedded)."""
+    dsn = raw.strip()
+
+    # Accept libsql://host -> sqlite+libsql://host
+    if dsn.startswith("libsql://"):
+        dsn = "sqlite+libsql://" + dsn.split("://", 1)[1]
+
+    # Fix single-slash file DSNs: sqlite+libsql:/file.db -> sqlite+libsql:///file.db
+    if dsn.startswith("sqlite+libsql:/") and not dsn.startswith("sqlite+libsql://"):
+        dsn = "sqlite+libsql:///" + dsn.split(":/", 1)[1].lstrip("/")
+
+    is_embedded = dsn.startswith("sqlite+libsql:///")
+
+    if is_embedded:
+        # Normalize embedded sync_url to HTTPS to avoid HRANA 308 redirects
+        if "sync_url=libsql://" in dsn:
+            dsn = dsn.replace("sync_url=libsql://", "sync_url=https://")
+        # Strip any accidental secure=true on embedded file DSNs
+        if "secure=" in dsn.lower():
+            dsn = dsn.replace("&secure=true", "").replace("?secure=true", "?").replace("?&", "?")
+            if dsn.endswith("?"):
+                dsn = dsn[:-1]
+    else:
+        # Enforce TLS only for REMOTE DSNs (host present)
+        if "secure=" not in dsn.lower():
+            dsn += ("&secure=true" if "?" in dsn else "?secure=true")
+
+    return dsn, is_embedded
+
+
+def _fallback_sqlite(reason: str) -> tuple[Engine, Dict[str, str]]:
+    if not ALLOW_SQLITE_FALLBACK:
+        st.error(
+            reason
+            + " Also, SQLite fallback is disabled. Ensure `sqlalchemy-libsql==0.2.0` is installed and DSN uses"
+              " `sqlite+libsql://`. Or set `ALLOW_SQLITE_FALLBACK=true` for local/dev only."
+        )
+        st.stop()
+    local_path = os.environ.get("LOCAL_SQLITE_PATH", "vendors.db")
+    e = create_engine(f"sqlite:///{local_path}")
     info: Dict[str, str] = {
         "using_remote": False,
-        "dialect": "",
-        "driver": "",
-        "sqlalchemy_url": "",
-        "sync_url": turso_url or "",
-        "strategy": "",
+        "dialect": e.dialect.name,
+        "driver": getattr(e.dialect, "driver", ""),
+        "sqlalchemy_url": f"sqlite:///{local_path}",
+        "sync_url": "",
+        "strategy": "local_sqlite",
     }
+    return e, info
 
-    def _fallback_sqlite(reason: str) -> Tuple[Engine, Dict[str, str]]:
-        if not ALLOW_SQLITE_FALLBACK:
-            st.error(
-                reason
-                + " Also, SQLite fallback is disabled. Ensure `sqlalchemy-libsql==0.2.0` is installed and DSN uses"
-                  " `sqlite+libsql://`. Or set `ALLOW_SQLITE_FALLBACK=true` for local/dev only."
-            )
-            st.stop()
-        local_path = os.environ.get("LOCAL_SQLITE_PATH", "vendors.db")
-        e = create_engine(f"sqlite:///{local_path}")
-        info.update({"using_remote": False, "sqlalchemy_url": f"sqlite:///{local_path}", "strategy": "local_sqlite"})
-        try:
-            info["dialect"] = e.dialect.name
-            info["driver"] = getattr(e.dialect, "driver", "")
-        except Exception:
-            pass
+
+def _build_engine_inner() -> tuple[Engine, Dict[str, str]]:
+    url = _get_secret("TURSO_DATABASE_URL")
+    token = _get_secret("TURSO_AUTH_TOKEN")
+
+    if not url or not token:
+        return _fallback_sqlite("TURSO_DATABASE_URL / TURSO_AUTH_TOKEN missing.")
+
+    dsn, is_embedded = _normalize_dsn(str(url))
+    try:
+        e = create_engine(
+            dsn,
+            connect_args={"auth_token": str(token)},
+            pool_pre_ping=True,
+            pool_recycle=180,
+        )
+        with e.connect() as conn:
+            conn.exec_driver_sql("SELECT 1")
+        info: Dict[str, str] = {
+            "using_remote": True,
+            "dialect": e.dialect.name,
+            "driver": getattr(e.dialect, "driver", ""),
+            "sqlalchemy_url": dsn,
+            "sync_url": dsn,
+            "strategy": "embedded_replica" if is_embedded else "direct",
+        }
         return e, info
+    except Exception as ex:
+        name = type(ex).__name__
+        msg = f"Turso init failed ({name}: {ex})"
+        return _fallback_sqlite(
+            "SQLAlchemy couldn't load the 'libsql' dialect or connect. "
+            "Verify `sqlalchemy-libsql==0.2.0` is installed and DSN uses `sqlite+libsql://`. "
+            f"Details: {msg}"
+        )
 
-    if turso_url and turso_token:
-        dsn = str(turso_url).strip()
 
-        # Accept libsql://host -> sqlite+libsql://host
-        if dsn.startswith("libsql://"):
-            dsn = "sqlite+libsql://" + dsn.split("://", 1)[1]
-
-        # Fix single-slash file DSNs: sqlite+libsql:/file.db -> sqlite+libsql:///file.db
-        if dsn.startswith("sqlite+libsql:/") and not dsn.startswith("sqlite+libsql://"):
-            dsn = "sqlite+libsql:///" + dsn.split(":/", 1)[1].lstrip("/")
-
-        # Enforce TLS only for REMOTE DSNs; embedded file DSNs must NOT include secure=true
-        is_embedded = dsn.startswith("sqlite+libsql:///")
-        if not is_embedded:
-            if "secure=" not in dsn.lower():
-                dsn += ("&secure=true" if "?" in dsn else "?secure=true")
-        else:
-            # Strip any accidental secure=true on embedded file DSNs
-            if "secure=" in dsn.lower():
-                dsn = dsn.replace("&secure=true", "").replace("?secure=true", "?").replace("?&", "?")
-                if dsn.endswith("?"):
-                    dsn = dsn[:-1]
-
-        try:
-            e = create_engine(
-                dsn,
-                connect_args={"auth_token": str(turso_token)},
-                pool_pre_ping=True,
-                pool_recycle=180,
-            )
-            # Probe to force plugin load and catch auth/network errors
-            with e.connect() as conn:
-                conn.exec_driver_sql("SELECT 1")
-            info.update({
-                "using_remote": True,
-                "sqlalchemy_url": dsn,
-                "strategy": "embedded_replica" if is_embedded else "direct",
-            })
-            try:
-                info["dialect"] = e.dialect.name
-                info["driver"] = getattr(e.dialect, "driver", "")
-            except Exception:
-                pass
-            return e, info
-        except Exception as ex:
-            name = type(ex).__name__
-            msg = f"Turso init failed ({name}: {ex})"
-            return _fallback_sqlite(
-                "SQLAlchemy couldn't load the 'libsql' dialect or connect. "
-                "Verify `sqlalchemy-libsql==0.2.0` is installed and DSN uses `sqlite+libsql://`. "
-                f"Details: {msg}"
-            )
-
-    # No Turso credentials at all
-    return _fallback_sqlite("TURSO_DATABASE_URL / TURSO_AUTH_TOKEN missing.")
+@st.cache_resource
+def get_engine_and_info() -> tuple[Engine, Dict[str, str]]:
+    return _build_engine_inner()
 
 
 # Build engine now
-engine, engine_info = build_engine()
+engine, engine_info = get_engine_and_info()
 
 
 # -----------------------------
@@ -191,7 +189,7 @@ def _extract_sync_host_from_dsn(dsn: str) -> str | None:
         qpos = dsn.find("?")
         if qpos == -1:
             return None
-        for part in dsn[qpos + 1 :].split("&"):
+        for part in dsn[qpos + 1:].split("&"):
             if not part:
                 continue
             k, _, v = part.partition("=")
@@ -279,7 +277,7 @@ def _failover_to_direct_remote_if_needed() -> None:
                 "sqlalchemy_url": remote_dsn,
                 "dialect": "sqlite",
                 "driver": "libsql",
-                "sync_url": remote_dsn,  # informational
+                "sync_url": remote_dsn,
                 "strategy": "failover_remote",
             }
         )
@@ -309,14 +307,15 @@ def _maybe_return_to_embedded() -> None:
     if not embedded_dsn:
         return
 
-    # Normalize to embedded DSN
+    # Normalize to embedded DSN form
     if embedded_dsn.startswith("libsql://"):
         embedded_dsn = "sqlite+libsql://" + embedded_dsn.split("://", 1)[1]
     if embedded_dsn.startswith("sqlite+libsql:/") and not embedded_dsn.startswith("sqlite+libsql://"):
         embedded_dsn = "sqlite+libsql:///" + embedded_dsn.split(":/", 1)[1].lstrip("/")
     if not embedded_dsn.startswith("sqlite+libsql:///"):
-        # Not an embedded DSN; nothing to return to
-        return
+        return  # not an embedded DSN; nothing to return to
+    if "sync_url=libsql://" in embedded_dsn:
+        embedded_dsn = embedded_dsn.replace("sync_url=libsql://", "sync_url=https://")
     if "secure=" in embedded_dsn.lower():
         embedded_dsn = embedded_dsn.replace("&secure=true", "").replace("?secure=true", "?").replace("?&", "?")
         if embedded_dsn.endswith("?"):
@@ -346,7 +345,7 @@ def _maybe_return_to_embedded() -> None:
         engine = e2
         engine_info.update(
             {
-                "using_remote": True,  # remote-backed via libsql, served from embedded file
+                "using_remote": True,
                 "sqlalchemy_url": embedded_dsn,
                 "dialect": "sqlite",
                 "driver": "libsql",
@@ -379,14 +378,9 @@ _maybe_return_to_embedded()
 # -----------------------------
 @st.cache_data(ttl=60)
 def fetch_df(sql: str, params: Dict | None = None) -> pd.DataFrame:
-    # Ensure the global engine is initialized before querying
-    e = engine
-    if e is None:
-        st.error("DB engine not initialized yet. Try reloading the page.")
-        st.stop()
-
+    # Use the cached engine from get_engine_and_info
     try:
-        with e.connect() as conn:
+        with engine.connect() as conn:
             if params:
                 result = conn.exec_driver_sql(sql, params)
             else:
@@ -494,27 +488,35 @@ def main():
         st.write("Status & Secrets (debug)")
         st.json({
             "using_remote": engine_info.get("using_remote"),
-            "strategy": engine_info.get("strategy") or ("embedded_replica" if str(engine_info.get("sqlalchemy_url", "")).startswith("sqlite+libsql:///") else "direct"),
+            "strategy": engine_info.get("strategy"),
             "sqlalchemy_url": engine_info.get("sqlalchemy_url"),
             "dialect": engine_info.get("dialect"),
             "driver": engine_info.get("driver"),
             "sync_url": engine_info.get("sync_url"),
         })
         try:
-            if engine is not None:
-                with engine.connect() as conn:
+            with engine.connect() as conn:
+                try:
                     vendors_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(vendors)").fetchall()]
+                except Exception:
+                    vendors_cols = []
+                try:
                     categories_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(categories)").fetchall()]
+                except Exception:
+                    categories_cols = []
+                try:
                     services_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(services)").fetchall()]
-                    cnts_row = conn.exec_driver_sql(
-                        "SELECT (SELECT COUNT(1) FROM vendors) AS vendors, (SELECT COUNT(1) FROM categories) AS categories, (SELECT COUNT(1) FROM services) AS services"
-                    ).fetchone()
-                st.json({
-                    "vendors_columns": vendors_cols,
-                    "categories_columns": categories_cols,
-                    "services_columns": services_cols,
-                    "counts": {"vendors": int(cnts_row[0]), "categories": int(cnts_row[1]), "services": int(cnts_row[2])},
-                })
+                except Exception:
+                    services_cols = []
+                cnts_row = conn.exec_driver_sql(
+                    "SELECT (SELECT COUNT(1) FROM vendors) AS vendors, (SELECT COUNT(1) FROM categories) AS categories, (SELECT COUNT(1) FROM services) AS services"
+                ).fetchone()
+            st.json({
+                "vendors_columns": vendors_cols,
+                "categories_columns": categories_cols,
+                "services_columns": services_cols,
+                "counts": {"vendors": int(cnts_row[0]), "categories": int(cnts_row[1]), "services": int(cnts_row[2])},
+            })
         except Exception as e:
             st.error(f"Probe failed: {e}")
 
