@@ -191,9 +191,9 @@ def fetch_df(sql: str, params: Dict | None = None) -> pd.DataFrame:
     try:
         with engine.connect() as conn:
             if params:
-    result = conn.exec_driver_sql(sql, params)
-else:
-    result = conn.exec_driver_sql(sql)
+                result = conn.exec_driver_sql(sql, params)
+            else:
+                result = conn.exec_driver_sql(sql)
             rows = result.fetchall()
             cols = result.keys()
         return pd.DataFrame(rows, columns=list(cols))
@@ -209,6 +209,7 @@ def vendors_df() -> pd.DataFrame:
         "FROM vendors ORDER BY business_name COLLATE NOCASE"
     )
     return fetch_df(sql)
+
 
 # -----------------------------
 # Table renderer (HTML)
