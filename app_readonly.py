@@ -133,9 +133,18 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
         if dsn.startswith("sqlite+libsql:/") and not dsn.startswith("sqlite+libsql://"):
             dsn = "sqlite+libsql:///" + dsn.split(":/", 1)[1].lstrip("/")
 
-        # Enforce TLS param without urlunparse (don’t alter other query params like sync_url)
-        if "secure=" not in dsn.lower():
-            dsn += ("&secure=true" if "?" in dsn else "?secure=true")
+        # Only enforce 'secure=true' for REMOTE DSNs (host present). For embedded file DSNs, DO NOT add it.
+        is_file_dsn = dsn.startswith("sqlite+libsql:///")
+        if not is_file_dsn:
+            if "secure=" not in dsn.lower():
+                dsn += ("&secure=true" if "?" in dsn else "?secure=true")
+        else:
+            # If someone mistakenly added secure=true to a file DSN, strip it to avoid DBAPI kwarg errors
+            if "secure=" in dsn.lower():
+                dsn = dsn.replace("&secure=true", "").replace("?secure=true", "?").replace("?&", "?")
+                if dsn.endswith("?"):
+                    dsn = dsn[:-1]
+
 
         try:
             e = create_engine(
