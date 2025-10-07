@@ -187,17 +187,23 @@ if not engine_info.get("using_remote"):
 
 @st.cache_data(ttl=60)
 def fetch_df(sql: str, params: Dict | None = None) -> pd.DataFrame:
-    # Use SQLAlchemy execute instead of pandas.read_sql to avoid libsql ValueError paths
-    with engine.connect() as conn:
-        result = conn.execute(sql_text(sql), params or {})
-        rows = result.fetchall()
-        cols = result.keys()
-    return pd.DataFrame(rows, columns=list(cols))
+    # Use exec_driver_sql to avoid pandas/libsql cursor quirks
+    try:
+        with engine.connect() as conn:
+            result = conn.exec_driver_sql(sql, params or {})
+            rows = result.fetchall()
+            cols = result.keys()
+        return pd.DataFrame(rows, columns=list(cols))
+    except Exception as e:
+        # Show the underlying DB error in the UI for quick diagnosis
+        st.error(f"DB query failed: {type(e).__name__}: {e}")
+        raise
 
 def vendors_df() -> pd.DataFrame:
+    # Case-insensitive ordering without calling lower()
     sql = (
         "SELECT id, business_name, category, service, contact_name, phone, address, website, notes, keywords "
-        "FROM vendors ORDER BY lower(business_name)"
+        "FROM vendors ORDER BY business_name COLLATE NOCASE"
     )
     return fetch_df(sql)
 
