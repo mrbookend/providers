@@ -20,6 +20,8 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
+import sqlalchemy_libsql  # registers 'sqlite+libsql' dialect entrypoint
+from sqlalchemy.engine import Engine
 
 # -----------------------------
 # Page layout FIRST
