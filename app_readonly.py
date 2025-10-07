@@ -177,31 +177,40 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
 
 
 engine, engine_info = build_engine()
-# Warm-up for embedded replica: trigger sync and wait briefly for schema
-def _warmup_embedded_replica():
+
+# Warm-up for embedded replica: trigger sync and wait for schema (up to ~30s)
+def _warmup_embedded_replica() -> bool:
     url = str(engine_info.get("sqlalchemy_url", ""))
     if not url.startswith("sqlite+libsql:///"):
-        return  # only applies to embedded file DSNs
+        return True  # only applies to embedded (file) DSNs
 
+    import time
     try:
         with engine.connect() as conn:
-            # Touch the schema to trigger a sync
+            # Touch the schema to trigger replication
             conn.exec_driver_sql("SELECT name FROM sqlite_master LIMIT 1")
 
-            # Wait up to ~5s for the 'vendors' table to exist
-            for _ in range(10):
+            # Wait for the 'vendors' table to appear
+            deadline = time.time() + 30.0
+            while time.time() < deadline:
                 row = conn.exec_driver_sql(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='vendors'"
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    ("vendors",),
                 ).fetchone()
                 if row:
-                    return  # table exists; we're good
-                import time
+                    return True
                 time.sleep(0.5)
     except Exception as e:
         # Non-fatal: show a hint but don't crash—downstream code will still surface errors if any
         st.warning(f"Replica warm-up warning: {e}")
+    return False
 
-_warmup_embedded_replica()
+# Run warm-up; if schema just appeared, clear any cached failures
+if _warmup_embedded_replica():
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
 
 if not engine_info.get("using_remote"):
     st.warning("Running on local SQLite fallback (remote DB unavailable or disabled).", icon="⚠️")
