@@ -17,8 +17,16 @@ except Exception:
 # -----------------------------
 # Page config & left padding (no title rendered)
 # -----------------------------
-PAGE_TITLE = st.secrets.get("page_title", "Providers (Read-only)") if hasattr(st, "secrets") else "Providers (Read-only)"
-SIDEBAR_STATE = st.secrets.get("sidebar_state", "expanded") if hasattr(st, "secrets") else "expanded"
+PAGE_TITLE = (
+    st.secrets.get("page_title", "Providers (Read-only)")
+    if hasattr(st, "secrets")
+    else "Providers (Read-only)"
+)
+SIDEBAR_STATE = (
+    st.secrets.get("sidebar_state", "expanded")
+    if hasattr(st, "secrets")
+    else "expanded"
+)
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
 
 LEFT_PAD_PX = int(st.secrets.get("page_left_padding_px", 20)) if hasattr(st, "secrets") else 20
@@ -68,17 +76,19 @@ st.markdown(STICKY_HEADER_CSS, unsafe_allow_html=True)
 def build_engine() -> tuple[Engine, dict]:
     """Embedded replica to Turso. Fall back to local ONLY if FORCE_LOCAL=1."""
     info: dict = {}
-    url   = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
-    token = (st.secrets.get("TURSO_AUTH_TOKEN")   or os.getenv("TURSO_AUTH_TOKEN")   or "").strip()
+    url = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
+    token = (st.secrets.get("TURSO_AUTH_TOKEN") or os.getenv("TURSO_AUTH_TOKEN") or "").strip()
 
     if not url:
         eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
-        info.update({
-            "using_remote": False,
-            "sqlalchemy_url": "sqlite:///vendors.db",
-            "dialect": eng.dialect.name,
-            "driver": getattr(eng.dialect, "driver", ""),
-        })
+        info.update(
+            {
+                "using_remote": False,
+                "sqlalchemy_url": "sqlite:///vendors.db",
+                "dialect": eng.dialect.name,
+                "driver": getattr(eng.dialect, "driver", ""),
+            }
+        )
         return eng, info
 
     try:
@@ -98,30 +108,35 @@ def build_engine() -> tuple[Engine, dict]:
         with eng.connect() as c:
             c.exec_driver_sql("select 1;")
 
-        info.update({
-            "using_remote": True,
-            "strategy": "embedded_replica",
-            "sqlalchemy_url": "sqlite+libsql:///vendors-embedded.db",
-            "dialect": eng.dialect.name,
-            "driver": getattr(eng.dialect, "driver", ""),
-            "sync_url": sync_url,
-        })
+        info.update(
+            {
+                "using_remote": True,
+                "strategy": "embedded_replica",
+                "sqlalchemy_url": "sqlite+libsql:///vendors-embedded.db",
+                "dialect": eng.dialect.name,
+                "driver": getattr(eng.dialect, "driver", ""),
+                "sync_url": sync_url,
+            }
+        )
         return eng, info
 
     except Exception as e:
         info["remote_error"] = f"{e}"
         if os.getenv("FORCE_LOCAL") == "1":
             eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
-            info.update({
-                "using_remote": False,
-                "sqlalchemy_url": "sqlite:///vendors.db",
-                "dialect": eng.dialect.name,
-                "driver": getattr(eng.dialect, "driver", ""),
-            })
+            info.update(
+                {
+                    "using_remote": False,
+                    "sqlalchemy_url": "sqlite:///vendors.db",
+                    "dialect": eng.dialect.name,
+                    "driver": getattr(eng.dialect, "driver", ""),
+                }
+            )
             return eng, info
 
         st.error("Remote DB unavailable and FORCE_LOCAL is not set. Aborting.")
         raise
+
 
 engine, engine_info = build_engine()
 
@@ -134,17 +149,35 @@ def _format_phone(val: str | None) -> str:
         return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
     return (val or "").strip()
 
-@st.cache_data(ttl=10)
+
 def load_df() -> pd.DataFrame:
+    """Load vendors with stable case-insensitive ordering (index-friendly)."""
     with engine.begin() as conn:
-        df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
+        df = pd.read_sql(
+            sql_text("SELECT * FROM vendors ORDER BY business_name COLLATE NOCASE"),
+            conn,
+        )
     # Ensure columns exist (robustness)
-    for col in ["category","service","business_name","contact_name","phone","address","website","notes","keywords","created_at","updated_at","updated_by"]:
+    for col in [
+        "category",
+        "service",
+        "business_name",
+        "contact_name",
+        "phone",
+        "address",
+        "website",
+        "notes",
+        "keywords",
+        "created_at",
+        "updated_at",
+        "updated_by",
+    ]:
         if col not in df.columns:
             df[col] = ""
     # Display-only phone format
     df["phone_fmt"] = df["phone"].apply(_format_phone)
     return df
+
 
 # -----------------------------
 # UI (single page; no title; no tabs)
@@ -161,43 +194,57 @@ q = st.text_input(
     label_visibility="collapsed",
 )
 
+
 def _filter(_df: pd.DataFrame, q: str) -> pd.DataFrame:
     if not q:
         return _df
     qq = re.escape(q)
     mask = (
-        _df["category"].astype(str).str.contains(qq, case=False, na=False) |
-        _df["service"].astype(str).str.contains(qq, case=False, na=False) |
-        _df["business_name"].astype(str).str.contains(qq, case=False, na=False) |
-        _df["contact_name"].astype(str).str.contains(qq, case=False, na=False) |
-        _df["phone"].astype(str).str.contains(qq, case=False, na=False) |
-        _df["address"].astype(str).str.contains(qq, case=False, na=False) |
-        _df["website"].astype(str).str.contains(qq, case=False, na=False) |
-        _df["notes"].astype(str).str.contains(qq, case=False, na=False) |
-        _df["keywords"].astype(str).str.contains(qq, case=False, na=False)
+        _df["category"].astype(str).str.contains(qq, case=False, na=False)
+        | _df["service"].astype(str).str.contains(qq, case=False, na=False)
+        | _df["business_name"].astype(str).str.contains(qq, case=False, na=False)
+        | _df["contact_name"].astype(str).str.contains(qq, case=False, na=False)
+        | _df["phone"].astype(str).str.contains(qq, case=False, na=False)
+        | _df["address"].astype(str).str.contains(qq, case=False, na=False)
+        | _df["website"].astype(str).str.contains(qq, case=False, na=False)
+        | _df["notes"].astype(str).str.contains(qq, case=False, na=False)
+        | _df["keywords"].astype(str).str.contains(qq, case=False, na=False)
     )
     return _df[mask]
 
-# Columns to show (hide 'id' and 'keywords'); use formatted phone
+
+# Columns to show (hide 'id' and 'keywords'); use formatted phone; rename headers
 view_cols = [
-    "category", "service", "business_name", "contact_name", "phone_fmt",
-    "address", "website", "notes",
+    "category",
+    "service",
+    "business_name",
+    "contact_name",
+    "phone_fmt",
+    "address",
+    "website",
+    "notes",
 ]
-grid_df = _filter(df, q)[view_cols].rename(columns={"business_name": "provider", "phone_fmt": "phone"})
+grid_df = _filter(df, q)[view_cols].rename(columns={"business_name": "Provider", "phone_fmt": "phone"})
 
 # ---- Server-side sorting controls ----
-sort_options = [c for c in ["provider","category","service","contact_name","phone","address","website","notes"] if c in grid_df.columns]
-col1, col2 = st.columns([3,1])
+sort_options = [
+    c
+    for c in ["Provider", "category", "service", "contact_name", "phone", "address", "website", "notes"]
+    if c in grid_df.columns
+]
+col1, col2 = st.columns([3, 1])
 with col1:
     sort_col = st.selectbox("Sort by", options=sort_options, index=0)
 with col2:
     sort_desc = st.checkbox("Descending", value=False, help="Sort in descending order")
+
 
 def _sort_key(s: pd.Series):
     try:
         return s.astype(str).str.lower()
     except Exception:
         return s
+
 
 grid_df = grid_df.sort_values(by=sort_col, ascending=not sort_desc, key=_sort_key)
 
@@ -211,6 +258,7 @@ def _linkify(u: str | None) -> str:
     disp = u.replace("https://", "").replace("http://", "")
     return f'<a href="{u}" target="_blank" rel="noopener noreferrer">{disp}</a>'
 
+
 # ---- Build a Pandas Styler (wrap + auto row height + widths) ----
 styled = grid_df.style
 
@@ -221,24 +269,26 @@ if wrap_cols:
 
 # Startup column widths (adjust here)
 widths = {
-    "provider":       "240px",
-    "category":       "140px",
-    "service":        "160px",
-    "contact_name":   "180px",
-    "phone":          "140px",
-    "address":        "260px",
-    "website":        "220px",
-    "notes":          "420px",
+    "category": "140px",
+    "service": "160px",
+    "Provider": "240px",
+    "contact_name": "180px",
+    "phone": "140px",
+    "address": "260px",
+    "website": "220px",
+    "notes": "420px",
 }
 for col, w in widths.items():
     if col in grid_df.columns:
         styled = styled.set_properties(subset=[col], **{"min-width": w, "width": w})
 
 # Table layout + vertical alignment
-styled = styled.set_table_styles([
-    {"selector": "table", "props": [("table-layout", "fixed"), ("width", "100%")]},
-    {"selector": "th, td", "props": [("vertical-align", "top")]}
-])
+styled = styled.set_table_styles(
+    [
+        {"selector": "table", "props": [("table-layout", "fixed"), ("width", "100%")]},
+        {"selector": "th, td", "props": [("vertical-align", "top")]},
+    ]
+)
 
 # Clickable website links in HTML table (escape=None required)
 if "website" in grid_df.columns:
@@ -251,7 +301,7 @@ styled = styled.hide(axis="index")
 html = styled.to_html()
 st.markdown(f'<div class="providers-scroll">{html}</div>', unsafe_allow_html=True)
 
-# CSV download (filtered view): formatted phones only
+# CSV download (filtered view) — formatted phones only
 st.download_button(
     "Download CSV file of Providers",
     data=grid_df.to_csv(index=False).encode("utf-8"),
@@ -283,9 +333,11 @@ if st.session_state["show_debug"]:
         }
 
     st.subheader("DB Probe")
-    st.json({
-        "vendors_columns": [c[1] for c in vendors_cols],
-        "categories_columns": [c[1] for c in categories_cols],
-        "services_columns": [c[1] for c in services_cols],
-        "counts": counts,
-    })
+    st.json(
+        {
+            "vendors_columns": [c[1] for c in vendors_cols],
+            "categories_columns": [c[1] for c in categories_cols],
+            "services_columns": [c[1] for c in services_cols],
+            "counts": counts,
+        }
+    )
