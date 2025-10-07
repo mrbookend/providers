@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any
 
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
 
-# Register 'sqlite+libsql' dialect (must be AFTER importing streamlit)
+# Register 'sqlite+libsql' dialect (must be after importing streamlit)
 try:
     import sqlalchemy_libsql  # noqa: F401
 except Exception:
@@ -18,16 +17,8 @@ except Exception:
 # -----------------------------
 # Page config & left padding (no title rendered)
 # -----------------------------
-PAGE_TITLE = (
-    st.secrets.get("page_title", "Providers (Read-only)")
-    if hasattr(st, "secrets")
-    else "Providers (Read-only)"
-)
-SIDEBAR_STATE = (
-    st.secrets.get("sidebar_state", "expanded")
-    if hasattr(st, "secrets")
-    else "expanded"
-)
+PAGE_TITLE = st.secrets.get("page_title", "Providers (Read-only)") if hasattr(st, "secrets") else "Providers (Read-only)"
+SIDEBAR_STATE = st.secrets.get("sidebar_state", "expanded") if hasattr(st, "secrets") else "expanded"
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
 
 LEFT_PAD_PX = int(st.secrets.get("page_left_padding_px", 20)) if hasattr(st, "secrets") else 20
@@ -43,26 +34,51 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# --- Sticky header css ---
+STICKY_HEADER_CSS = """
+<style>
+/* Scroll container for providers table */
+.providers-scroll {
+  max-height: 70vh;        /* adjust if you want taller/shorter viewport */
+  overflow-y: auto;
+  border: 0;               /* placeholder to keep layout stable */
+}
+/* Ensure borders don’t collapse so sticky paints cleanly */
+.providers-scroll table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+/* Make the header row sticky */
+.providers-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: white;       /* keep it readable over rows while scrolling */
+  z-index: 3;
+  box-shadow: 0 1px 0 rgba(0,0,0,.06);
+}
+</style>
+"""
+st.markdown(STICKY_HEADER_CSS, unsafe_allow_html=True)
+# --- /Sticky header css ---
+
+
 # -----------------------------
 # Engine (embedded replica) + gated fallback
 # -----------------------------
-@st.cache_resource
-def build_engine() -> tuple[Engine, dict[str, Any]]:
+def build_engine() -> tuple[Engine, dict]:
     """Embedded replica to Turso. Fall back to local ONLY if FORCE_LOCAL=1."""
-    info: dict[str, Any] = {}
-    url = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
-    token = (st.secrets.get("TURSO_AUTH_TOKEN") or os.getenv("TURSO_AUTH_TOKEN") or "").strip()
+    info: dict = {}
+    url   = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
+    token = (st.secrets.get("TURSO_AUTH_TOKEN")   or os.getenv("TURSO_AUTH_TOKEN")   or "").strip()
 
     if not url:
         eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
-        info.update(
-            {
-                "using_remote": False,
-                "sqlalchemy_url": "sqlite:///vendors.db",
-                "dialect": eng.dialect.name,
-                "driver": getattr(eng.dialect, "driver", ""),
-            }
-        )
+        info.update({
+            "using_remote": False,
+            "sqlalchemy_url": "sqlite:///vendors.db",
+            "dialect": eng.dialect.name,
+            "driver": getattr(eng.dialect, "driver", ""),
+        })
         return eng, info
 
     try:
@@ -82,35 +98,30 @@ def build_engine() -> tuple[Engine, dict[str, Any]]:
         with eng.connect() as c:
             c.exec_driver_sql("select 1;")
 
-        info.update(
-            {
-                "using_remote": True,
-                "strategy": "embedded_replica",
-                "sqlalchemy_url": "sqlite+libsql:///vendors-embedded.db",
-                "dialect": eng.dialect.name,
-                "driver": getattr(eng.dialect, "driver", ""),
-                "sync_url": sync_url,
-            }
-        )
+        info.update({
+            "using_remote": True,
+            "strategy": "embedded_replica",
+            "sqlalchemy_url": "sqlite+libsql:///vendors-embedded.db",
+            "dialect": eng.dialect.name,
+            "driver": getattr(eng.dialect, "driver", ""),
+            "sync_url": sync_url,
+        })
         return eng, info
 
     except Exception as e:
         info["remote_error"] = f"{e}"
         if os.getenv("FORCE_LOCAL") == "1":
             eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
-            info.update(
-                {
-                    "using_remote": False,
-                    "sqlalchemy_url": "sqlite:///vendors.db",
-                    "dialect": eng.dialect.name,
-                    "driver": getattr(eng.dialect, "driver", ""),
-                }
-            )
+            info.update({
+                "using_remote": False,
+                "sqlalchemy_url": "sqlite:///vendors.db",
+                "dialect": eng.dialect.name,
+                "driver": getattr(eng.dialect, "driver", ""),
+            })
             return eng, info
 
         st.error("Remote DB unavailable and FORCE_LOCAL is not set. Aborting.")
         raise
-
 
 engine, engine_info = build_engine()
 
@@ -123,68 +134,17 @@ def _format_phone(val: str | None) -> str:
         return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
     return (val or "").strip()
 
-
-def _sanitize_url(u: str | None) -> str:
-    u = (u or "").strip()
-    if not u:
-        return ""
-    if not re.match(r"^https?://", u, re.I):
-        u = "https://" + u
-    return u
-
-
-@st.cache_data(ttl=5)
-def load_df(engine: Engine) -> pd.DataFrame:
+@st.cache_data(ttl=10)
+def load_df() -> pd.DataFrame:
     with engine.begin() as conn:
         df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
-
     # Ensure columns exist (robustness)
-    needed = [
-        "category",
-        "service",
-        "business_name",
-        "contact_name",
-        "phone",
-        "address",
-        "website",
-        "notes",
-        "keywords",
-        "created_at",
-        "updated_at",
-        "updated_by",
-    ]
-    for col in needed:
+    for col in ["category","service","business_name","contact_name","phone","address","website","notes","keywords","created_at","updated_at","updated_by"]:
         if col not in df.columns:
             df[col] = ""
-
-    # Safe string ops (avoid repeated astype)
-    df = df.fillna("")
-
-    # Friendly phone + sanitized url
+    # Display-only phone format
     df["phone_fmt"] = df["phone"].apply(_format_phone)
-    df["website"] = df["website"].apply(_sanitize_url)
-
-    # Single lowercase search blob for cheap contains()
-    # (keeps read-only search fast without DB FTS complexity)
-    blob_cols = [
-        "category",
-        "service",
-        "business_name",
-        "contact_name",
-        "phone",
-        "address",
-        "website",
-        "notes",
-        "keywords",
-    ]
-    df["_blob"] = (
-        df[blob_cols]
-        .astype(str)
-        .agg(" ".join, axis=1)
-        .str.lower()
-    )
     return df
-
 
 # -----------------------------
 # UI (single page; no title; no tabs)
@@ -192,55 +152,104 @@ def load_df(engine: Engine) -> pd.DataFrame:
 if "show_debug" not in st.session_state:
     st.session_state["show_debug"] = False
 
-# Top controls
-top_l, top_r = st.columns([1, 1])
-with top_l:
-    q = st.text_input(
-        "",
-        placeholder="Search providers… (press Enter)",
-        label_visibility="collapsed",
+df = load_df()
+
+# Search (label hidden; placeholder carries "Search")
+q = st.text_input(
+    "",
+    placeholder="Search — e.g., plumb returns any record with 'plumb' anywhere",
+    label_visibility="collapsed",
+)
+
+def _filter(_df: pd.DataFrame, q: str) -> pd.DataFrame:
+    if not q:
+        return _df
+    qq = re.escape(q)
+    mask = (
+        _df["category"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["service"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["business_name"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["contact_name"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["phone"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["address"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["website"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["notes"].astype(str).str.contains(qq, case=False, na=False) |
+        _df["keywords"].astype(str).str.contains(qq, case=False, na=False)
     )
-with top_r:
-    if st.button("Refresh data"):
-        st.cache_data.clear()
-
-df = load_df(engine)
-
-# Filter quickly via precomputed blob
-_filtered = df
-qq = (q or "").strip().lower()
-if qq:
-    _filtered = _filtered[_filtered["_blob"].str.contains(qq, regex=False)]
+    return _df[mask]
 
 # Columns to show (hide 'id' and 'keywords'); use formatted phone
 view_cols = [
-    "category",
-    "service",
-    "business_name",
-    "contact_name",
-    "phone_fmt",
-    "address",
-    "website",
-    "notes",
+    "category", "service", "business_name", "contact_name", "phone_fmt",
+    "address", "website", "notes",
 ]
-grid_df = _filtered[view_cols].rename(columns={"business_name": "provider", "phone_fmt": "phone"})
+grid_df = _filter(df, q)[view_cols].rename(columns={"business_name": "provider", "phone_fmt": "phone"})
 
-# Render fast, virtualized table; clickable website links
-st.dataframe(
-    grid_df,
-    use_container_width=True,
-    column_config={
-        "provider": st.column_config.TextColumn("Provider", width=240),
-        "category": st.column_config.TextColumn("Category", width=140),
-        "service": st.column_config.TextColumn("Service", width=160),
-        "contact_name": st.column_config.TextColumn("Contact", width=180),
-        "phone": st.column_config.TextColumn("Phone", width=140),
-        "address": st.column_config.TextColumn("Address", width=260),
-        "website": st.column_config.LinkColumn("Website", max_chars=40),
-        "notes": st.column_config.TextColumn("Notes", width=420),
-    },
-    height=560,  # tweak if you want more/less visible rows
-)
+# ---- Server-side sorting controls ----
+sort_options = [c for c in ["provider","category","service","contact_name","phone","address","website","notes"] if c in grid_df.columns]
+col1, col2 = st.columns([3,1])
+with col1:
+    sort_col = st.selectbox("Sort by", options=sort_options, index=0)
+with col2:
+    sort_desc = st.checkbox("Descending", value=False, help="Sort in descending order")
+
+def _sort_key(s: pd.Series):
+    try:
+        return s.astype(str).str.lower()
+    except Exception:
+        return s
+
+grid_df = grid_df.sort_values(by=sort_col, ascending=not sort_desc, key=_sort_key)
+
+# ---- Linkify website (for HTML render) ----
+def _linkify(u: str | None) -> str:
+    u = (u or "").strip()
+    if not u:
+        return ""
+    if not re.match(r"^https?://", u, re.I):
+        u = "https://" + u
+    disp = u.replace("https://", "").replace("http://", "")
+    return f'<a href="{u}" target="_blank" rel="noopener noreferrer">{disp}</a>'
+
+# ---- Build a Pandas Styler (wrap + auto row height + widths) ----
+styled = grid_df.style
+
+# Wrap long text; let rows auto-grow
+wrap_cols = [c for c in ["address", "website", "notes"] if c in grid_df.columns]
+if wrap_cols:
+    styled = styled.set_properties(subset=wrap_cols, **{"white-space": "normal", "word-break": "break-word"})
+
+# Startup column widths (adjust here)
+widths = {
+    "provider":       "240px",
+    "category":       "140px",
+    "service":        "160px",
+    "contact_name":   "180px",
+    "phone":          "140px",
+    "address":        "260px",
+    "website":        "220px",
+    "notes":          "420px",
+}
+for col, w in widths.items():
+    if col in grid_df.columns:
+        styled = styled.set_properties(subset=[col], **{"min-width": w, "width": w})
+
+# Table layout + vertical alignment
+styled = styled.set_table_styles([
+    {"selector": "table", "props": [("table-layout", "fixed"), ("width", "100%")]},
+    {"selector": "th, td", "props": [("vertical-align", "top")]}
+])
+
+# Clickable website links in HTML table (escape=None required)
+if "website" in grid_df.columns:
+    styled = styled.format({"website": _linkify}, escape=None)
+
+# Hide the index (first unlabeled column)
+styled = styled.hide(axis="index")
+
+# Render as static HTML (keeps wrap + auto row height)
+html = styled.to_html()
+st.markdown(f'<div class="providers-scroll">{html}</div>', unsafe_allow_html=True)
 
 # CSV download (filtered view): formatted phones only
 st.download_button(
@@ -253,22 +262,15 @@ st.download_button(
 # -----------------------------
 # Debug (button toggled at bottom)
 # -----------------------------
-st.divider()
 btn_label = "Show debug" if not st.session_state["show_debug"] else "Hide debug"
 if st.button(btn_label):
     st.session_state["show_debug"] = not st.session_state["show_debug"]
     st.rerun()
 
 if st.session_state["show_debug"]:
+    st.divider()
     st.subheader("Status & Secrets (debug)")
-
-    # mask sync_url in screenshots/logs
-    safe_info = dict(engine_info)
-    if isinstance(safe_info.get("sync_url"), str):
-        s = safe_info["sync_url"]
-        if len(s) > 20:
-            safe_info["sync_url"] = s[:10] + "…•••…" + s[-8:]
-    st.json(safe_info)
+    st.json(engine_info)
 
     with engine.begin() as conn:
         vendors_cols = conn.execute(sql_text("PRAGMA table_info(vendors)")).fetchall()
@@ -281,11 +283,9 @@ if st.session_state["show_debug"]:
         }
 
     st.subheader("DB Probe")
-    st.json(
-        {
-            "vendors_columns": [c[1] for c in vendors_cols],
-            "categories_columns": [c[1] for c in categories_cols],
-            "services_columns": [c[1] for c in services_cols],
-            "counts": counts,
-        }
-    )
+    st.json({
+        "vendors_columns": [c[1] for c in vendors_cols],
+        "categories_columns": [c[1] for c in categories_cols],
+        "services_columns": [c[1] for c in services_cols],
+        "counts": counts,
+    })
