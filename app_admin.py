@@ -16,16 +16,15 @@ except Exception:
     pass
 # ---- end dialect registration ----
 
+
 # -----------------------------
-# Page config & CSS (full width, no left margin; nowrap table)
+# Page config & CSS
 # -----------------------------
 PAGE_TITLE = st.secrets.get("page_title", "Vendors Admin") if hasattr(st, "secrets") else "Vendors Admin"
 SIDEBAR_STATE = st.secrets.get("sidebar_state", "expanded") if hasattr(st, "secrets") else "expanded"
-
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
 
 LEFT_PAD_PX = int(st.secrets.get("page_left_padding_px", 40)) if hasattr(st, "secrets") else 40
-
 st.markdown(
     f"""
     <style>
@@ -39,45 +38,40 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 # -----------------------------
-# Admin sign-in gate (robust)
+# Admin sign-in gate (toggleable)
 # -----------------------------
-ADMIN_PASSWORD = (st.secrets.get("ADMIN_PASSWORD") or os.getenv("ADMIN_PASSWORD") or "").strip()
-# Dev bypass: set DISABLE_ADMIN_PASSWORD=1 in the environment to skip sign-in
-if os.getenv("DISABLE_ADMIN_PASSWORD") == "1":
-    st.session_state["auth_ok"] = True
-# right after the bypass block in app_admin.py
-if os.getenv("DISABLE_ADMIN_PASSWORD") == "1":
-    st.info("⚠️ Admin password is DISABLED for this session (DEV).")
+# Disable the sign-in by setting in secrets.toml:
+#   require_admin_password = false
+REQUIRE_ADMIN_PASSWORD = str(st.secrets.get("require_admin_password", "true")).lower() in {"1", "true", "yes", "y"}
 
-if os.getenv("DISABLE_ADMIN_PASSWORD") != "1" and (not isinstance(ADMIN_PASSWORD, str) or not ADMIN_PASSWORD):
-    st.error("ADMIN_PASSWORD is not set in Secrets. Add it in Settings → Secrets.")
-    st.stop()
+if REQUIRE_ADMIN_PASSWORD:
+    ADMIN_PASSWORD = (st.secrets.get("ADMIN_PASSWORD") or os.getenv("ADMIN_PASSWORD") or "").strip()
+    if not isinstance(ADMIN_PASSWORD, str) or not ADMIN_PASSWORD:
+        st.error("ADMIN_PASSWORD is not set in Secrets. Add it in Settings → Secrets.")
+        st.stop()
 
-if "auth_ok" not in st.session_state:
-    st.session_state["auth_ok"] = False
+    if "auth_ok" not in st.session_state:
+        st.session_state["auth_ok"] = False
 
-if not st.session_state["auth_ok"]:
-    st.subheader("Admin sign-in")
-    pw = st.text_input("Password", type="password", key="admin_pw")
-    if st.button("Sign in"):
-        if (pw or "").strip() == ADMIN_PASSWORD:
-            st.session_state["auth_ok"] = True
-            st.rerun()
-        else:
-            st.error("Incorrect password.")
-    st.stop()
-
-# Small sanity check in Debug panel later:
-# st.write({"FORCE_LOCAL": os.getenv("FORCE_LOCAL")})
+    if not st.session_state["auth_ok"]:
+        st.subheader("Admin sign-in")
+        pw = st.text_input("Password", type="password", key="admin_pw")
+        if st.button("Sign in"):
+            if (pw or "").strip() == ADMIN_PASSWORD:
+                st.session_state["auth_ok"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+        st.stop()
+else:
+    st.caption("Admin password disabled via secrets (require_admin_password = false).")
 
 
 # -----------------------------
-# DB helpers
+# CSV Restore helpers
 # -----------------------------
-
-# --- CSV Restore helpers (ADD) ---
-
 REQUIRED_VENDOR_COLUMNS = ["business_name", "category"]  # service optional
 
 def _get_table_columns(engine: Engine, table: str) -> list[str]:
@@ -195,8 +189,11 @@ def _execute_append_only(
             inserted += len(without_id_df)
 
     return inserted
-# --- /CSV Restore helpers ---
 
+
+# -----------------------------
+# DB build / schema / helpers
+# -----------------------------
 def build_engine() -> tuple[Engine, dict]:
     """Use Embedded Replica for Turso (syncs to remote), else fallback to local."""
     info: dict = {}
@@ -216,7 +213,6 @@ def build_engine() -> tuple[Engine, dict]:
 
     # Embedded replica: local file that syncs to your remote Turso DB
     try:
-        # Normalize sync_url: embedded REQUIRES libsql:// (no sqlite+libsql, no ?secure=true)
         raw = url
         if raw.startswith("sqlite+libsql://"):
             host = raw.split("://", 1)[1].split("?", 1)[0]  # drop any ?secure=true
@@ -258,11 +254,8 @@ def build_engine() -> tuple[Engine, dict]:
             })
             return eng, info
 
-        # Prod: do NOT silently fall back
         st.error("Remote DB unavailable and FORCE_LOCAL is not set. Aborting to protect data.")
         raise
-
-
 
 
 def ensure_schema(engine: Engine) -> None:
@@ -304,6 +297,7 @@ def ensure_schema(engine: Engine) -> None:
         for s in stmts:
             conn.execute(sql_text(s))
 
+
 def _normalize_phone(val: str | None) -> str:
     if not val:
         return ""
@@ -316,9 +310,7 @@ def _format_phone(val: str | None) -> str:
     s = re.sub(r"\D", "", str(val or ""))
     if len(s) == 10:
         return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
-    # If it's not a clean 10 digits, show the original as-is
     return (val or "").strip()
-
 
 def _sanitize_url(url: str | None) -> str:
     if not url:
@@ -336,9 +328,9 @@ def load_df(engine: Engine) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = ""
 
-    # Display-friendly phone; storage remains digits
+    df["notes_short"] = df.get("notes", "").astype(str).str.replace("\n", " ").str.slice(0, 150)
+    df["keywords_short"] = df.get("keywords", "").astype(str).str.replace("\n", " ").str.slice(0, 80)
     df["phone_fmt"] = df["phone"].apply(_format_phone)
-
     return df
 
 def list_names(engine: Engine, table: str) -> list[str]:
@@ -351,12 +343,12 @@ def usage_count(engine: Engine, col: str, name: str) -> int:
         cnt = conn.execute(sql_text(f"SELECT COUNT(*) FROM vendors WHERE {col} = :n"), {"n": name}).scalar()
     return int(cnt or 0)
 
+
 # -----------------------------
 # UI
 # -----------------------------
 engine, engine_info = build_engine()
 ensure_schema(engine)
-
 
 _tabs = st.tabs([
     "Browse Vendors",
@@ -370,9 +362,10 @@ _tabs = st.tabs([
 # ---------- Browse
 with _tabs[0]:
     df = load_df(engine)
+    st.caption("Search across common fields; sorting is server-side.")
     q = st.text_input(
         "",
-        placeholder="Search — e.g., plumb returns any record with 'plumb' anywhere",
+        placeholder="Search — e.g., 'plumb' finds partial matches anywhere",
         label_visibility="collapsed",
     )
 
@@ -392,10 +385,6 @@ with _tabs[0]:
             _df["keywords"].astype(str).str.contains(qq, case=False, na=False)
         )
         return _df[mask]
-
-    # These two are already created in load_df(); remove if redundant:
-    # df["notes_short"] = df["notes"].astype(str).str.replace("\n", " ").str.slice(0, 150)
-    # df["keywords_short"] = df["keywords"].astype(str).str.replace("\n", " ").str.slice(0, 80)
 
     view_cols = [
         "id", "category", "service", "business_name", "contact_name", "phone_fmt",
@@ -424,7 +413,6 @@ with _tabs[0]:
     )
 
 # ---------- Add/Edit/Delete Vendor
-
 with _tabs[1]:
     st.subheader("Add Vendor")
     cats = list_names(engine, "categories")
@@ -473,7 +461,6 @@ with _tabs[1]:
                 })
             st.success("Vendor added.")
             st.rerun()
-
 
     st.divider()
     st.subheader("Edit / Delete Vendor")
@@ -731,124 +718,79 @@ with _tabs[4]:
             mime="text/csv",
         )
 
-    # CSV Restore UI (Append-only, ID-checked)
-    with st.expander("CSV Restore (Append-only, ID-checked)", expanded=False):
-        st.caption(
-            "WARNING: This tool only **appends** rows. "
-            "Rows whose `id` already exists are **rejected**. No updates, no deletes."
-        )
-        uploaded = st.file_uploader("Upload CSV to append into `vendors`", type=["csv"], accept_multiple_files=False)
-
-        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
-        with col1:
-            dry_run = st.checkbox("Dry run (validate only)", value=True)
-        with col2:
-            trim_strings = st.checkbox("Trim strings", value=True)
-        with col3:
-            normalize_phone = st.checkbox("Normalize phone to digits", value=True)
-        with col4:
-            auto_id = st.checkbox("Missing `id` ➜ autoincrement", value=True)
-
-        if uploaded is not None:
-            try:
-                df_in = pd.read_csv(uploaded)
-                with_id_df, without_id_df, rejected_ids, insertable_cols = _prepare_csv_for_append(
-                    engine,
-                    df_in,
-                    normalize_phone=normalize_phone,
-                    trim_strings=trim_strings,
-                    treat_missing_id_as_autoincrement=auto_id,
-                )
-
-                planned_inserts = len(with_id_df) + len(without_id_df)
-
-                st.write("**Validation summary**")
-                st.write(
-                    {
-                        "csv_rows": int(len(df_in)),
-                        "insertable_columns": insertable_cols,
-                        "rows_with_explicit_id": int(len(with_id_df)),
-                        "rows_autoincrement_id": int(len(without_id_df)),
-                        "rows_rejected_due_to_existing_id": rejected_ids,
-                        "planned_inserts": int(planned_inserts),
-                    }
-                )
-
-                if dry_run:
-                    st.success("Dry run complete. No changes applied.")
-                else:
-                    if planned_inserts == 0:
-                        st.info("Nothing to insert (all rows rejected or CSV empty after filters).")
-                    else:
-                        inserted = _execute_append_only(engine, with_id_df, without_id_df, insertable_cols)
-                        st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
-            except Exception as e:
-                st.error(f"CSV restore failed: {e}")
-
     st.divider()
     st.subheader("Data cleanup")
 
- # Normalize phone numbers & Title Case (vendors + categories/services)
-if st.button("Normalize phone numbers & Title Case (vendors + categories/services)"):
-    def to_title(s: str | None) -> str:
-        return ((s or "").strip()).title()
+    # Normalize phones and title-case names (vendors)
+    if st.button("Normalize phones (digits only) & title-case business/contacts"):
+        with engine.begin() as conn:
+            rows = conn.execute(
+                sql_text("SELECT id, phone, business_name, contact_name FROM vendors")
+            ).fetchall()
+            for r in rows:
+                pid = int(r[0])
+                phone_norm = _normalize_phone(r[1] or "")
+                bname = (r[2] or "").strip().title()
+                cname = (r[3] or "").strip().title()
+                conn.execute(
+                    sql_text(
+                        "UPDATE vendors SET phone=:p, business_name=:b, contact_name=:c WHERE id=:id"
+                    ),
+                    {"p": phone_norm, "b": bname, "c": cname, "id": pid},
+                )
+        st.success("Normalization complete.")
 
-    TEXT_COLS_TO_TITLE = [
-        "category", "service", "business_name", "contact_name",
-        "address", "notes", "keywords",
-    ]
+    # NEW: Title-case & de-duplicate Categories/Services everywhere
+    if st.button("Title-case categories/services & merge duplicates (safe)"):
+        def _titlecase_merge(table: str, col: str):
+            with engine.begin() as conn:
+                rows = conn.execute(sql_text(f"SELECT id, {col} FROM {table}")).fetchall()
+                # rows: [(id, name)] for categories/services tables
+                if table in {"vendors"}:
+                    raise RuntimeError("Do not call with vendors")
 
-    changed_vendors = 0
-    with engine.begin() as conn:
-        # --- vendors table ---
-        rows = conn.execute(sql_text("SELECT * FROM vendors")).fetchall()
-        for r in rows:
-            row = dict(r._mapping) if hasattr(r, "_mapping") else dict(r)
-            pid = int(row["id"])
+            # Build canonical buckets
+            buckets: dict[str, list[tuple[int, str]]] = {}
+            for rid, name in rows:
+                name_s = (name or "").strip()
+                if not name_s:
+                    continue
+                canon = name_s.title()
+                buckets.setdefault(canon, []).append((int(rid), name_s))
 
-            vals = {c: to_title(row.get(c)) for c in TEXT_COLS_TO_TITLE}
-            vals["website"] = _sanitize_url((row.get("website") or "").strip())
-            vals["phone"]   = _normalize_phone(row.get("phone") or "")
-            vals["id"]      = pid
+            with engine.begin() as conn:
+                for canon, entries in buckets.items():
+                    # Ensure one primary row exists with the canonical name
+                    primary_id = None
+                    for rid, name_s in entries:
+                        if name_s == canon:
+                            primary_id = rid
+                            break
+                    if primary_id is None:
+                        # rename the first entry to canonical
+                        primary_id = entries[0][0]
+                        conn.execute(sql_text(f"UPDATE {table} SET name=:canon WHERE id=:id"),
+                                     {"canon": canon, "id": primary_id})
 
-            conn.execute(sql_text("""
-                UPDATE vendors
-                   SET category=:category,
-                       service=NULLIF(:service,''),
-                       business_name=:business_name,
-                       contact_name=:contact_name,
-                       phone=:phone,
-                       address=:address,
-                       website=:website,
-                       notes=:notes,
-                       keywords=:keywords
-                 WHERE id=:id
-            """), vals)
-            changed_vendors += 1
+                    # Update vendors to use canonical value for all old spellings
+                    for _, name_s in entries:
+                        if table == "categories":
+                            conn.execute(sql_text(
+                                "UPDATE vendors SET category=:canon WHERE category=:old"
+                            ), {"canon": canon, "old": name_s})
+                        else:  # services
+                            conn.execute(sql_text(
+                                "UPDATE vendors SET service=:canon WHERE service=:old"
+                            ), {"canon": canon, "old": name_s})
 
-        # --- categories table: retitle + reconcile duplicates by case ---
-        cat_rows = conn.execute(sql_text("SELECT name FROM categories")).fetchall()
-        for (old_name,) in cat_rows:
-            new_name = to_title(old_name)
-            if new_name != old_name:
-                conn.execute(sql_text("INSERT OR IGNORE INTO categories(name) VALUES(:n)"), {"n": new_name})
-                conn.execute(sql_text("UPDATE vendors SET category=:new WHERE category=:old"),
-                             {"new": new_name, "old": old_name})
-                conn.execute(sql_text("DELETE FROM categories WHERE name=:old"), {"old": old_name})
+                    # Delete duplicate rows (keep primary)
+                    for rid, name_s in entries:
+                        if rid != primary_id:
+                            conn.execute(sql_text(f"DELETE FROM {table} WHERE id=:id"), {"id": rid})
 
-        # --- services table: retitle + reconcile duplicates by case ---
-        svc_rows = conn.execute(sql_text("SELECT name FROM services")).fetchall()
-        for (old_name,) in svc_rows:
-            new_name = to_title(old_name)
-            if new_name != old_name:
-                conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new_name})
-                conn.execute(sql_text("UPDATE vendors SET service=:new WHERE service=:old"),
-                             {"new": new_name, "old": old_name})
-                conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"old": old_name})
-
-    st.success(f"Vendors normalized: {changed_vendors}. Categories/services retitled and reconciled.")
-
-
+        _titlecase_merge("categories", "name")
+        _titlecase_merge("services", "name")
+        st.success("Categories/Services title-cased and duplicates merged across tables.")
 
     # Backfill timestamps
     if st.button("Backfill created_at/updated_at when missing"):
@@ -877,8 +819,7 @@ if st.button("Normalize phone numbers & Title Case (vendors + categories/service
 
             def clean_soft(s: str | None) -> str:
                 s = (s or "").strip()
-                # collapse runs of spaces/tabs only; KEEP line breaks
-                s = re.sub(r"[ \t]+", " ", s)
+                s = re.sub(r"[ \t]+", " ", s)  # collapse spaces/tabs; keep newlines
                 return s
 
             for r in rows:
@@ -890,9 +831,8 @@ if st.button("Normalize phone numbers & Title Case (vendors + categories/service
                     "contact_name":  clean_soft(r[4]),
                     "address":       clean_soft(r[5]),
                     "website":       _sanitize_url(clean_soft(r[6])),
-                    "notes":         clean_soft(r[7]),  # preserves newlines
+                    "notes":         clean_soft(r[7]),
                     "keywords":      clean_soft(r[8]),
-                    # leave phone unchanged here; or use _normalize_phone(r[9]) if you want to normalize now
                     "phone":         r[9],
                     "id":            pid,
                 }
@@ -916,46 +856,51 @@ if st.button("Normalize phone numbers & Title Case (vendors + categories/service
                 )
                 changed += 1
         st.success(f"Whitespace trimmed on {changed} row(s).")
+
 # ---------- Debug
 with _tabs[5]:
-    st.subheader("Status & Secrets (debug)")
-    st.json(engine_info)
+    SHOW_DEBUG = bool(st.secrets.get("show_debug", True))
+    if SHOW_DEBUG:
+        st.subheader("Status & Secrets (debug)")
+        st.json(engine_info)
 
-    with engine.begin() as conn:
-        vendors_cols = conn.execute(sql_text("PRAGMA table_info(vendors)")).fetchall()
-        categories_cols = conn.execute(sql_text("PRAGMA table_info(categories)")).fetchall()
-        services_cols = conn.execute(sql_text("PRAGMA table_info(services)")).fetchall()
+        with engine.begin() as conn:
+            vendors_cols = conn.execute(sql_text("PRAGMA table_info(vendors)")).fetchall()
+            categories_cols = conn.execute(sql_text("PRAGMA table_info(categories)")).fetchall()
+            services_cols = conn.execute(sql_text("PRAGMA table_info(services)")).fetchall()
 
-        # --- Index presence (vendors) ---
-        idx_rows = conn.execute(sql_text("PRAGMA index_list(vendors)")).fetchall()
-        vendors_indexes = [
-            {"seq": r[0], "name": r[1], "unique": bool(r[2]), "origin": r[3], "partial": bool(r[4])}
-            for r in idx_rows
-        ]
+            # Index presence (vendors)
+            idx_rows = conn.execute(sql_text("PRAGMA index_list(vendors)")).fetchall()
+            vendors_indexes = [
+                {"seq": r[0], "name": r[1], "unique": bool(r[2]), "origin": r[3], "partial": bool(r[4])}
+                for r in idx_rows
+            ]
 
-        # --- Null timestamp counts (quick sanity) ---
-        created_at_nulls = conn.execute(
-            sql_text("SELECT COUNT(*) FROM vendors WHERE created_at IS NULL OR created_at=''")
-        ).scalar() or 0
-        updated_at_nulls = conn.execute(
-            sql_text("SELECT COUNT(*) FROM vendors WHERE updated_at IS NULL OR updated_at=''")
-        ).scalar() or 0
+            # Null timestamp counts
+            created_at_nulls = conn.execute(
+                sql_text("SELECT COUNT(*) FROM vendors WHERE created_at IS NULL OR created_at=''")
+            ).scalar() or 0
+            updated_at_nulls = conn.execute(
+                sql_text("SELECT COUNT(*) FROM vendors WHERE updated_at IS NULL OR updated_at=''")
+            ).scalar() or 0
 
-        counts = {
-            "vendors": conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0,
-            "categories": conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar() or 0,
-            "services": conn.execute(sql_text("SELECT COUNT(*) FROM services")).scalar() or 0,
-        }
+            counts = {
+                "vendors": conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0,
+                "categories": conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar() or 0,
+                "services": conn.execute(sql_text("SELECT COUNT(*) FROM services")).scalar() or 0,
+            }
 
-    st.subheader("DB Probe")
-    st.json({
-        "vendors_columns": [c[1] for c in vendors_cols],
-        "categories_columns": [c[1] for c in categories_cols],
-        "services_columns": [c[1] for c in services_cols],
-        "counts": counts,
-        "vendors_indexes": vendors_indexes,
-        "timestamp_nulls": {
-            "created_at": int(created_at_nulls),
-            "updated_at": int(updated_at_nulls),
-        },
-    })
+        st.subheader("DB Probe")
+        st.json({
+            "vendors_columns": [c[1] for c in vendors_cols],
+            "categories_columns": [c[1] for c in categories_cols],
+            "services_columns": [c[1] for c in services_cols],
+            "counts": counts,
+            "vendors_indexes": vendors_indexes,
+            "timestamp_nulls": {
+                "created_at": int(created_at_nulls),
+                "updated_at": int(updated_at_nulls),
+            },
+        })
+    else:
+        st.info("Debug panel disabled via secrets (show_debug = false).")
