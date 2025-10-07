@@ -283,11 +283,12 @@ def _failover_to_direct_remote_if_needed() -> None:
                 "strategy": "failover_remote",
             }
         )
-        st.warning(
-            "Embedded replica not ready; temporarily serving from direct remote. "
-            "Reads are live; the app will use the embedded replica again once it catches up."
-        )
-        # Clear any cached failures
+        if not st.session_state.get("ro_failover_warned"):
+            st.session_state["ro_failover_warned"] = True
+            st.warning(
+                "Embedded replica not ready; temporarily serving from direct remote. "
+                "Reads are live; the app will use the embedded replica again once it catches up."
+            )
         try:
             st.cache_data.clear()
         except Exception:
@@ -297,9 +298,80 @@ def _failover_to_direct_remote_if_needed() -> None:
         st.error(f"Failover to remote DB failed: {type(ex).__name__}: {ex}")
 
 
-# Run warm-up; if schema still missing, fail over to direct remote
+def _maybe_return_to_embedded() -> None:
+    """If we are in failover_remote and the embedded replica is ready, switch back."""
+    global engine
+
+    if engine_info.get("strategy") != "failover_remote":
+        return
+
+    embedded_dsn = str(_get_secret("TURSO_DATABASE_URL") or "").strip()
+    if not embedded_dsn:
+        return
+
+    # Normalize to embedded DSN
+    if embedded_dsn.startswith("libsql://"):
+        embedded_dsn = "sqlite+libsql://" + embedded_dsn.split("://", 1)[1]
+    if embedded_dsn.startswith("sqlite+libsql:/") and not embedded_dsn.startswith("sqlite+libsql://"):
+        embedded_dsn = "sqlite+libsql:///" + embedded_dsn.split(":/", 1)[1].lstrip("/")
+    if not embedded_dsn.startswith("sqlite+libsql:///"):
+        # Not an embedded DSN; nothing to return to
+        return
+    if "secure=" in embedded_dsn.lower():
+        embedded_dsn = embedded_dsn.replace("&secure=true", "").replace("?secure=true", "?").replace("?&", "?")
+        if embedded_dsn.endswith("?"):
+            embedded_dsn = embedded_dsn[:-1]
+
+    token = str(_get_secret("TURSO_AUTH_TOKEN") or "")
+    if not token:
+        return
+
+    try:
+        e2 = create_engine(
+            embedded_dsn,
+            connect_args={"auth_token": token},
+            pool_pre_ping=True,
+            pool_recycle=180,
+        )
+        with e2.connect() as c:
+            c.exec_driver_sql("SELECT 1")
+            row = c.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                ("vendors",),
+            ).fetchone()
+            if not row:
+                return
+
+        # Swap back to embedded
+        engine = e2
+        engine_info.update(
+            {
+                "using_remote": True,  # remote-backed via libsql, served from embedded file
+                "sqlalchemy_url": embedded_dsn,
+                "dialect": "sqlite",
+                "driver": "libsql",
+                "strategy": "embedded_replica",
+            }
+        )
+
+        if not st.session_state.get("ro_returned_info"):
+            st.session_state["ro_returned_info"] = True
+            st.info("Replica is ready; switched back to embedded.")
+
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+
+    except Exception:
+        # If anything fails, stay on failover; try again next run
+        pass
+
+
+# Run warm-up; if schema still missing, fail over to direct remote, then attempt to return later
 if not _warmup_embedded_replica():
     _failover_to_direct_remote_if_needed()
+_maybe_return_to_embedded()
 
 
 # -----------------------------
