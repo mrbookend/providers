@@ -94,11 +94,10 @@ ALLOW_SQLITE_FALLBACK = str(_get_secret("ALLOW_SQLITE_FALLBACK", "0")).lower() i
 # -----------------------------
 # Engine builder (Turso/libSQL first)
 # -----------------------------
-
 def build_engine() -> Tuple[Engine, Dict[str, str]]:
     turso_url = _get_secret("TURSO_DATABASE_URL")
     turso_token = _get_secret("TURSO_AUTH_TOKEN")
-    info = {
+    info: Dict[str, str] = {
         "using_remote": False,
         "dialect": "",
         "driver": "",
@@ -106,29 +105,59 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
         "sync_url": turso_url or "",
     }
 
-    if turso_url and turso_token:
-        engine = create_engine(
-            str(turso_url),
-            connect_args={"auth_token": str(turso_token)},
-            pool_pre_ping=True,
-            pool_recycle=180,
-        )
-        info.update({"using_remote": True, "sqlalchemy_url": str(turso_url)})
-    else:
+    def _fallback_sqlite(reason: str) -> Tuple[Engine, Dict[str, str]]:
         if not ALLOW_SQLITE_FALLBACK:
-            st.error("Turso credentials missing and SQLite fallback disabled. Set TURSO_* or enable ALLOW_SQLITE_FALLBACK for local dev.")
+            st.error(
+                reason
+                + " Also, SQLite fallback is disabled. Add `sqlalchemy-libsql>=0.2.2` to requirements.txt "
+                  "and ensure the DSN uses `sqlite+libsql://` (not `libsql://`). "
+                  "Or set `ALLOW_SQLITE_FALLBACK=true` for local/dev only."
+            )
             st.stop()
         local_path = os.environ.get("LOCAL_SQLITE_PATH", "vendors.db")
-        engine = create_engine(f"sqlite:///{local_path}")
+        e = create_engine(f"sqlite:///{local_path}")
         info.update({"using_remote": False, "sqlalchemy_url": f"sqlite:///{local_path}"})
+        try:
+            info["dialect"] = e.dialect.name
+            info["driver"] = getattr(e.dialect, "driver", "")
+        except Exception:
+            pass
+        return e, info
 
-    # Probe dialect/driver
-    try:
-        info["dialect"] = engine.dialect.name
-        info["driver"] = getattr(engine.dialect, "driver", "")
-    except Exception:
-        pass
-    return engine, info
+    if turso_url and turso_token:
+        # Normalize DSN if someone used libsql://… instead of sqlite+libsql://…
+        dsn = str(turso_url)
+        if dsn.startswith("libsql://"):
+            dsn = "sqlite+libsql://" + dsn.split("://", 1)[1]
+        try:
+            e = create_engine(
+                dsn,
+                connect_args={"auth_token": str(turso_token)},
+                pool_pre_ping=True,
+                pool_recycle=180,
+            )
+            # Probe to force plugin load and catch auth/network errors early
+            with e.connect() as conn:
+                conn.execute(sql_text("SELECT 1"))
+            info.update({"using_remote": True, "sqlalchemy_url": dsn})
+            try:
+                info["dialect"] = e.dialect.name
+                info["driver"] = getattr(e.dialect, "driver", "")
+            except Exception:
+                pass
+            return e, info
+        except Exception as ex:
+            name = type(ex).__name__
+            msg = f"Turso init failed ({name}: {ex})"
+            return _fallback_sqlite(
+                "SQLAlchemy couldn't load the 'libsql' dialect or connect. "
+                "Verify `sqlalchemy-libsql>=0.2.2` is installed and DSN uses `sqlite+libsql://`. "
+                f"Details: {msg}"
+            )
+
+    # No Turso credentials at all
+    return _fallback_sqlite("TURSO_DATABASE_URL / TURSO_AUTH_TOKEN missing.")
+
 
 engine, engine_info = build_engine()
 
