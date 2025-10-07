@@ -21,7 +21,9 @@ from sqlalchemy.engine import Engine
 import sqlalchemy_libsql  # registers 'sqlite+libsql' dialect entrypoint
 import streamlit.components.v1 as components
 
-# -----------------------------
+## Globals initialized early to avoid NameError during first run/rerun
+engine = None          # will be set to a SQLAlchemy Engine
+engine_info = {}       # dict with connection/debug info -----------------------------
 # Page layout FIRST
 # -----------------------------
 
