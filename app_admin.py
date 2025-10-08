@@ -63,47 +63,74 @@ st.markdown(
 )
 
 # -----------------------------
-# Admin auth (single, robust; runs BEFORE engine creation)
+# Admin auth (prevents "hang" by authenticating BEFORE DB engine creation)
 # -----------------------------
-if not st.session_state.get("admin_authed", False):
-    with st.form("admin_login", clear_on_submit=False):
-        pw = st.text_input("Admin password", type="password", key="admin_pw")
-        submitted = st.form_submit_button("Sign in", use_container_width=True)
+import hmac, hashlib
 
-        if submitted:
-            # Optional dev bypass
-            if _as_bool(_get_secret("DISABLE_ADMIN_PASSWORD", "0")):
+def _norm_bool(s: str | None, default: bool = False) -> bool:
+    if s is None:
+        return default
+    return str(s).strip().lower() in ("1", "true", "yes", "on")
+
+# Flags from secrets/env
+DISABLE_ADMIN_PASSWORD = _norm_bool(_get_secret("DISABLE_ADMIN_PASSWORD", "0"))
+DEBUG_ADMIN_AUTH       = _norm_bool(_get_secret("DEBUG_ADMIN_AUTH", "0"))
+ADMIN_PASSWORD_STRIP   = _norm_bool(_get_secret("ADMIN_PASSWORD_STRIP", "1"))
+
+# session gate
+authed = bool(st.session_state.get("admin_authed", False))
+
+def _normalize(s: str) -> str:
+    return s.strip() if ADMIN_PASSWORD_STRIP else s
+
+if DISABLE_ADMIN_PASSWORD:
+    # Dev bypass: mark authed and DO NOT render the form
+    st.session_state["admin_authed"] = True
+    authed = True
+    st.info("⚠️ Admin password bypass is enabled (DEV). Turn it off via DISABLE_ADMIN_PASSWORD='0'.")
+else:
+    # Only render the form when not already authed
+    if not authed:
+        with st.form("admin_login", clear_on_submit=False):
+            pw = st.text_input("Admin password", type="password", key="admin_pw")
+            submitted = st.form_submit_button("Sign in", use_container_width=True)
+
+            if submitted:
+                raw_secret = _get_secret("ADMIN_PASSWORD", "")
+                if not raw_secret:
+                    st.error("ADMIN_PASSWORD is not set in Secrets/Env.")
+                    st.stop()
+
+                # Compare: support plain or sha256:<hex>
+                ok = False
+                if isinstance(raw_secret, str) and raw_secret.startswith("sha256:"):
+                    stored_hash = raw_secret.split("sha256:", 1)[1]
+                    typed_hash  = hashlib.sha256(pw.encode("utf-8")).hexdigest()
+                    ok = hmac.compare_digest(typed_hash, stored_hash)
+                else:
+                    ok = hmac.compare_digest(_normalize(pw), _normalize(str(raw_secret)))
+
+                if DEBUG_ADMIN_AUTH:
+                    st.caption(
+                        f"Auth debug: strip={ADMIN_PASSWORD_STRIP}, "
+                        f"len(typed)={len(pw)}, len(config)={len(str(raw_secret))}, "
+                        f"eq_plain={(pw == str(raw_secret))}, eq_strip={(_normalize(pw) == _normalize(str(raw_secret)))}"
+                    )
+
+                if not ok:
+                    st.error("Invalid password.")
+                    st.stop()
+
                 st.session_state["admin_authed"] = True
-                st.success("Signed in (bypass).")
+                authed = True
+                st.success("Signed in.")
                 st.rerun()
 
-            raw_secret = _get_secret("ADMIN_PASSWORD", "")
-            if not raw_secret:
-                st.error("ADMIN_PASSWORD is not set in Secrets or Env.")
-                st.stop()
+# Final guard: nothing below should run unless authed
+if not authed:
+    st.stop()
+# -----------------------------
 
-            strip_cfg = _as_bool(_get_secret("ADMIN_PASSWORD_STRIP", "1"), True)
-            typed = _norm(pw or "", strip_cfg)
-            stored = str(raw_secret)
-
-            ok = False
-            if stored.startswith("sha256:"):
-                stored_hash = stored.split("sha256:", 1)[1]
-                typed_hash = hashlib.sha256(typed.encode("utf-8")).hexdigest()
-                ok = hmac.compare_digest(typed_hash, stored_hash)
-            else:
-                ok = hmac.compare_digest(typed, _norm(stored, strip_cfg))
-
-            if _as_bool(_get_secret("DEBUG_ADMIN_AUTH", "0")):
-                st.caption(
-                    f"Auth debug: strip={strip_cfg}, "
-                    f"len(typed)={len(typed)}, len(config)={len(stored)}, "
-                    f"eq_plain={typed == stored}, eq_strip={typed == _norm(stored, True)}"
-                )
-
-            if not ok:
-                st.error("Invalid password.")
-                st.stop()
 
             st.session_state["admin_authed"] = True
             st.success("Signed in.")
