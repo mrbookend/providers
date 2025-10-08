@@ -82,13 +82,17 @@ ALLOW_SQLITE_FALLBACK = str(_get_secret("ALLOW_SQLITE_FALLBACK", "0")).lower() i
 
 
 # -----------------------------
-# Engine builder (Turso/libSQL first)
+# Engine builder (Turso/libSQL with embedded replica support)
 # -----------------------------
 def _normalize_dsn(raw: str) -> tuple[str, bool]:
-    """Normalize DSN. Returns (dsn, is_embedded)."""
+    """
+    Normalize DSN. Accepts libsql://..., fixes single-slash forms, ensures HTTPS sync_url,
+    and relocates relative embedded file names to /mount/data for Streamlit Cloud.
+    Returns (dsn, is_embedded).
+    """
     dsn = (raw or "").strip()
 
-    # Strip accidental outer quotes
+    # Strip accidental outer quotes (secrets UI sometimes keeps them)
     if (dsn.startswith("'") and dsn.endswith("'")) or (dsn.startswith('"') and dsn.endswith('"')):
         dsn = dsn[1:-1].strip()
 
@@ -103,11 +107,11 @@ def _normalize_dsn(raw: str) -> tuple[str, bool]:
     is_embedded = dsn.startswith("sqlite+libsql:///")
 
     if is_embedded:
-        # Ensure sync_url uses HTTPS (avoid 308s)
+        # Ensure sync_url uses HTTPS to avoid 308 redirects
         if "sync_url=libsql://" in dsn:
             dsn = dsn.replace("sync_url=libsql://", "sync_url=https://")
 
-        # Split file part and query
+        # If the embedded path is relative (vendors-embedded.db), move it under /mount/data/
         after = dsn.split("sqlite+libsql:///", 1)[1]
         if "?" in after:
             path_part, q = after.split("?", 1)
@@ -115,13 +119,11 @@ def _normalize_dsn(raw: str) -> tuple[str, bool]:
         else:
             path_part, q = after, ""
 
-        # Absolute path? keep it. Otherwise map to /mount/data/<file>
         if path_part.startswith("/"):
-            abs_path = path_part  # e.g. /mount/data/vendors-embedded.db
+            abs_path = path_part  # already absolute
         else:
             abs_path = "/mount/data/" + path_part.lstrip("/")
 
-        # Rebuild DSN with absolute path (no double-prefixing)
         dsn = "sqlite+libsql:///" + abs_path.lstrip("/") + q
 
         # Remove meaningless secure=true on embedded DSNs
@@ -130,7 +132,7 @@ def _normalize_dsn(raw: str) -> tuple[str, bool]:
             if dsn.endswith("?"):
                 dsn = dsn[:-1]
     else:
-        # Host DSN: ensure secure=true
+        # Host DSN: enforce TLS
         if "secure=" not in dsn.lower():
             dsn += ("&secure=true" if "?" in dsn else "?secure=true")
 
@@ -138,13 +140,15 @@ def _normalize_dsn(raw: str) -> tuple[str, bool]:
 
 
 def _fallback_sqlite(reason: str) -> tuple[Engine, Dict[str, str]]:
-    if not ALLOW_SQLITE_FALLBACK:
+    allow = str(_get_secret("ALLOW_SQLITE_FALLBACK", "0")).lower() in ("1", "true", "yes")
+    if not allow:
         st.error(
             reason
-            + " Also, SQLite fallback is disabled. Ensure `sqlalchemy-libsql==0.2.0` is installed and DSN uses"
-              " `sqlite+libsql://`. Or set `ALLOW_SQLITE_FALLBACK=true` for local/dev only."
+            + " Also, SQLite fallback is disabled. Ensure `sqlalchemy-libsql==0.2.0` is installed and DSN uses "
+              "`sqlite+libsql://`. Or set `ALLOW_SQLITE_FALLBACK=true` for local/dev only."
         )
         st.stop()
+
     local_path = os.environ.get("LOCAL_SQLITE_PATH", "vendors.db")
     e = create_engine(f"sqlite:///{local_path}")
     info: Dict[str, str] = {
@@ -176,11 +180,11 @@ def _build_engine_inner() -> tuple[Engine, Dict[str, str]]:
         with e.connect() as conn:
             conn.exec_driver_sql("SELECT 1")
         info: Dict[str, str] = {
-            "using_remote": True,
+            "using_remote": True,                 # still libsql driver, even for embedded file
             "dialect": e.dialect.name,
             "driver": getattr(e.dialect, "driver", ""),
             "sqlalchemy_url": dsn,
-            "sync_url": dsn,  # informational
+            "sync_url": dsn,
             "strategy": "embedded_replica" if is_embedded else "direct",
         }
         return e, info
@@ -199,9 +203,7 @@ def get_engine_and_info() -> tuple[Engine, Dict[str, str]]:
     return _build_engine_inner()
 
 
-# Build engine now
 engine, engine_info = get_engine_and_info()
-
 
 # -----------------------------
 # Embedded replica warm-up + automatic failover to direct remote
