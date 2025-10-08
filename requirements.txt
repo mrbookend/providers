@@ -2,4 +2,3 @@ streamlit==1.38.0
 pandas==2.2.2
 SQLAlchemy==2.0.32
 sqlalchemy-libsql==0.2.0
-# sqlalchemy-libsql will install a compatible libsql-client automatically.
