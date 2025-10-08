@@ -486,71 +486,52 @@ def main():
     # Debug / Maintenance (no Terminal required)
 if st.button("Show Debug / Status", key="dbg_btn_ro"):
     st.write("Status & Secrets (debug)")
-    st.json({
-        "using_remote": engine_info.get("using_remote"),
-        "strategy": engine_info.get("strategy") or ("embedded_replica" if str(engine_info.get("sqlalchemy_url", "")).startswith("sqlite+libsql:///") else "direct"),
-        "sqlalchemy_url": engine_info.get("sqlalchemy_url"),
-        "dialect": engine_info.get("dialect"),
-        "driver": engine_info.get("driver"),
-        "sync_url": engine_info.get("sync_url"),
-    })
+st.json(engine_info)
 
-    # File system & environment snapshot
-    import os, time
-    cwd = os.getcwd()
-    st.write("Working dir:", cwd)
-    for name in ("vendors-embedded.db", "vendors.db"):
-        p = os.path.join(cwd, name)
-        if os.path.exists(p):
-            st.write(f"• {name} — {os.path.getsize(p)} bytes; mtime={time.ctime(os.path.getmtime(p))}")
-        else:
-            st.write(f"• {name} — (not found)")
+# --- EXTRA DIAGNOSTICS (temporary) ---
+import os, json, time
 
-    # Package versions
-    try:
-        import importlib.metadata as md
-        st.json({
-            "streamlit": md.version("streamlit"),
-            "pandas": md.version("pandas"),
-            "SQLAlchemy": md.version("SQLAlchemy"),
-            "sqlalchemy-libsql": md.version("sqlalchemy-libsql"),
-        })
-    except Exception:
-        pass
+def _repr(v):  # show hidden whitespace/smart quotes
+    return repr(v) if v is not None else "None"
 
-    # --- NEW: Schema/table probe (shows exactly what the DB has) ---
-    st.markdown("### Schema probe")
-    try:
-        with engine.connect() as conn:
-            tables = [r[0] for r in conn.exec_driver_sql(
-                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-            ).fetchall()]
-            st.write("Tables:", tables)
-            if "vendors" in tables:
-                cnt = conn.exec_driver_sql("SELECT COUNT(1) FROM vendors").scalar()
-                st.write("vendors_count:", int(cnt))
-            else:
-                st.warning("Table 'vendors' not found in this database.")
-    except Exception as e:
-        st.error(f"Schema probe failed: {type(e).__name__}: {e}")
+src_secrets_dsn = st.secrets.get("TURSO_DATABASE_URL")
+src_secrets_tok = st.secrets.get("TURSO_AUTH_TOKEN")
+env_dsn         = os.environ.get("TURSO_DATABASE_URL")
+env_tok         = os.environ.get("TURSO_AUTH_TOKEN")
 
-    # DB column/count snapshot (kept)
-    try:
-        with engine.connect() as conn:
-            vendors_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(vendors)").fetchall()]
-            categories_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(categories)").fetchall()]
-            services_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(services)").fetchall()]
-            cnts_row = conn.exec_driver_sql(
-                "SELECT (SELECT COUNT(1) FROM vendors) AS vendors, (SELECT COUNT(1) FROM categories) AS categories, (SELECT COUNT(1) FROM services) AS services"
-            ).fetchone()
-        st.json({
-            "vendors_columns": vendors_cols,
-            "categories_columns": categories_cols,
-            "services_columns": services_cols,
-            "counts": {"vendors": int(cnts_row[0]), "categories": int(cnts_row[1]), "services": int(cnts_row[2])},
-        })
-    except Exception as e:
-        st.error(f"Probe failed: {e}")
+st.caption("Raw values as seen by the app (repr):")
+st.json({
+    "secrets.TURSO_DATABASE_URL": _repr(src_secrets_dsn),
+    "secrets.TURSO_AUTH_TOKEN":   f"<len {len(src_secrets_tok) if src_secrets_tok else 0}>",
+    "env.TURSO_DATABASE_URL":     _repr(env_dsn),
+    "env.TURSO_AUTH_TOKEN":       f"<len {len(env_tok) if env_tok else 0}>",
+})
+
+# Check the embedded target path you intend to use
+embed_path = "/mount/data/vendors-embedded.db"
+st.json({
+    "embedded_path": embed_path,
+    "exists": os.path.exists(embed_path),
+    "dir_exists": os.path.isdir(os.path.dirname(embed_path)),
+    "is_writable_dir": os.access(os.path.dirname(embed_path), os.W_OK),
+})
+
+st.caption("If env.TURSO_DATABASE_URL is set, it may override Secrets. Clear env vars in app settings.")
+
+# --- SCHEMA PROBE (unchanged) ---
+try:
+    with engine.connect() as conn:
+        names = [r[0] for r in conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()]
+    st.write("Schema probe")
+    st.write("Tables:")
+    st.write(names)
+    if "vendors" not in names:
+        st.warning("Table 'vendors' not found in this database.")
+except Exception as e:
+    st.error(f"Probe failed: {e}")
+
 
     # Guarded maintenance (enable via secrets)
     maint = str(_get_secret("READONLY_MAINTENANCE_ENABLE", "0")).lower() in ("1","true","yes")
