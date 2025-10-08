@@ -1,615 +1,291 @@
-# -*- coding: utf-8 -*-
-# app_readonly.py - Providers Read-Only (embedded replica first, remote failover)
 from __future__ import annotations
 
 import os
-import html
-import time
-from typing import Dict, Tuple, Any, Optional
+import re
+from typing import Any
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
-import sqlalchemy_libsql  # registers 'sqlite+libsql' dialect entrypoint
 
+# Register 'sqlite+libsql' dialect (must be AFTER importing streamlit)
+try:
+    import sqlalchemy_libsql  # noqa: F401
+except Exception:
+    pass
 
 # -----------------------------
-# Page layout FIRST
+# Page config & left padding (no title rendered)
 # -----------------------------
-def _read_secret_early(name: str, default=None):
-    try:
-        if name in st.secrets:
-            return st.secrets[name]
-    except Exception:
-        pass
-    return os.environ.get(name, default)
-
-PAGE_TITLE = _read_secret_early("page_title", "Vendors Directory")
-PAGE_MAX_WIDTH_PX = int(_read_secret_early("page_max_width_px", 2000))
-SIDEBAR_STATE = _read_secret_early("sidebar_state", "expanded")
-
+PAGE_TITLE = (
+    st.secrets.get("page_title", "Providers (Read-only)")
+    if hasattr(st, "secrets")
+    else "Providers (Read-only)"
+)
+SIDEBAR_STATE = (
+    st.secrets.get("sidebar_state", "expanded")
+    if hasattr(st, "secrets")
+    else "expanded"
+)
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
 
+LEFT_PAD_PX = int(st.secrets.get("page_left_padding_px", 20)) if hasattr(st, "secrets") else 20
 st.markdown(
     f"""
     <style>
-      .block-container {{ max-width: {PAGE_MAX_WIDTH_PX}px; }}
-      table.providers-grid {{ border-collapse: collapse; width: 100%; table-layout: fixed; }}
-      table.providers-grid th, table.providers-grid td {{
-        border: 1px solid #ddd; padding: 6px; vertical-align: top; word-wrap: break-word; white-space: normal;
+      [data-testid="stAppViewContainer"] .main .block-container {{
+        padding-left: {LEFT_PAD_PX}px !important;
+        padding-right: 0 !important;
       }}
-      table.providers-grid th {{ position: sticky; top: 0; background: #f7f7f7; z-index: 2; }}
-      .wrap {{ white-space: normal; word-wrap: break-word; overflow-wrap: anywhere; }}
-      .sticky-first {{ position: sticky; left: 0; background: #fff; z-index: 1; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-
 # -----------------------------
-# Secrets helpers
+# Engine (embedded replica) + gated fallback
 # -----------------------------
-def _get_secret(name: str, default=None):
-    try:
-        if name in st.secrets:
-            return st.secrets[name]
-    except Exception:
-        pass
-    return os.environ.get(name, default)
-
-
-RAW_COL_WIDTHS = _get_secret("COLUMN_WIDTHS_PX_READONLY") or _get_secret("COLUMN_WIDTHS_PX") or {
-    "id": 40,
-    "business_name": 160,
-    "category": 170,
-    "service": 110,
-    "contact_name": 110,
-    "phone": 110,
-    "address": 200,
-    "website": 180,
-    "notes": 220,
-    "keywords": 120,
-}
-
-HELP_TITLE = _get_secret("READONLY_HELP_TITLE", "Provider Help / Tips")
-HELP_MD = _get_secret("READONLY_HELP_MD", "Global search matches any part of a word across most columns.")
-STICKY_FIRST = str(_get_secret("READONLY_STICKY_FIRST_COL", "0")).lower() in ("1", "true", "yes")
-HIDE_ID = str(_get_secret("READONLY_HIDE_ID", "1")).lower() in ("1", "true", "yes")
-ALLOW_SQLITE_FALLBACK = str(_get_secret("ALLOW_SQLITE_FALLBACK", "0")).lower() in ("1", "true", "yes")
-
-
-# -----------------------------
-# Engine builder (Turso/libSQL with embedded replica support)
-# -----------------------------
-def _normalize_dsn(raw: str) -> tuple[str, bool]:
-    """
-    Normalize DSN. Accepts libsql://..., fixes single-slash forms, ensures HTTPS sync_url,
-    and relocates relative embedded file names to /mount/data for Streamlit Cloud.
-    Returns (dsn, is_embedded).
-    """
-    dsn = (raw or "").strip()
-
-    # Strip accidental outer quotes (secrets UI sometimes keeps them)
-    if (dsn.startswith("'") and dsn.endswith("'")) or (dsn.startswith('"') and dsn.endswith('"')):
-        dsn = dsn[1:-1].strip()
-
-    # libsql://host -> sqlite+libsql://host
-    if dsn.startswith("libsql://"):
-        dsn = "sqlite+libsql://" + dsn.split("://", 1)[1]
-
-    # sqlite+libsql:/file.db -> sqlite+libsql:///file.db
-    if dsn.startswith("sqlite+libsql:/") and not dsn.startswith("sqlite+libsql://"):
-        dsn = "sqlite+libsql:///" + dsn.split(":/", 1)[1].lstrip("/")
-
-    is_embedded = dsn.startswith("sqlite+libsql:///")
-
-    if is_embedded:
-        # Ensure sync_url uses HTTPS to avoid 308 redirects
-        if "sync_url=libsql://" in dsn:
-            dsn = dsn.replace("sync_url=libsql://", "sync_url=https://")
-
-        # If the embedded path is relative (vendors-embedded.db), move it under /mount/data/
-        after = dsn.split("sqlite+libsql:///", 1)[1]
-        if "?" in after:
-            path_part, q = after.split("?", 1)
-            q = "?" + q
-        else:
-            path_part, q = after, ""
-
-        if path_part.startswith("/"):
-            abs_path = path_part  # already absolute
-        else:
-            abs_path = "/mount/data/" + path_part.lstrip("/")
-
-        dsn = "sqlite+libsql:///" + abs_path.lstrip("/") + q
-
-        # Remove meaningless secure=true on embedded DSNs
-        if "secure=" in dsn.lower():
-            dsn = dsn.replace("&secure=true", "").replace("?secure=true", "?").replace("?&", "?")
-            if dsn.endswith("?"):
-                dsn = dsn[:-1]
-    else:
-        # Host DSN: enforce TLS
-        if "secure=" not in dsn.lower():
-            dsn += ("&secure=true" if "?" in dsn else "?secure=true")
-
-    return dsn, is_embedded
-
-
-def _fallback_sqlite(reason: str) -> tuple[Engine, Dict[str, str]]:
-    allow = str(_get_secret("ALLOW_SQLITE_FALLBACK", "0")).lower() in ("1", "true", "yes")
-    if not allow:
-        st.error(
-            reason
-            + " Also, SQLite fallback is disabled. Ensure `sqlalchemy-libsql==0.2.0` is installed and DSN uses "
-              "`sqlite+libsql://`. Or set `ALLOW_SQLITE_FALLBACK=true` for local/dev only."
-        )
-        st.stop()
-
-    local_path = os.environ.get("LOCAL_SQLITE_PATH", "vendors.db")
-    e = create_engine(f"sqlite:///{local_path}")
-    info: Dict[str, str] = {
-        "using_remote": False,
-        "dialect": e.dialect.name,
-        "driver": getattr(e.dialect, "driver", ""),
-        "sqlalchemy_url": f"sqlite:///{local_path}",
-        "sync_url": "",
-        "strategy": "local_sqlite",
-    }
-    return e, info
-
-
-def _build_engine_inner() -> tuple[Engine, Dict[str, str]]:
-    url = _get_secret("TURSO_DATABASE_URL")
-    token = _get_secret("TURSO_AUTH_TOKEN")
-
-    if not url or not token:
-        return _fallback_sqlite("TURSO_DATABASE_URL / TURSO_AUTH_TOKEN missing.")
-
-    dsn, is_embedded = _normalize_dsn(str(url))
-    try:
-        e = create_engine(
-            dsn,
-            connect_args={"auth_token": str(token)},
-            pool_pre_ping=True,
-            pool_recycle=180,
-        )
-        with e.connect() as conn:
-            conn.exec_driver_sql("SELECT 1")
-        info: Dict[str, str] = {
-            "using_remote": True,                 # still libsql driver, even for embedded file
-            "dialect": e.dialect.name,
-            "driver": getattr(e.dialect, "driver", ""),
-            "sqlalchemy_url": dsn,
-            "sync_url": dsn,
-            "strategy": "embedded_replica" if is_embedded else "direct",
-        }
-        return e, info
-    except Exception as ex:
-        name = type(ex).__name__
-        msg = f"Turso init failed ({name}: {ex})"
-        return _fallback_sqlite(
-            "SQLAlchemy couldn't load the 'libsql' dialect or connect. "
-            "Verify `sqlalchemy-libsql==0.2.0` is installed and DSN uses `sqlite+libsql://`. "
-            f"Details: {msg}"
-        )
-
-
 @st.cache_resource
-def get_engine_and_info() -> tuple[Engine, Dict[str, str]]:
-    return _build_engine_inner()
+def build_engine() -> tuple[Engine, dict[str, Any]]:
+    """Embedded replica to Turso. Fall back to local ONLY if FORCE_LOCAL=1."""
+    info: dict[str, Any] = {}
+    url = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
+    token = (st.secrets.get("TURSO_AUTH_TOKEN") or os.getenv("TURSO_AUTH_TOKEN") or "").strip()
 
-
-engine, engine_info = get_engine_and_info()
-
-# -----------------------------
-# Embedded replica warm-up + automatic failover to direct remote
-# -----------------------------
-def _extract_sync_host_from_dsn(dsn: str) -> str | None:
-    """Looks for sync_url=... in the DSN and returns host (no scheme, no path)."""
-    try:
-        qpos = dsn.find("?")
-        if qpos == -1:
-            return None
-        for part in dsn[qpos + 1:].split("&"):
-            if not part:
-                continue
-            k, _, v = part.partition("=")
-            if k != "sync_url":
-                continue
-            v = v.strip()
-            if "://" in v:
-                v = v.split("://", 1)[1]
-            v = v.split("/", 1)[0]
-            return v or None
-    except Exception:
-        return None
-
-
-def _warmup_embedded_replica(max_wait_seconds: float = 30.0) -> bool:
-    """Touch schema and wait for vendors to appear; True if present, else False."""
-    url = str(engine_info.get("sqlalchemy_url", ""))
-    if not url.startswith("sqlite+libsql:///"):
-        return True  # warm-up only applies to embedded file DSNs
-    try:
-        with engine.connect() as conn:
-            # Touch the schema to trigger replication
-            conn.exec_driver_sql("SELECT name FROM sqlite_master LIMIT 1")
-            deadline = time.time() + max_wait_seconds
-            while time.time() < deadline:
-                row = conn.exec_driver_sql(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                    ("vendors",),
-                ).fetchone()
-                if row:
-                    return True
-                time.sleep(0.5)
-    except Exception as e:
-        st.warning(f"Replica warm-up warning: {e}")
-    return False
-
-
-def _failover_to_direct_remote_if_needed() -> None:
-    global engine  # we rebind engine here if failover is needed
-
-    # If embedded vendors table is still missing, switch engine to direct remote.
-    url = str(engine_info.get("sqlalchemy_url", ""))
-    if not url.startswith("sqlite+libsql:///"):
-        return  # not embedded; nothing to do
-
-    # Check table presence one more time; if present, do nothing
-    try:
-        with engine.connect() as conn:
-            row = conn.exec_driver_sql(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                ("vendors",),
-            ).fetchone()
-            if row:
-                return
-    except Exception:
-        pass  # ignore and proceed to failover attempt
-
-    sync_host = _extract_sync_host_from_dsn(url)
-    if not sync_host:
-        st.error("Embedded replica not ready and no sync_url host found; cannot fail over.")
-        return
-
-    remote_dsn = f"sqlite+libsql://{sync_host}?secure=true"
-    try:
-        remote_token = str(_get_secret("TURSO_AUTH_TOKEN") or "")
-        if not remote_token:
-            st.error("Embedded replica not ready and TURSO_AUTH_TOKEN missing; cannot fail over.")
-            return
-
-        # Build and probe a remote engine
-        e = create_engine(
-            remote_dsn,
-            connect_args={"auth_token": remote_token},
-            pool_pre_ping=True,
-            pool_recycle=180,
-        )
-        with e.connect() as conn:
-            conn.exec_driver_sql("SELECT 1")
-
-        # Swap global engine and update info so downstream code uses remote
-        engine = e
-        engine_info.update(
+    if not url:
+        eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+        info.update(
             {
-                "using_remote": True,
-                "sqlalchemy_url": remote_dsn,
-                "dialect": "sqlite",
-                "driver": "libsql",
-                "sync_url": remote_dsn,
-                "strategy": "failover_remote",
+                "using_remote": False,
+                "sqlalchemy_url": "sqlite:///vendors.db",
+                "dialect": eng.dialect.name,
+                "driver": getattr(eng.dialect, "driver", ""),
             }
         )
-        if not st.session_state.get("ro_failover_warned"):
-            st.session_state["ro_failover_warned"] = True
-            st.warning(
-                "Embedded replica not ready; temporarily serving from direct remote. "
-                "Reads are live; the app will use the embedded replica again once it catches up."
-            )
-        try:
-            st.cache_data.clear()
-        except Exception:
-            pass
-
-    except Exception as ex:
-        st.error(f"Failover to remote DB failed: {type(ex).__name__}: {ex}")
-
-
-def _maybe_return_to_embedded() -> None:
-    """If we are in failover_remote and the embedded replica is ready, switch back."""
-    global engine
-
-    if engine_info.get("strategy") != "failover_remote":
-        return
-
-    embedded_dsn = str(_get_secret("TURSO_DATABASE_URL") or "").strip()
-    if not embedded_dsn:
-        return
-
-    # Normalize to embedded DSN form
-    if embedded_dsn.startswith("libsql://"):
-        embedded_dsn = "sqlite+libsql://" + embedded_dsn.split("://", 1)[1]
-    if embedded_dsn.startswith("sqlite+libsql:/") and not embedded_dsn.startswith("sqlite+libsql://"):
-        embedded_dsn = "sqlite+libsql:///" + embedded_dsn.split(":/", 1)[1].lstrip("/")
-    if not embedded_dsn.startswith("sqlite+libsql:///"):
-        return  # not an embedded DSN; nothing to return to
-    if "sync_url=libsql://" in embedded_dsn:
-        embedded_dsn = embedded_dsn.replace("sync_url=libsql://", "sync_url=https://")
-    if "secure=" in embedded_dsn.lower():
-        embedded_dsn = embedded_dsn.replace("&secure=true", "").replace("?secure=true", "?").replace("?&", "?")
-        if embedded_dsn.endswith("?"):
-            embedded_dsn = embedded_dsn[:-1]
-
-    token = str(_get_secret("TURSO_AUTH_TOKEN") or "")
-    if not token:
-        return
+        return eng, info
 
     try:
-        e2 = create_engine(
-            embedded_dsn,
-            connect_args={"auth_token": token},
-            pool_pre_ping=True,
-            pool_recycle=180,
-        )
-        with e2.connect() as c:
-            c.exec_driver_sql("SELECT 1")
-            row = c.exec_driver_sql(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                ("vendors",),
-            ).fetchone()
-            if not row:
-                return
+        # Normalize: embedded REQUIRES libsql:// (not sqlite+libsql://...?secure=true)
+        raw = url
+        if raw.startswith("sqlite+libsql://"):
+            host = raw.split("://", 1)[1].split("?", 1)[0]
+            sync_url = f"libsql://{host}"
+        else:
+            sync_url = raw
 
-        # Swap back to embedded
-        engine = e2
-        engine_info.update(
+        eng = create_engine(
+            "sqlite+libsql:///vendors-embedded.db",
+            connect_args={"auth_token": token, "sync_url": sync_url},
+            pool_pre_ping=True,
+        )
+        with eng.connect() as c:
+            c.exec_driver_sql("select 1;")
+
+        info.update(
             {
                 "using_remote": True,
-                "sqlalchemy_url": embedded_dsn,
-                "dialect": "sqlite",
-                "driver": "libsql",
                 "strategy": "embedded_replica",
+                "sqlalchemy_url": "sqlite+libsql:///vendors-embedded.db",
+                "dialect": eng.dialect.name,
+                "driver": getattr(eng.dialect, "driver", ""),
+                "sync_url": sync_url,
             }
         )
+        return eng, info
 
-        if not st.session_state.get("ro_returned_info"):
-            st.session_state["ro_returned_info"] = True
-            st.info("Replica is ready; switched back to embedded.")
+    except Exception as e:
+        info["remote_error"] = f"{e}"
+        if os.getenv("FORCE_LOCAL") == "1":
+            eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+            info.update(
+                {
+                    "using_remote": False,
+                    "sqlalchemy_url": "sqlite:///vendors.db",
+                    "dialect": eng.dialect.name,
+                    "driver": getattr(eng.dialect, "driver", ""),
+                }
+            )
+            return eng, info
 
-        try:
-            st.cache_data.clear()
-        except Exception:
-            pass
-
-    except Exception:
-        # If anything fails, stay on failover; try again next run
-        pass
-
-
-# Run warm-up; if schema still missing, fail over to direct remote, then attempt to return later
-if not _warmup_embedded_replica():
-    _failover_to_direct_remote_if_needed()
-_maybe_return_to_embedded()
-
-
-# -----------------------------
-# Data helpers
-# -----------------------------
-@st.cache_data(ttl=60)
-def fetch_df(sql: str, params: Dict | None = None) -> pd.DataFrame:
-    # Use the cached engine from get_engine_and_info
-    try:
-        with engine.connect() as conn:
-            if params:
-                # NOTE: exec_driver_sql with dict params can error on libsql; don't pass params here.
-                result = conn.exec_driver_sql(sql, params)
-            else:
-                result = conn.exec_driver_sql(sql)
-            rows = result.fetchall()
-            cols = result.keys()
-        return pd.DataFrame(rows, columns=list(cols))
-    except Exception as ex:
-        st.error(f"DB query failed: {type(ex).__name__}: {ex}")
+        st.error("Remote DB unavailable and FORCE_LOCAL is not set. Aborting.")
         raise
 
 
-def vendors_df() -> pd.DataFrame:
-    # Case-insensitive ordering without calling lower()
-    sql = (
-        "SELECT id, business_name, category, service, contact_name, phone, address, website, notes, keywords "
-        "FROM vendors ORDER BY business_name COLLATE NOCASE"
+engine, engine_info = build_engine()
+
+# -----------------------------
+# Helpers + data loader
+# -----------------------------
+def _format_phone(val: str | None) -> str:
+    s = re.sub(r"\D", "", str(val or ""))
+    if len(s) == 10:
+        return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
+    return (val or "").strip()
+
+
+def _sanitize_url(u: str | None) -> str:
+    u = (u or "").strip()
+    if not u:
+        return ""
+    if not re.match(r"^https?://", u, re.I):
+        u = "https://" + u
+    return u
+
+
+@st.cache_data(ttl=5)
+def load_df(engine: Engine) -> pd.DataFrame:
+    with engine.begin() as conn:
+        df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
+
+    # Ensure columns exist (robustness)
+    needed = [
+        "category",
+        "service",
+        "business_name",
+        "contact_name",
+        "phone",
+        "address",
+        "website",
+        "notes",
+        "keywords",
+        "created_at",
+        "updated_at",
+        "updated_by",
+    ]
+    for col in needed:
+        if col not in df.columns:
+            df[col] = ""
+
+    # Safe string ops (avoid repeated astype)
+    df = df.fillna("")
+
+    # Friendly phone + sanitized url
+    df["phone_fmt"] = df["phone"].apply(_format_phone)
+    df["website"] = df["website"].apply(_sanitize_url)
+
+    # Single lowercase search blob for cheap contains()
+    # (keeps read-only search fast without DB FTS complexity)
+    blob_cols = [
+        "category",
+        "service",
+        "business_name",
+        "contact_name",
+        "phone",
+        "address",
+        "website",
+        "notes",
+        "keywords",
+    ]
+    df["_blob"] = (
+        df[blob_cols]
+        .astype(str)
+        .agg(" ".join, axis=1)
+        .str.lower()
     )
-    return fetch_df(sql)
+    return df
 
 
 # -----------------------------
-# Table renderer (HTML)
+# UI (single page; no title; no tabs)
 # -----------------------------
-def render_html_table(df: pd.DataFrame, sticky_first_col: bool = False) -> None:
-    if df.empty:
-        st.info("No rows match your filter.")
-        return
+if "show_debug" not in st.session_state:
+    st.session_state["show_debug"] = False
 
-    cols = list(df.columns)
-    widths = [RAW_COL_WIDTHS.get(c, 120) for c in cols]
+# Top controls
+top_l, top_r = st.columns([1, 1])
+with top_l:
+    q = st.text_input(
+        "",
+        placeholder="Search providers… (press Enter)",
+        label_visibility="collapsed",
+    )
+with top_r:
+    if st.button("Refresh data"):
+        st.cache_data.clear()
 
-    ths = []
-    for i, c in enumerate(cols):
-        style = f"min-width:{widths[i]}px;max-width:{widths[i]}px;"
-        extra = " sticky-first" if sticky_first_col and i == 0 else ""
-        ths.append(f'<th class="wrap{extra}" style="{style}">{html.escape(str(c))}</th>')
+df = load_df(engine)
 
-    trs = []
-    for _, row in df.iterrows():
-        tds = []
-        for i, c in enumerate(cols):
-            val = row[c]
-            txt = "" if pd.isna(val) else str(val)
-            if c == "website" and txt:
-                safe = html.escape(txt)
-                href = safe if safe.startswith("http") else f"https://{safe}"
-                inner = f'<a href="{href}" target="_blank" rel="noopener">{safe}</a>'
-            else:
-                inner = html.escape(txt)
-            style = f"min-width:{widths[i]}px;max-width:{widths[i]}px;"
-            extra = " sticky-first" if sticky_first_col and i == 0 else ""
-            tds.append(f'<td class="wrap{extra}" style="{style}">{inner}</td>')
-        trs.append("<tr>" + "".join(tds) + "</tr>")
+# Filter quickly via precomputed blob
+_filtered = df
+qq = (q or "").strip().lower()
+if qq:
+    _filtered = _filtered[_filtered["_blob"].str.contains(qq, regex=False)]
 
-    html_table = f"<table class='providers-grid'><thead><tr>{''.join(ths)}</tr></thead><tbody>{''.join(trs)}</tbody></table>"
-    components.html(html_table, height=520, scrolling=True)
+# Columns to show (hide 'id' and 'keywords'); use formatted phone
+view_cols = [
+    "category",
+    "service",
+    "business_name",
+    "contact_name",
+    "phone_fmt",
+    "address",
+    "website",
+    "notes",
+]
+grid_df = _filtered[view_cols].rename(columns={"business_name": "provider", "phone_fmt": "phone"})
 
+# Render fast, virtualized table; clickable website links
+st.dataframe(
+    grid_df,
+    use_container_width=True,
+    column_config={
+        "provider": st.column_config.TextColumn("Provider", width=240),
+        "category": st.column_config.TextColumn("Category", width=140),
+        "service": st.column_config.TextColumn("Service", width=160),
+        "contact_name": st.column_config.TextColumn("Contact", width=180),
+        "phone": st.column_config.TextColumn("Phone", width=140),
+        "address": st.column_config.TextColumn("Address", width=260),
+        "website": st.column_config.LinkColumn("Website", max_chars=40),
+        "notes": st.column_config.TextColumn("Notes", width=420),
+    },
+    height=560,  # tweak if you want more/less visible rows
+)
+
+# CSV download (filtered view): formatted phones only
+st.download_button(
+    "Download CSV file of Providers",
+    data=grid_df.to_csv(index=False).encode("utf-8"),
+    file_name="providers.csv",
+    mime="text/csv",
+)
 
 # -----------------------------
-# Main UI
+# Debug (button toggled at bottom)
 # -----------------------------
-def main():
-    if HELP_MD:
-        with st.expander(HELP_TITLE or "Provider Help / Tips", expanded=False):
-            st.markdown(HELP_MD)
+st.divider()
+btn_label = "Show debug" if not st.session_state["show_debug"] else "Hide debug"
+if st.button(btn_label):
+    st.session_state["show_debug"] = not st.session_state["show_debug"]
+    st.rerun()
 
-    q = st.text_input("Search (partial match across most fields)", placeholder="e.g., plumb or 210-555-…")
+if st.session_state["show_debug"]:
+    st.subheader("Status & Secrets (debug)")
 
-try:
-    df = vendors_df()
-except Exception:
-    st.error("The database is temporarily unavailable. Please try again shortly.")
-    st.stop()
+    # mask sync_url in screenshots/logs
+    safe_info = dict(engine_info)
+    if isinstance(safe_info.get("sync_url"), str):
+        s = safe_info["sync_url"]
+        if len(s) > 20:
+            safe_info["sync_url"] = s[:10] + "…•••…" + s[-8:]
+    st.json(safe_info)
 
-except Exception:
-    st.error("The database is temporarily unavailable. Please try again shortly.")
-    st.stop()
+    with engine.begin() as conn:
+        vendors_cols = conn.execute(sql_text("PRAGMA table_info(vendors)")).fetchall()
+        categories_cols = conn.execute(sql_text("PRAGMA table_info(categories)")).fetchall()
+        services_cols = conn.execute(sql_text("PRAGMA table_info(services)")).fetchall()
+        counts = {
+            "vendors": conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0,
+            "categories": conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar() or 0,
+            "services": conn.execute(sql_text("SELECT COUNT(*) FROM services")).scalar() or 0,
+        }
 
-    if HIDE_ID and "id" in df.columns:
-        df = df.drop(columns=["id"])
-
-    if q:
-        ql = q.lower().strip()
-        mask = pd.Series(False, index=df.index)
-        for col in [c for c in df.columns if df[c].dtype == object or str(df[c].dtype).startswith("string")]:
-            mask = mask | df[col].astype(str).str.lower().str.contains(ql, na=False)
-        df = df[mask].copy()
-
-    render_html_table(df, sticky_first_col=STICKY_FIRST)
-
-    # Downloads
-    c1, c2 = st.columns(2)
-    with c1:
-        st.download_button(
-            "Download filtered as providers.csv",
-            df.to_csv(index=False).encode("utf-8"),
-            "providers.csv",
-            "text/csv",
-        )
-    with c2:
-        full = vendors_df()
-        if HIDE_ID and "id" in full.columns:
-            full = full.drop(columns=["id"])
-        st.download_button(
-            "Download FULL export (all rows)",
-            full.to_csv(index=False).encode("utf-8"),
-            "providers_full.csv",
-            "text/csv",
-        )
-
-    # Debug / Maintenance (safe for end users; no write ops against DB)
-    if st.button("Show Debug / Status", key="dbg_btn_ro"):
-        st.write("Status & Secrets (debug)")
-        st.json(engine_info)
-
-        # Library versions
-        st.json(
-            {
-                "streamlit": st.__version__,
-                "pandas": pd.__version__,
-                "SQLAlchemy": __import__("sqlalchemy").__version__,
-                "sqlalchemy-libsql": sqlalchemy_libsql.__version__,
-            }
-        )
-
-        # Raw values (length only for token)
-        src_secrets_dsn = st.secrets.get("TURSO_DATABASE_URL")
-        src_secrets_tok = st.secrets.get("TURSO_AUTH_TOKEN")
-        env_dsn = os.environ.get("TURSO_DATABASE_URL")
-        env_tok = os.environ.get("TURSO_AUTH_TOKEN")
-
-        def _repr(v):
-            return repr(v) if v is not None else "None"
-
-        st.caption("Raw values as seen by the app (repr):")
-        st.json(
-            {
-                "secrets.TURSO_DATABASE_URL": _repr(src_secrets_dsn),
-                "secrets.TURSO_AUTH_TOKEN": f"<len {len(src_secrets_tok) if src_secrets_tok else 0}>",
-                "env.TURSO_DATABASE_URL": _repr(env_dsn),
-                "env.TURSO_AUTH_TOKEN": f"<len {len(env_tok) if env_tok else 0}>",
-            }
-        )
-
-        # Embedded file status
-        url = str(engine_info.get("sqlalchemy_url", ""))
-        if url.startswith("sqlite+libsql:///"):
-            file_part = url.split("sqlite+libsql:///", 1)[1].split("?", 1)[0]
-            embed_path = "/" + file_part.lstrip("/")
-            st.write("Embedded file status")
-            if os.path.exists(embed_path):
-                st.write(f"• {embed_path} — {os.path.getsize(embed_path)} bytes; mtime={time.ctime(os.path.getmtime(embed_path))}")
-            else:
-                st.write(f"• {embed_path} — (not found)")
-        else:
-            st.write("Embedded file status")
-            st.write("• Not using embedded DSN (serving from remote host).")
-
-        # Schema probe
-        try:
-            with engine.connect() as conn:
-                names = [r[0] for r in conn.exec_driver_sql(
-                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-                ).fetchall()]
-            st.write("Schema probe")
-            st.write("Tables:")
-            st.write(names)
-            if "vendors" not in names:
-                st.warning("Table 'vendors' not found in this database.")
-        except Exception as e:
-            st.error(f"Probe failed: {e}")
-
-    # Maintenance (optional UI toggle)
-    maint = str(_get_secret("READONLY_MAINTENANCE_ENABLE", "0")).lower() in ("1", "true", "yes")
-    if maint:
-        st.markdown("### Maintenance (embedded replica)")
-        st.caption("Only enabled when READONLY_MAINTENANCE_ENABLE=1 in secrets. Use carefully.")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("Delete embedded file (force re-sync)", key="del_embedded"):
-                try:
-                    # Derive absolute path from current DSN
-                    url = str(engine_info.get("sqlalchemy_url", ""))
-                    if not url.startswith("sqlite+libsql:///"):
-                        st.info("Not using embedded DSN; nothing to delete.")
-                    else:
-                        file_part = url.split("sqlite+libsql:///", 1)[1].split("?", 1)[0]
-                        embed_path = "/" + file_part.lstrip("/")
-                        os.remove(embed_path)
-                        st.success(f"Deleted {embed_path}. Reload the app to re-sync from Turso.")
-                except FileNotFoundError:
-                    st.info("No embedded file found.")
-                except Exception as ex:
-                    st.error(f"Delete failed: {type(ex).__name__}: {ex}")
-        with col_b:
-            if st.button("Clear data cache", key="clear_cache_ro"):
-                try:
-                    st.cache_data.clear()
-                    st.success("Cache cleared.")
-                except Exception as ex:
-                    st.error(f"Cache clear failed: {ex}")
-
-
-if __name__ == "__main__":
-    main()
+    st.subheader("DB Probe")
+    st.json(
+        {
+            "vendors_columns": [c[1] for c in vendors_cols],
+            "categories_columns": [c[1] for c in categories_cols],
+            "services_columns": [c[1] for c in services_cols],
+            "counts": counts,
+        }
+    )
