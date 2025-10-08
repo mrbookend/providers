@@ -483,42 +483,84 @@ def main():
             "text/csv",
         )
 
-    # Debug button at bottom
-    if st.button("Show Debug / Status", key="dbg_btn_ro"):
-        st.write("Status & Secrets (debug)")
+    # Debug / Maintenance (no Terminal required)
+if st.button("Show Debug / Status", key="dbg_btn_ro"):
+    st.write("Status & Secrets (debug)")
+    st.json({
+        "using_remote": engine_info.get("using_remote"),
+        "strategy": engine_info.get("strategy") or ("embedded_replica" if str(engine_info.get("sqlalchemy_url", "")).startswith("sqlite+libsql:///") else "direct"),
+        "sqlalchemy_url": engine_info.get("sqlalchemy_url"),
+        "dialect": engine_info.get("dialect"),
+        "driver": engine_info.get("driver"),
+        "sync_url": engine_info.get("sync_url"),
+    })
+
+    # File system & environment snapshot
+    import os, time
+    cwd = os.getcwd()
+    st.write("Working dir:", cwd)
+    paths = [os.path.join(cwd, n) for n in ("vendors-embedded.db", "vendors.db")]
+    exists = []
+    for p in paths:
+        if os.path.exists(p):
+            st.write(f"• {os.path.basename(p)} — {os.path.getsize(p)} bytes; mtime={time.ctime(os.path.getmtime(p))}")
+            exists.append(p)
+        else:
+            st.write(f"• {os.path.basename(p)} — (not found)")
+
+    # Package versions
+    try:
+        import importlib.metadata as md
         st.json({
-            "using_remote": engine_info.get("using_remote"),
-            "strategy": engine_info.get("strategy"),
-            "sqlalchemy_url": engine_info.get("sqlalchemy_url"),
-            "dialect": engine_info.get("dialect"),
-            "driver": engine_info.get("driver"),
-            "sync_url": engine_info.get("sync_url"),
+            "streamlit": md.version("streamlit"),
+            "pandas": md.version("pandas"),
+            "SQLAlchemy": md.version("SQLAlchemy"),
+            "sqlalchemy-libsql": md.version("sqlalchemy-libsql"),
         })
-        try:
-            with engine.connect() as conn:
+    except Exception:
+        pass
+
+    # DB probe
+    try:
+        with engine.connect() as conn:
+            vendors_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(vendors)").fetchall()] if engine else []
+            categories_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(categories)").fetchall()] if engine else []
+            services_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(services)").fetchall()] if engine else []
+            cnts_row = conn.exec_driver_sql(
+                "SELECT (SELECT COUNT(1) FROM vendors) AS vendors, (SELECT COUNT(1) FROM categories) AS categories, (SELECT COUNT(1) FROM services) AS services"
+            ).fetchone()
+        st.json({
+            "vendors_columns": vendors_cols,
+            "categories_columns": categories_cols,
+            "services_columns": services_cols,
+            "counts": {"vendors": int(cnts_row[0]), "categories": int(cnts_row[1]), "services": int(cnts_row[2])},
+        })
+    except Exception as e:
+        st.error(f"Probe failed: {e}")
+
+    # Guarded maintenance (enable via secrets)
+    maint = str(_get_secret("READONLY_MAINTENANCE_ENABLE", "0")).lower() in ("1","true","yes")
+    if maint:
+        st.markdown("### Maintenance (embedded replica)")
+        st.caption("Use carefully. Only enabled when READONLY_MAINTENANCE_ENABLE=1 in secrets.")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("Delete vendors-embedded.db (force re-sync)", key="del_embedded"):
                 try:
-                    vendors_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(vendors)").fetchall()]
-                except Exception:
-                    vendors_cols = []
+                    os.remove(os.path.join(cwd, "vendors-embedded.db"))
+                    st.success("Deleted vendors-embedded.db. Reload the app to re-sync from Turso.")
+                except FileNotFoundError:
+                    st.info("No vendors-embedded.db found.")
+                except Exception as ex:
+                    st.error(f"Delete failed: {type(ex).__name__}: {ex}")
+        with col_b:
+            if st.button("Clear data cache", key="clear_cache_ro"):
                 try:
-                    categories_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(categories)").fetchall()]
-                except Exception:
-                    categories_cols = []
-                try:
-                    services_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(services)").fetchall()]
-                except Exception:
-                    services_cols = []
-                cnts_row = conn.exec_driver_sql(
-                    "SELECT (SELECT COUNT(1) FROM vendors) AS vendors, (SELECT COUNT(1) FROM categories) AS categories, (SELECT COUNT(1) FROM services) AS services"
-                ).fetchone()
-            st.json({
-                "vendors_columns": vendors_cols,
-                "categories_columns": categories_cols,
-                "services_columns": services_cols,
-                "counts": {"vendors": int(cnts_row[0]), "categories": int(cnts_row[1]), "services": int(cnts_row[2])},
-            })
-        except Exception as e:
-            st.error(f"Probe failed: {e}")
+                    st.cache_data.clear()
+                    st.success("Cache cleared.")
+                except Exception as ex:
+                    st.error(f"Cache clear failed: {ex}")
+
 
 
 if __name__ == "__main__":
