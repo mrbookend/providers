@@ -499,14 +499,12 @@ if st.button("Show Debug / Status", key="dbg_btn_ro"):
     import os, time
     cwd = os.getcwd()
     st.write("Working dir:", cwd)
-    paths = [os.path.join(cwd, n) for n in ("vendors-embedded.db", "vendors.db")]
-    exists = []
-    for p in paths:
+    for name in ("vendors-embedded.db", "vendors.db"):
+        p = os.path.join(cwd, name)
         if os.path.exists(p):
-            st.write(f"• {os.path.basename(p)} — {os.path.getsize(p)} bytes; mtime={time.ctime(os.path.getmtime(p))}")
-            exists.append(p)
+            st.write(f"• {name} — {os.path.getsize(p)} bytes; mtime={time.ctime(os.path.getmtime(p))}")
         else:
-            st.write(f"• {os.path.basename(p)} — (not found)")
+            st.write(f"• {name} — (not found)")
 
     # Package versions
     try:
@@ -520,12 +518,28 @@ if st.button("Show Debug / Status", key="dbg_btn_ro"):
     except Exception:
         pass
 
-    # DB probe
+    # --- NEW: Schema/table probe (shows exactly what the DB has) ---
+    st.markdown("### Schema probe")
     try:
         with engine.connect() as conn:
-            vendors_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(vendors)").fetchall()] if engine else []
-            categories_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(categories)").fetchall()] if engine else []
-            services_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(services)").fetchall()] if engine else []
+            tables = [r[0] for r in conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            ).fetchall()]
+            st.write("Tables:", tables)
+            if "vendors" in tables:
+                cnt = conn.exec_driver_sql("SELECT COUNT(1) FROM vendors").scalar()
+                st.write("vendors_count:", int(cnt))
+            else:
+                st.warning("Table 'vendors' not found in this database.")
+    except Exception as e:
+        st.error(f"Schema probe failed: {type(e).__name__}: {e}")
+
+    # DB column/count snapshot (kept)
+    try:
+        with engine.connect() as conn:
+            vendors_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(vendors)").fetchall()]
+            categories_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(categories)").fetchall()]
+            services_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(services)").fetchall()]
             cnts_row = conn.exec_driver_sql(
                 "SELECT (SELECT COUNT(1) FROM vendors) AS vendors, (SELECT COUNT(1) FROM categories) AS categories, (SELECT COUNT(1) FROM services) AS services"
             ).fetchone()
@@ -542,7 +556,7 @@ if st.button("Show Debug / Status", key="dbg_btn_ro"):
     maint = str(_get_secret("READONLY_MAINTENANCE_ENABLE", "0")).lower() in ("1","true","yes")
     if maint:
         st.markdown("### Maintenance (embedded replica)")
-        st.caption("Use carefully. Only enabled when READONLY_MAINTENANCE_ENABLE=1 in secrets.")
+        st.caption("Only enabled when READONLY_MAINTENANCE_ENABLE=1 in secrets. Use carefully.")
         col_a, col_b = st.columns(2)
         with col_a:
             if st.button("Delete vendors-embedded.db (force re-sync)", key="del_embedded"):
