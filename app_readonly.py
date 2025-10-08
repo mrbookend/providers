@@ -196,7 +196,28 @@ view_cols = [
     "website",
     "notes",
 ]
-grid_df = _filtered[view_cols].rename(columns={"business_name": "provider", "phone_fmt": "phone"})
+# Ensure phone_fmt exists (format 10-digit US numbers), then build the grid data safely
+if "phone_fmt" not in _filtered.columns:
+    import re
+    def _fmt_phone(v):
+        s = re.sub(r"\D+", "", str(v or ""))
+        if len(s) == 10:
+            return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
+        return str(v or "")
+    _filtered = _filtered.assign(phone_fmt=_filtered["phone"].map(_fmt_phone))
+
+# Columns to display (use phone_fmt, then rename to 'phone')
+view_cols = [
+    "business_name", "category", "service", "contact_name",
+    "phone_fmt", "address", "website", "notes", "keywords"
+]
+
+# Guarded reindex avoids KeyError if any optional columns are missing
+_cols = [c for c in view_cols if c in _filtered.columns]
+grid_df = _filtered.reindex(columns=_cols).rename(
+    columns={"business_name": "provider", "phone_fmt": "phone"}
+)
+
 
 # Render fast, virtualized table; clickable website links
 st.dataframe(
