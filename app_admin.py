@@ -1,52 +1,22 @@
-# -*- coding: utf-8 -*-
-# app_admin.py - Providers Admin (direct remote; login-first; hardened engine)
 from __future__ import annotations
 
 import os
-import hmac
-import hashlib
-from typing import Any, Dict, Optional, Tuple
+import re
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
-import sqlalchemy_libsql  # registers 'sqlite+libsql' dialect entrypoint
+
+# ---- register libsql dialect (must be AFTER "import streamlit as st") ----
+try:
+    import sqlalchemy_libsql  # ensures 'sqlite+libsql' dialect is registered
+except Exception:
+    pass
+# ---- end dialect registration ----
 
 # -----------------------------
-<<<<<<< HEAD
-# Helpers for secrets / env
-# -----------------------------
-def _get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
-    try:
-        if name in st.secrets:
-            return st.secrets[name]
-    except Exception:
-        pass
-    return os.environ.get(name, default)
-
-
-def _as_bool(val: Optional[str], default: bool = False) -> bool:
-    if val is None:
-        return default
-    return str(val).strip().lower() in ("1", "true", "yes", "on")
-
-
-def _norm(s: str, strip: bool) -> str:
-    return s.strip() if strip else s
-
-
-# -----------------------------
-# Page config & basic styling
-# -----------------------------
-PAGE_TITLE = _get_secret("page_title", "Vendors Admin")
-PAGE_MAX_WIDTH_PX = int(_get_secret("page_max_width_px", "2300") or "2300")
-SIDEBAR_STATE = _get_secret("sidebar_state", "expanded")
-
-st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
-
-=======
 # Page config & CSS (full width, no left margin; nowrap table)
 # -----------------------------
 PAGE_TITLE = st.secrets.get("page_title", "Vendors Admin") if hasattr(st, "secrets") else "Vendors Admin"
@@ -56,41 +26,19 @@ st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=S
 
 LEFT_PAD_PX = int(st.secrets.get("page_left_padding_px", 40)) if hasattr(st, "secrets") else 40
 
->>>>>>> parent of 9ad7caa (High-impact, low-risk wins admin.py)
 st.markdown(
     f"""
     <style>
-      .block-container {{ max-width: {PAGE_MAX_WIDTH_PX}px; }}
-      table.providers-grid {{ border-collapse: collapse; width: 100%; table-layout: fixed; }}
-      table.providers-grid th, table.providers-grid td {{
-        border: 1px solid #ddd; padding: 6px; vertical-align: top; word-wrap: break-word; white-space: normal;
+      [data-testid="stAppViewContainer"] .main .block-container {{
+        padding-left: {LEFT_PAD_PX}px !important;
+        padding-right: 0 !important;
       }}
-      table.providers-grid th {{ position: sticky; top: 0; background: #f7f7f7; z-index: 2; }}
-      .wrap {{ white-space: normal; word-wrap: break-word; overflow-wrap: anywhere; }}
-      .sticky-first {{ position: sticky; left: 0; background: #fff; z-index: 1; }}
+      div[data-testid="stDataFrame"] table {{ white-space: nowrap; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-<<<<<<< HEAD
-# -----------------------------
-# Admin auth (temporarily disabled)
-# -----------------------------
-st.session_state["admin_authed"] = True
-# To re-enable later, restore the original form-based block and set
-# DISABLE_ADMIN_PASSWORD="0" (and set ADMIN_PASSWORD) in Secrets.
-
-# -----------------------------
-# Engine builder (Direct Remote; hardened)
-# -----------------------------
-ALLOW_SQLITE_FALLBACK = _as_bool(_get_secret("ALLOW_SQLITE_FALLBACK", "0"), default=False)
-
-
-def _normalize_remote_dsn(raw: str) -> str:
-    """Ensure host DSN uses sqlite+libsql:// and secure=true."""
-    dsn = (raw or "").strip()
-=======
 # -----------------------------
 # Admin sign-in gate (robust)
 # -----------------------------
@@ -131,33 +79,94 @@ if not st.session_state["auth_ok"]:
 # --- CSV Restore helpers (ADD) ---
 
 REQUIRED_VENDOR_COLUMNS = ["business_name", "category"]  # service optional
->>>>>>> parent of 9ad7caa (High-impact, low-risk wins admin.py)
 
-    # libsql://host -> sqlite+libsql://host
-    if dsn.startswith("libsql://"):
-        dsn = "sqlite+libsql://" + dsn.split("://", 1)[1]
+def _get_table_columns(engine: Engine, table: str) -> list[str]:
+    with engine.connect() as conn:
+        res = conn.execute(sql_text(f"SELECT * FROM {table} LIMIT 0"))
+        return list(res.keys())
 
-    # Guard against embedded DSNs; admin must use direct remote
-    if dsn.startswith("sqlite+libsql:///"):
-        raise ValueError(
-            "Admin must use a direct remote DSN (sqlite+libsql://<host>?secure=true), not embedded."
+def _fetch_existing_ids(engine: Engine, table: str = "vendors") -> set[int]:
+    with engine.connect() as conn:
+        rows = conn.execute(sql_text(f"SELECT id FROM {table}")).all()
+    return {int(r[0]) for r in rows if r[0] is not None}
+
+def _prepare_csv_for_append(
+    engine: Engine,
+    csv_df: pd.DataFrame,
+    *,
+    normalize_phone: bool,
+    trim_strings: bool,
+    treat_missing_id_as_autoincrement: bool,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[int], list[str]]:
+    """
+    Returns: (with_id_df, without_id_df, rejected_existing_ids, insertable_columns)
+    DataFrames are already filtered to allowed columns and safe to insert.
+    """
+    df = csv_df.copy()
+
+    # Trim strings
+    if trim_strings:
+        for c in df.columns:
+            if pd.api.types.is_object_dtype(df[c]):
+                df[c] = df[c].astype(str).str.strip()
+
+    # Normalize phone to digits
+    if normalize_phone and "phone" in df.columns:
+        df["phone"] = df["phone"].astype(str).str.replace(r"\D+", "", regex=True)
+
+    db_cols = _get_table_columns(engine, "vendors")
+    insertable_cols = [c for c in df.columns if c in db_cols]
+
+    # Required columns present?
+    missing_req = [c for c in REQUIRED_VENDOR_COLUMNS if c not in df.columns]
+    if missing_req:
+        raise ValueError(f"Missing required column(s) in CSV: {missing_req}")
+
+    # Handle id column
+    has_id = "id" in df.columns
+    existing_ids = _fetch_existing_ids(engine)
+
+    if has_id:
+        df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
+        # Reject rows colliding with existing ids
+        mask_conflict = df["id"].notna() & df["id"].astype("Int64").astype("int", errors="ignore").isin(existing_ids)
+        rejected_existing_ids = df.loc[mask_conflict, "id"].dropna().astype(int).tolist()
+        df_ok = df.loc[~mask_conflict].copy()
+
+        # Split by having id vs. not
+        with_id_df = df_ok[df_ok["id"].notna()].copy()
+        without_id_df = df_ok[df_ok["id"].isna()].copy() if treat_missing_id_as_autoincrement else pd.DataFrame(columns=df.columns)
+    else:
+        rejected_existing_ids = []
+        with_id_df = pd.DataFrame(columns=df.columns)
+        without_id_df = df.copy()
+
+    # Limit to insertable columns and coerce NaN->None for DB
+    def _prep_cols(d: pd.DataFrame, drop_id: bool) -> pd.DataFrame:
+        cols = [c for c in insertable_cols if (c != "id" if drop_id else True)]
+        if not cols:
+            return pd.DataFrame(columns=[])
+        dd = d[cols].copy()
+        for c in cols:
+            dd[c] = dd[c].where(pd.notnull(dd[c]), None)
+        return dd
+
+    with_id_df = _prep_cols(with_id_df, drop_id=False)
+    without_id_df = _prep_cols(without_id_df, drop_id=True)
+
+    # Duplicate ids inside the CSV itself?
+    if "id" in csv_df.columns:
+        dup_ids = (
+            csv_df["id"]
+            .pipe(pd.to_numeric, errors="coerce")
+            .dropna()
+            .astype(int)
+            .duplicated(keep=False)
         )
+        if dup_ids.any():
+            dups = sorted(csv_df.loc[dup_ids, "id"].dropna().astype(int).unique().tolist())
+            raise ValueError(f"Duplicate id(s) inside CSV: {dups}")
 
-<<<<<<< HEAD
-    # Ensure secure=true
-    if "secure=" not in dsn.lower():
-        dsn += ("&secure=true" if "?" in dsn else "?secure=true")
-    return dsn
-
-
-def build_engine() -> Tuple[Engine, Dict[str, Any]]:
-    """
-    Direct-remote builder for admin. Enforces TLS on remote DSN, probes SELECT 1,
-    and optionally falls back to local SQLite if ALLOW_SQLITE_FALLBACK=true.
-    """
-    url = _get_secret("TURSO_DATABASE_URL", "") or ""
-    token = _get_secret("TURSO_AUTH_TOKEN", "") or ""
-=======
     return with_id_df, without_id_df, rejected_existing_ids, insertable_cols
 
 def _execute_append_only(
@@ -191,46 +200,22 @@ def _execute_append_only(
 def build_engine() -> tuple[Engine, dict]:
     """Use Embedded Replica for Turso (syncs to remote), else fallback to local."""
     info: dict = {}
->>>>>>> parent of 9ad7caa (High-impact, low-risk wins admin.py)
 
-    info: Dict[str, Any] = {
-        "using_remote": False,
-        "dialect": "",
-        "driver": "",
-        "sqlalchemy_url": "",
-        "strategy": "",
-    }
+    url   = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
+    token = (st.secrets.get("TURSO_AUTH_TOKEN")   or os.getenv("TURSO_AUTH_TOKEN")   or "").strip()
 
-    def _fail(msg: str):
-        st.error(
-            "SQLAlchemy couldn't load the 'libsql' dialect or connect. "
-            "Verify sqlalchemy-libsql==0.2.0 is installed and DSN uses sqlite+libsql://. "
-            f"Details: {msg}"
-        )
-        st.stop()
+    if not url:
+        eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+        info.update({
+            "using_remote": False,
+            "sqlalchemy_url": "sqlite:///vendors.db",
+            "dialect": eng.dialect.name,
+            "driver": getattr(eng.dialect, "driver", ""),
+        })
+        return eng, info
 
-    def _fallback_sqlite(reason: str) -> Tuple[Engine, Dict[str, Any]]:
-        if not ALLOW_SQLITE_FALLBACK:
-            _fail(reason + " Also, SQLite fallback is disabled. Or set ALLOW_SQLITE_FALLBACK=true (dev only).")
-        local_path = os.getenv("LOCAL_SQLITE_PATH", "vendors.db")
-        e = create_engine(f"sqlite:///{local_path}")
-        info.update({"sqlalchemy_url": f"sqlite:///{local_path}", "strategy": "local_sqlite"})
-        try:
-            info["dialect"] = e.dialect.name
-            info["driver"] = getattr(e.dialect, "driver", "")
-        except Exception:
-            pass
-        return e, info
-
-    if not url or not token:
-        return _fallback_sqlite("TURSO_DATABASE_URL / TURSO_AUTH_TOKEN missing.")
-
+    # Embedded replica: local file that syncs to your remote Turso DB
     try:
-<<<<<<< HEAD
-        dsn = _normalize_remote_dsn(url)
-    except Exception as ex:
-        _fail(str(ex))
-=======
         # Normalize sync_url: embedded REQUIRES libsql:// (no sqlite+libsql, no ?secure=true)
         raw = url
         if raw.startswith("sqlite+libsql://"):
@@ -238,81 +223,41 @@ def build_engine() -> tuple[Engine, dict]:
             sync_url = f"libsql://{host}"
         else:
             sync_url = raw  # already libsql://...
->>>>>>> parent of 9ad7caa (High-impact, low-risk wins admin.py)
 
-    try:
-        e = create_engine(
-            dsn,
-            connect_args={"auth_token": token},
+        eng = create_engine(
+            "sqlite+libsql:///vendors-embedded.db",
+            connect_args={
+                "auth_token": token,
+                "sync_url": sync_url,
+            },
             pool_pre_ping=True,
-            pool_recycle=180,
         )
-        # Probe the connection now
-        with e.connect() as c:
-            c.exec_driver_sql("SELECT 1")
+        with eng.connect() as c:
+            c.exec_driver_sql("select 1;")
 
-        info.update({"using_remote": True, "sqlalchemy_url": dsn, "strategy": "direct"})
-        try:
-            info["dialect"] = e.dialect.name
-            info["driver"] = getattr(e.dialect, "driver", "")
-        except Exception:
-            pass
-        return e, info
-    except Exception as ex:
-        name = type(ex).__name__
-        return _fallback_sqlite(f"Turso init failed ({name}: {ex})")
+        info.update({
+            "using_remote": True,
+            "strategy": "embedded_replica",
+            "sqlalchemy_url": "sqlite+libsql:///vendors-embedded.db",
+            "dialect": eng.dialect.name,
+            "driver": getattr(eng.dialect, "driver", ""),
+            "sync_url": sync_url,
+        })
+        return eng, info
 
+    except Exception as e:
+        info["remote_error"] = f"{e}"
+        allow_local = os.getenv("FORCE_LOCAL") == "1"
+        if allow_local:
+            eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+            info.update({
+                "using_remote": False,
+                "sqlalchemy_url": "sqlite:///vendors.db",
+                "dialect": eng.dialect.name,
+                "driver": getattr(eng.dialect, "driver", ""),
+            })
+            return eng, info
 
-<<<<<<< HEAD
-@st.cache_resource
-def get_engine_and_info() -> Tuple[Engine, Dict[str, Any]]:
-    # Cache the engine object; created only after successful auth
-    return build_engine()
-
-
-engine, engine_info = get_engine_and_info()
-
-# -----------------------------
-# Data helpers (exec path tuned for libsql)
-# -----------------------------
-@st.cache_data(ttl=30)
-def fetch_df(sql: str, params: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
-    """
-    SELECT helper. For named params, use text() to avoid libsql positional quirks.
-    """
-    try:
-        with engine.connect() as conn:
-            if params:
-                result = conn.execute(sql_text(sql), params)
-            else:
-                result = conn.exec_driver_sql(sql)
-            rows = result.fetchall()
-            cols = result.keys()
-        return pd.DataFrame(rows, columns=list(cols))
-    except Exception as ex:
-        st.error(f"DB query failed: {type(ex).__name__}: {ex}")
-        raise
-
-
-def exec_sql(sql: str, params: Optional[Dict[str, Any]] = None) -> int:
-    """
-    DML/DDL helper. Returns rowcount when available.
-    """
-    try:
-        with engine.begin() as conn:
-            if params:
-                result = conn.execute(sql_text(sql), params)
-            else:
-                result = conn.exec_driver_sql(sql)
-        try:
-            fetch_df.clear()
-        except Exception:
-            pass
-        return getattr(result, "rowcount", -1)
-    except Exception as ex:
-        st.error(f"DB execute failed: {type(ex).__name__}: {ex}")
-        raise
-=======
         # Prod: do NOT silently fall back
         st.error("Remote DB unavailable and FORCE_LOCAL is not set. Aborting to protect data.")
         raise
@@ -405,27 +350,13 @@ def usage_count(engine: Engine, col: str, name: str) -> int:
     with engine.begin() as conn:
         cnt = conn.execute(sql_text(f"SELECT COUNT(*) FROM vendors WHERE {col} = :n"), {"n": name}).scalar()
     return int(cnt or 0)
->>>>>>> parent of 9ad7caa (High-impact, low-risk wins admin.py)
 
 # -----------------------------
-# UI: tables and editing
+# UI
 # -----------------------------
-def _render_table(df: pd.DataFrame, title: str, max_height: int = 520) -> None:
-    if df.empty:
-        st.info(f"No rows in {title}.")
-        return
+engine, engine_info = build_engine()
+ensure_schema(engine)
 
-<<<<<<< HEAD
-    cols = list(df.columns)
-    th = "".join(f"<th>{c}</th>" for c in cols)
-    trs = []
-    for _, r in df.iterrows():
-        tds = "".join(f"<td>{str(r[c]) if pd.notna(r[c]) else ''}</td>" for c in cols)
-        trs.append(f"<tr>{tds}</tr>")
-    html = f"<h4>{title}</h4><table class='providers-grid'><thead><tr>{th}</tr></thead><tbody>{''.join(trs)}</tbody></table>"
-    components.html(html, height=max_height, scrolling=True)
-
-=======
 
 _tabs = st.tabs([
     "Browse Vendors",
@@ -444,33 +375,24 @@ with _tabs[0]:
         placeholder="Search — e.g., plumb returns any record with 'plumb' anywhere",
         label_visibility="collapsed",
     )
->>>>>>> parent of 9ad7caa (High-impact, low-risk wins admin.py)
 
-def vendors_tab():
-    st.subheader("Vendors")
-    q = st.text_input("Search vendors (substring across common fields)", placeholder="e.g., plumb or 210-555-…")
+    def _filter(_df: pd.DataFrame, q: str) -> pd.DataFrame:
+        if not q:
+            return _df
+        qq = re.escape(q)
+        mask = (
+            _df["category"].astype(str).str.contains(qq, case=False, na=False) |
+            _df["service"].astype(str).str.contains(qq, case=False, na=False) |
+            _df["business_name"].astype(str).str.contains(qq, case=False, na=False) |
+            _df["contact_name"].astype(str).str.contains(qq, case=False, na=False) |
+            _df["phone"].astype(str).str.contains(qq, case=False, na=False) |
+            _df["address"].astype(str).str.contains(qq, case=False, na=False) |
+            _df["website"].astype(str).str.contains(qq, case=False, na=False) |
+            _df["notes"].astype(str).str.contains(qq, case=False, na=False) |
+            _df["keywords"].astype(str).str.contains(qq, case=False, na=False)
+        )
+        return _df[mask]
 
-<<<<<<< HEAD
-    if q:
-        like = f"%{q.lower()}%"
-        sql = """
-            SELECT id, business_name, category, service, contact_name, phone, address, website, notes, keywords,
-                   created_at, updated_at, updated_by
-            FROM vendors
-            WHERE lower(business_name) LIKE :like
-               OR lower(category)      LIKE :like
-               OR lower(service)       LIKE :like
-               OR lower(contact_name)  LIKE :like
-               OR lower(phone)         LIKE :like
-               OR lower(address)       LIKE :like
-               OR lower(website)       LIKE :like
-               OR lower(notes)         LIKE :like
-               OR lower(keywords)      LIKE :like
-            ORDER BY business_name COLLATE NOCASE
-            LIMIT 500
-        """
-        df = fetch_df(sql, {"like": like})
-=======
     # These two are already created in load_df(); remove if redundant:
     # df["notes_short"] = df["notes"].astype(str).str.replace("\n", " ").str.slice(0, 150)
     # df["keywords_short"] = df["keywords"].astype(str).str.replace("\n", " ").str.slice(0, 80)
@@ -560,82 +482,110 @@ with _tabs[1]:
 
     if df_all.empty:
         st.info("No vendors yet. Use 'Add Vendor' above to create your first record.")
->>>>>>> parent of 9ad7caa (High-impact, low-risk wins admin.py)
     else:
-        df = fetch_df(
-            """
-            SELECT id, business_name, category, service, contact_name, phone, address, website, notes, keywords,
-                   created_at, updated_at, updated_by
-            FROM vendors
-            ORDER BY business_name COLLATE NOCASE
-            LIMIT 500
-            """
+        # Build a Provider (business_name) dropdown to select which vendor to edit
+        opts = df_all[["id", "business_name"]].copy()
+        opts["business_name"] = opts["business_name"].astype(str).str.strip()
+
+        # Disambiguate duplicates by appending (ID NNN)
+        dups = opts["business_name"].duplicated(keep=False)
+        opts["label"] = opts["business_name"]
+        opts.loc[dups, "label"] = opts["business_name"] + "  (ID " + opts["id"].astype(str) + ")"
+
+        # Sort by label, case-insensitive
+        opts = opts.sort_values("label", key=lambda s: s.str.lower())
+
+        labels = opts["label"].tolist()
+        id_lookup = dict(zip(labels, opts["id"].tolist()))
+
+        sel_label = st.selectbox(
+            "Select provider",
+            options=labels,
+            index=0 if labels else None,
+            placeholder="Type to search a provider name",
         )
 
-    _render_table(df, "Vendors (first 500)")
+        if not sel_label:
+            st.info("Select a provider to edit.")
+        else:
+            sel_id = int(id_lookup[sel_label])
+            row_sel = df_all.loc[df_all["id"] == sel_id]
+            if row_sel.empty:
+                st.warning("Selected provider not found. Try refreshing the page.")
+            else:
+                row = row_sel.iloc[0]
 
-    # Editor
-    st.markdown("---")
-    st.subheader("Edit / Create Vendor")
+                # Preselects for category/service
+                cat_options = cats if cats else []
+                cat_index = (
+                    cat_options.index(row["category"])
+                    if (row.get("category") in cat_options and cat_options) else None
+                )
 
-    # Build selector list
-    df_small = fetch_df("SELECT id, business_name FROM vendors ORDER BY business_name COLLATE NOCASE LIMIT 500")
-    options = [("Create new…", None)] + [(f"{int(r.id)} — {r.business_name}", int(r.id)) for _, r in df_small.iterrows()]
-    choice = st.selectbox(
-        "Choose a row to edit, or create new:",
-        options,
-        format_func=lambda x: x[0] if isinstance(x, tuple) else x,
-    )
-    choice_id = choice[1] if isinstance(choice, tuple) else None
+                svc_options = [""] + servs if servs else [""]
+                svc_index = (
+                    svc_options.index(row.get("service"))
+                    if str(row.get("service")) in svc_options else 0
+                )
 
-    # Load existing row if editing
-    row = None
-    if choice_id is not None:
-        row_df = fetch_df("SELECT * FROM vendors WHERE id = :id", {"id": choice_id})
-        if not row_df.empty:
-            row = row_df.iloc[0].to_dict()
+                with st.form("edit_vendor"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        business_name_e = st.text_input("Provider *", row.get("business_name", ""))
+                        category_e = st.selectbox("Category *", options=cat_options, index=cat_index)
+                        service_e = st.selectbox("Service (optional)", options=svc_options, index=svc_index)
+                        contact_name_e = st.text_input("Contact Name", row.get("contact_name", "") or "")
+                        phone_e = st.text_input("Phone (10 digits or blank)", row.get("phone", "") or "")
+                    with col2:
+                        address_e = st.text_area("Address", row.get("address", "") or "", height=80)
+                        website_e = st.text_input("Website (https://…)", row.get("website", "") or "")
+                        notes_e = st.text_area("Notes", row.get("notes", "") or "", height=100)
+                        keywords_e = st.text_input("Keywords (comma separated)", row.get("keywords", "") or "")
+                    c1, c2 = st.columns([1, 1])
+                    update_btn = c1.form_submit_button("Save Changes")
+                    delete_btn = c2.form_submit_button("Delete Vendor", type="secondary")
 
-    def _val(name: str, default: str = "") -> str:
-        return str((row or {}).get(name, default) or "")
+                if update_btn:
+                    if not business_name_e or not category_e:
+                        st.error("Business Name and Category are required.")
+                    else:
+                        phone_norm = _normalize_phone(phone_e)
+                        url = _sanitize_url(website_e)
+                        now = datetime.utcnow().isoformat(timespec="seconds")
+                        with engine.begin() as conn:
+                            conn.execute(sql_text(
+                                """
+                                UPDATE vendors
+                                   SET category=:category, service=NULLIF(:service, ''), business_name=:business_name,
+                                       contact_name=:contact_name, phone=:phone, address=:address,
+                                       website=:website, notes=:notes, keywords=:keywords,
+                                       updated_at=:now, updated_by=:user
+                                 WHERE id=:id
+                                """
+                            ), {
+                                "category": (category_e or "").strip(),
+                                "service": (service_e or "").strip(),
+                                "business_name": (business_name_e or "").strip(),
+                                "contact_name": (contact_name_e or "").strip(),
+                                "phone": phone_norm,
+                                "address": (address_e or "").strip(),
+                                "website": url,
+                                "notes": (notes_e or "").strip(),
+                                "keywords": (keywords_e or "").strip(),
+                                "now": now,
+                                "user": os.getenv("USER", "admin"),
+                                "id": int(sel_id),
+                            })
+                        st.success("Vendor updated.")
+                        st.rerun()
 
-    with st.form("vendor_edit", clear_on_submit=False):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            business_name = st.text_input("Business name", _val("business_name"))
-            category = st.text_input("Category", _val("category"))
-            service = st.text_input("Service", _val("service"))
-            contact_name = st.text_input("Contact name", _val("contact_name"))
-        with c2:
-            phone = st.text_input("Phone", _val("phone"))
-            address = st.text_input("Address", _val("address"))
-            website = st.text_input("Website", _val("website"))
-        with c3:
-            keywords = st.text_area("Keywords", _val("keywords"), height=94)
-            notes = st.text_area("Notes", _val("notes"), height=94)
+                if delete_btn:
+                    with engine.begin() as conn:
+                        conn.execute(sql_text("DELETE FROM vendors WHERE id=:id"), {"id": int(sel_id)})
+                    st.success("Vendor deleted.")
+                    st.rerun()
 
-        submitted_update = st.form_submit_button("Save (Create or Update)")
 
-<<<<<<< HEAD
-    if submitted_update:
-        if choice_id is None:
-            # Create
-            rc = exec_sql(
-                """
-                INSERT INTO vendors (business_name, category, service, contact_name, phone, address, website, notes, keywords, created_at, updated_at, updated_by)
-                VALUES (:business_name, :category, :service, :contact_name, :phone, :address, :website, :notes, :keywords, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'admin')
-                """,
-                {
-                    "business_name": business_name.strip(),
-                    "category": category.strip(),
-                    "service": service.strip(),
-                    "contact_name": contact_name.strip(),
-                    "phone": phone.strip(),
-                    "address": address.strip(),
-                    "website": website.strip(),
-                    "notes": notes.strip(),
-                    "keywords": keywords.strip(),
-                },
-=======
 # ---------- Category Admin
 with _tabs[2]:
     st.caption("Category is required. Manage the reference list and reassign vendors safely.")
@@ -909,160 +859,22 @@ if st.button("Normalize phone numbers & Title Case (vendors + categories/service
                     "UPDATE vendors SET created_at=COALESCE(created_at, :now), updated_at=COALESCE(updated_at, :now)"
                 ),
                 {"now": now},
->>>>>>> parent of 9ad7caa (High-impact, low-risk wins admin.py)
             )
-            st.success(f"Inserted {rc} row(s).")
-        else:
-            # Update
-            rc = exec_sql(
-                """
-                UPDATE vendors
-                   SET business_name = :business_name,
-                       category = :category,
-                       service   = :service,
-                       contact_name = :contact_name,
-                       phone = :phone,
-                       address = :address,
-                       website = :website,
-                       notes = :notes,
-                       keywords = :keywords,
-                       updated_at = CURRENT_TIMESTAMP,
-                       updated_by = 'admin'
-                 WHERE id = :id
-                """,
-                {
-                    "id": choice_id,
-                    "business_name": business_name.strip(),
-                    "category": category.strip(),
-                    "service": service.strip(),
-                    "contact_name": contact_name.strip(),
-                    "phone": phone.strip(),
-                    "address": address.strip(),
-                    "website": website.strip(),
-                    "notes": notes.strip(),
-                    "keywords": keywords.strip(),
-                },
-            )
-            st.success(f"Updated {rc} row(s).")
+        st.success("Backfill complete.")
 
-    # Delete section
-    with st.form("vendor_delete", clear_on_submit=True):
-        del_id = st.number_input("Delete vendor by ID", min_value=0, step=1, value=0)
-        submitted_del = st.form_submit_button("Delete")
-    if submitted_del and del_id > 0:
-        rc = exec_sql("DELETE FROM vendors WHERE id = :id", {"id": int(del_id)})
-        st.success(f"Deleted {rc} row(s).")
+    # Trim extra whitespace across common text fields (preserves newlines in notes)
+    if st.button("Trim whitespace in text fields (safe)"):
+        changed = 0
+        with engine.begin() as conn:
+            rows = conn.execute(
+                sql_text(
+                    """
+                    SELECT id, category, service, business_name, contact_name, address, website, notes, keywords, phone
+                    FROM vendors
+                    """
+                )
+            ).fetchall()
 
-<<<<<<< HEAD
-
-def categories_tab():
-    st.subheader("Categories")
-    df = fetch_df("SELECT id, name FROM categories ORDER BY name COLLATE NOCASE")
-    _render_table(df, "Categories", max_height=360)
-
-    with st.form("cat_edit", clear_on_submit=True):
-        c1, c2 = st.columns(2)
-        with c1:
-            name = st.text_input("New category name")
-            submitted_add = st.form_submit_button("Add")
-        with c2:
-            cat_id = st.number_input("Delete category by ID", min_value=0, step=1, value=0)
-            submitted_del = st.form_submit_button("Delete")
-    if submitted_add and name.strip():
-        rc = exec_sql("INSERT INTO categories (name) VALUES (:name)", {"name": name.strip()})
-        st.success(f"Inserted {rc} row(s).")
-    if submitted_del and cat_id > 0:
-        rc = exec_sql("DELETE FROM categories WHERE id = :id", {"id": int(cat_id)})
-        st.success(f"Deleted {rc} row(s).")
-
-
-def services_tab():
-    st.subheader("Services")
-    df = fetch_df("SELECT id, name FROM services ORDER BY name COLLATE NOCASE")
-    _render_table(df, "Services", max_height=360)
-
-    with st.form("srv_edit", clear_on_submit=True):
-        c1, c2 = st.columns(2)
-        with c1:
-            name = st.text_input("New service name")
-            submitted_add = st.form_submit_button("Add")
-        with c2:
-            srv_id = st.number_input("Delete service by ID", min_value=0, step=1, value=0)
-            submitted_del = st.form_submit_button("Delete")
-    if submitted_add and name.strip():
-        rc = exec_sql("INSERT INTO services (name) VALUES (:name)", {"name": name.strip()})
-        st.success(f"Inserted {rc} row(s).")
-    if submitted_del and srv_id > 0:
-        rc = exec_sql("DELETE FROM services WHERE id = :id", {"id": int(srv_id)})
-        st.success(f"Deleted {rc} row(s).")
-
-
-def sql_tab():
-    st.subheader("SQL Console (admin)")
-    st.caption("For quick diagnostics. SELECT shows a table; DML/DDL returns rowcount. Use with care.")
-    sql = st.text_area("SQL", height=160, placeholder="e.g., SELECT * FROM vendors LIMIT 10")
-    run = st.button("Run")
-    if run and sql.strip():
-        try:
-            if sql.strip().lower().startswith("select"):
-                df = fetch_df(sql)
-                st.dataframe(df, use_container_width=True)
-            else:
-                rc = exec_sql(sql)
-                st.success(f"Rowcount (if available): {rc}")
-        except Exception:
-            st.stop()
-
-
-def debug_tab():
-    st.subheader("Debug / Status")
-    st.json(engine_info)
-    try:
-        with engine.connect() as conn:
-            vendors_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(vendors)").fetchall()]
-            categories_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(categories)").fetchall()]
-            services_cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(services)").fetchall()]
-            cnts_row = conn.exec_driver_sql(
-                "SELECT (SELECT COUNT(1) FROM vendors) AS vendors, "
-                "(SELECT COUNT(1) FROM categories) AS categories, "
-                "(SELECT COUNT(1) FROM services) AS services"
-            ).fetchone()
-        st.json(
-            {
-                "vendors_columns": vendors_cols,
-                "categories_columns": categories_cols,
-                "services_columns": services_cols,
-                "counts": {
-                    "vendors": int(cnts_row[0]),
-                    "categories": int(cnts_row[1]),
-                    "services": int(cnts_row[2]),
-                },
-            }
-        )
-    except Exception as e:
-        st.error(f"Probe failed: {e}")
-
-
-# -----------------------------
-# Main
-# -----------------------------
-def main():
-    tabs = st.tabs(["Vendors", "Categories", "Services", "SQL", "Debug"])
-    with tabs[0]:
-        vendors_tab()
-    with tabs[1]:
-        categories_tab()
-    with tabs[2]:
-        services_tab()
-    with tabs[3]:
-        sql_tab()
-    with tabs[4]:
-        debug_tab()
-
-
-if __name__ == "__main__":
-    main()
-=======
             def clean_soft(s: str | None) -> str:
                 s = (s or "").strip()
                 # collapse runs of spaces/tabs only; KEEP line breaks
@@ -1147,4 +959,3 @@ with _tabs[5]:
             "updated_at": int(updated_at_nulls),
         },
     })
->>>>>>> parent of 9ad7caa (High-impact, low-risk wins admin.py)
