@@ -476,7 +476,12 @@ def main():
 
     q = st.text_input("Search (partial match across most fields)", placeholder="e.g., plumb or 210-555-…")
 
+    try:
     df = vendors_df()
+except Exception:
+    st.error("The database is temporarily unavailable. Please try again shortly.")
+    st.stop()
+
     if HIDE_ID and "id" in df.columns:
         df = df.drop(columns=["id"])
 
