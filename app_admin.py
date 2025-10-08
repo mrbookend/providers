@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, Tuple, Any, Optional
+import hmac
+import hashlib
+from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -31,10 +33,14 @@ def _as_bool(val: Optional[str], default: bool = False) -> bool:
     return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _norm(s: str, strip: bool) -> str:
+    return s.strip() if strip else s
+
+
 # -----------------------------
 # Page config & basic styling
 # -----------------------------
-PAGE_TITLE = _get_secret("page_title", "Providers Admin")
+PAGE_TITLE = _get_secret("page_title", "Vendors Admin")
 PAGE_MAX_WIDTH_PX = int(_get_secret("page_max_width_px", "2300") or "2300")
 SIDEBAR_STATE = _get_secret("sidebar_state", "expanded")
 
@@ -57,155 +63,80 @@ st.markdown(
 )
 
 # -----------------------------
-# Admin auth (prevents "hang" by authenticating BEFORE DB engine creation)
+# Admin auth (single, robust; runs BEFORE engine creation)
 # -----------------------------
-ADMIN_PASSWORD = _get_secret("ADMIN_PASSWORD", "")
-DISABLE_ADMIN_PASSWORD = _as_bool(_get_secret("DISABLE_ADMIN_PASSWORD", "0"), default=False)
+if not st.session_state.get("admin_authed", False):
+    with st.form("admin_login", clear_on_submit=False):
+        pw = st.text_input("Admin password", type="password", key="admin_pw")
+        submitted = st.form_submit_button("Sign in", use_container_width=True)
 
-authed = False
-if DISABLE_ADMIN_PASSWORD:
-    authed = True
-else:
-    import os  # safe to import here in case it's not at top
+        if submitted:
+            # Optional dev bypass
+            if _as_bool(_get_secret("DISABLE_ADMIN_PASSWORD", "0")):
+                st.session_state["admin_authed"] = True
+                st.success("Signed in (bypass).")
+                st.rerun()
 
-import os
-import hmac
-import hashlib
+            raw_secret = _get_secret("ADMIN_PASSWORD", "")
+            if not raw_secret:
+                st.error("ADMIN_PASSWORD is not set in Secrets or Env.")
+                st.stop()
 
-# --- Admin login (robust, with optional debug + hashing support) ---
-import os, hmac, hashlib
+            strip_cfg = _as_bool(_get_secret("ADMIN_PASSWORD_STRIP", "1"), True)
+            typed = _norm(pw or "", strip_cfg)
+            stored = str(raw_secret)
 
-with st.form("admin_login", clear_on_submit=False):
-    pw = st.text_input("Admin password", type="password", key="admin_pw")
-    submitted = st.form_submit_button("Sign in", use_container_width=True)
+            ok = False
+            if stored.startswith("sha256:"):
+                stored_hash = stored.split("sha256:", 1)[1]
+                typed_hash = hashlib.sha256(typed.encode("utf-8")).hexdigest()
+                ok = hmac.compare_digest(typed_hash, stored_hash)
+            else:
+                ok = hmac.compare_digest(typed, _norm(stored, strip_cfg))
 
-    if submitted:
-        # Optional one-click bypass for dev
-        bypass = str(
-            st.secrets.get("DISABLE_ADMIN_PASSWORD", os.environ.get("DISABLE_ADMIN_PASSWORD", "0"))
-        ).lower() in ("1", "true", "yes")
-        if bypass:
-            st.session_state["admin_authed"] = True
-            st.success("Signed in (bypass).")
-            st.rerun()
-
-        # Pull configured secret
-        raw_secret = st.secrets.get("ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD")
-        if not raw_secret:
-            st.error("ADMIN_PASSWORD is not set in this app's Secrets (or env).")
-            st.stop()
-
-        # Normalize to avoid hidden newline/space mismatches (can be disabled via ADMIN_PASSWORD_STRIP=0)
-        strip_cfg = str(
-            st.secrets.get("ADMIN_PASSWORD_STRIP", os.environ.get("ADMIN_PASSWORD_STRIP", "1"))
-        ).lower() in ("1", "true", "yes")
-        def norm(s: str) -> str:
-            return s.strip() if strip_cfg else s
-
-        # Compare (supports either plain or sha256:<hex> in ADMIN_PASSWORD)
-        ok = False
-        if isinstance(raw_secret, str) and raw_secret.startswith("sha256:"):
-            stored_hash = raw_secret.split("sha256:", 1)[1]
-            typed_hash  = hashlib.sha256(pw.encode("utf-8")).hexdigest()
-            ok = hmac.compare_digest(typed_hash, stored_hash)
-        else:
-            ok = hmac.compare_digest(norm(pw), norm(str(raw_secret)))
-
-        # Optional debug (no secrets shown). Enable with DEBUG_ADMIN_AUTH="1" in Secrets.
-        dbg = str(st.secrets.get("DEBUG_ADMIN_AUTH", os.environ.get("DEBUG_ADMIN_AUTH", "0"))).lower() in ("1","true","yes")
-        if dbg:
-            st.caption(
-                f"Auth debug: strip={strip_cfg}, "
-                f"len(typed)={len(pw)}, len(config)={len(str(raw_secret))}, "
-                f"eq_plain={pw == str(raw_secret)}, eq_strip={norm(pw) == norm(str(raw_secret))}"
-            )
-
-        if not ok:
-            st.error("Invalid password.")
-            st.stop()
-
-        st.session_state["admin_authed"] = True
-        st.success("Signed in.")
-        st.rerun()
-
-
-        # Pull configured admin password from secrets or env
-        raw_secret = st.secrets.get("ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD")
-        if not raw_secret:
-            st.error("ADMIN_PASSWORD is not set in this app's Secrets (or env).")
-            st.stop()
-
-        # Normalize (default ON) to avoid invisible newline/space mistakes
-        strip_cfg = str(
-            st.secrets.get("ADMIN_PASSWORD_STRIP", os.environ.get("ADMIN_PASSWORD_STRIP", "1"))
-        ).lower() in ("1", "true", "yes")
-
-        def norm(s: str) -> str:
-            return s.strip() if strip_cfg else s
-
-        ok = False
-        src = "secrets" if "ADMIN_PASSWORD" in st.secrets else "env"
-
-        # Support storing a hash instead of a literal password:
-        # If ADMIN_PASSWORD starts with "sha256:", compare hashes.
-        if isinstance(raw_secret, str) and raw_secret.startswith("sha256:"):
-            stored_hash = raw_secret.split("sha256:", 1)[1]
-            typed_hash = hashlib.sha256(pw.encode("utf-8")).hexdigest()
-            ok = hmac.compare_digest(typed_hash, stored_hash)
-        else:
-            ok = hmac.compare_digest(norm(pw), norm(str(raw_secret)))
-
-        if not ok:
-            # Optional lightweight debug (no secrets shown)
-            dbg = str(
-                st.secrets.get("DEBUG_ADMIN_AUTH", os.environ.get("DEBUG_ADMIN_AUTH", "0"))
-            ).lower() in ("1", "true", "yes")
-            if dbg:
-                st.info(
-                    "Login debug: "
-                    f"source={src}, strip={strip_cfg}, "
-                    f"len(typed)={len(pw)}, len(config)={len(str(raw_secret))}, "
-                    f"eq_plain={pw == str(raw_secret)}, eq_strip={norm(pw) == norm(str(raw_secret))}"
+            if _as_bool(_get_secret("DEBUG_ADMIN_AUTH", "0")):
+                st.caption(
+                    f"Auth debug: strip={strip_cfg}, "
+                    f"len(typed)={len(typed)}, len(config)={len(stored)}, "
+                    f"eq_plain={typed == stored}, eq_strip={typed == _norm(stored, True)}"
                 )
-            st.error("Invalid password.")
-            st.stop()
 
-        st.session_state["admin_authed"] = True
-        st.success("Signed in.")
-        st.rerun()
+            if not ok:
+                st.error("Invalid password.")
+                st.stop()
 
+            st.session_state["admin_authed"] = True
+            st.success("Signed in.")
+            st.rerun()
+else:
+    st.caption("Signed in as admin.")
 
-        admin_pw = st.secrets.get("ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD")
-        if not admin_pw:
-            st.error("ADMIN_PASSWORD is not set in secrets or env.")
-            st.stop()
-
-        if pw != admin_pw:
-            st.error("Invalid password.")
-            st.stop()
-
-        st.session_state["admin_authed"] = True
-        st.success("Signed in.")
-        st.rerun()
-
-        pw = st.text_input("Admin password", type="password")
-        submitted = st.form_submit_button("Sign in")
-    if not submitted:
-        st.stop()
-    if not ADMIN_PASSWORD:
-        st.error("ADMIN_PASSWORD is not set in this app's Secrets. Configure it and reload.")
-        st.stop()
-    if pw != ADMIN_PASSWORD:
-        st.error("Incorrect password.")
-        st.stop()
-    authed = True
-
-assert authed, "Auth gate failed unexpectedly."
 
 # -----------------------------
 # Engine builder (Direct Remote; hardened)
 # -----------------------------
 ALLOW_SQLITE_FALLBACK = _as_bool(_get_secret("ALLOW_SQLITE_FALLBACK", "0"), default=False)
+
+
+def _normalize_remote_dsn(raw: str) -> str:
+    """Ensure host DSN uses sqlite+libsql:// and secure=true."""
+    dsn = (raw or "").strip()
+
+    # libsql://host -> sqlite+libsql://host
+    if dsn.startswith("libsql://"):
+        dsn = "sqlite+libsql://" + dsn.split("://", 1)[1]
+
+    # Guard against embedded DSNs; admin must use direct remote
+    if dsn.startswith("sqlite+libsql:///"):
+        raise ValueError(
+            "Admin must use a direct remote DSN (sqlite+libsql://<host>?secure=true), not embedded."
+        )
+
+    # Ensure secure=true
+    if "secure=" not in dsn.lower():
+        dsn += ("&secure=true" if "?" in dsn else "?secure=true")
+    return dsn
+
 
 def build_engine() -> Tuple[Engine, Dict[str, Any]]:
     """
@@ -247,21 +178,10 @@ def build_engine() -> Tuple[Engine, Dict[str, Any]]:
     if not url or not token:
         return _fallback_sqlite("TURSO_DATABASE_URL / TURSO_AUTH_TOKEN missing.")
 
-    dsn = url.strip()
-    # Normalize libsql:// -> sqlite+libsql://
-    if dsn.startswith("libsql://"):
-        dsn = "sqlite+libsql://" + dsn.split("://", 1)[1]
-    # Fix single-slash: sqlite+libsql:/... -> sqlite+libsql:///...
-    if dsn.startswith("sqlite+libsql:/") and not dsn.startswith("sqlite+libsql://"):
-        dsn = "sqlite+libsql:///" + dsn.split(":/", 1)[1].lstrip("/")
-
-    # Admin = direct remote. Ensure secure=true for host DSNs; refuse embedded DSN here.
-    if dsn.startswith("sqlite+libsql:///"):
-        # This would be an embedded file DSN. For admin, we require direct remote host.
-        _fail("Admin is configured for direct remote. Provide a host DSN (sqlite+libsql://<host>?secure=true).")
-    else:
-        if "secure=" not in dsn.lower():
-            dsn += ("&secure=true" if "?" in dsn else "?secure=true")
+    try:
+        dsn = _normalize_remote_dsn(url)
+    except Exception as ex:
+        _fail(str(ex))
 
     try:
         e = create_engine(
@@ -300,8 +220,7 @@ engine, engine_info = get_engine_and_info()
 @st.cache_data(ttl=30)
 def fetch_df(sql: str, params: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
     """
-    SELECT helper. For bare SELECTs, prefer exec_driver_sql (fewer libsql cursor quirks).
-    If params are present, execute via text() to let SQLAlchemy adapt named bindings.
+    SELECT helper. For named params, use text() to avoid libsql positional quirks.
     """
     try:
         with engine.connect() as conn:
@@ -327,7 +246,6 @@ def exec_sql(sql: str, params: Optional[Dict[str, Any]] = None) -> int:
                 result = conn.execute(sql_text(sql), params)
             else:
                 result = conn.exec_driver_sql(sql)
-        # Clear cached data after mutation
         try:
             fetch_df.clear()
         except Exception:
@@ -346,7 +264,6 @@ def _render_table(df: pd.DataFrame, title: str, max_height: int = 520) -> None:
         st.info(f"No rows in {title}.")
         return
 
-    # Simple HTML table for predictable wrapping
     cols = list(df.columns)
     th = "".join(f"<th>{c}</th>" for c in cols)
     trs = []
@@ -400,7 +317,12 @@ def vendors_tab():
     # Build selector list
     df_small = fetch_df("SELECT id, business_name FROM vendors ORDER BY business_name COLLATE NOCASE LIMIT 500")
     options = [("Create new…", None)] + [(f"{int(r.id)} — {r.business_name}", int(r.id)) for _, r in df_small.iterrows()]
-    choice_label, choice_id = st.selectbox("Choose a row to edit, or create new:", options, format_func=lambda x: x[0] if isinstance(x, tuple) else x)
+    choice = st.selectbox(
+        "Choose a row to edit, or create new:",
+        options,
+        format_func=lambda x: x[0] if isinstance(x, tuple) else x,
+    )
+    choice_id = choice[1] if isinstance(choice, tuple) else None
 
     # Load existing row if editing
     row = None
@@ -428,6 +350,7 @@ def vendors_tab():
             notes = st.text_area("Notes", _val("notes"), height=94)
 
         submitted_update = st.form_submit_button("Save (Create or Update)")
+
     if submitted_update:
         if choice_id is None:
             # Create
@@ -456,7 +379,7 @@ def vendors_tab():
                 UPDATE vendors
                    SET business_name = :business_name,
                        category = :category,
-                       service = :service,
+                       service   = :service,
                        contact_name = :contact_name,
                        phone = :phone,
                        address = :address,
