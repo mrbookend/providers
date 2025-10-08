@@ -85,7 +85,11 @@ ALLOW_SQLITE_FALLBACK = str(_get_secret("ALLOW_SQLITE_FALLBACK", "0")).lower() i
 # -----------------------------
 def _normalize_dsn(raw: str) -> tuple[str, bool]:
     """Normalize DSN. Returns (dsn, is_embedded)."""
-    dsn = raw.strip()
+    dsn = (raw or "").strip()
+
+    # Strip accidental outer quotes (your debug showed "'sqlite+libsql:///...'" )
+    if (dsn.startswith("'") and dsn.endswith("'")) or (dsn.startswith('"') and dsn.endswith('"')):
+        dsn = dsn[1:-1].strip()
 
     # Accept libsql://host -> sqlite+libsql://host
     if dsn.startswith("libsql://"):
@@ -95,24 +99,38 @@ def _normalize_dsn(raw: str) -> tuple[str, bool]:
     if dsn.startswith("sqlite+libsql:/") and not dsn.startswith("sqlite+libsql://"):
         dsn = "sqlite+libsql:///" + dsn.split(":/", 1)[1].lstrip("/")
 
+    # Embedded if using file path (sqlite+libsql:/// or with extra slash for absolute)
     is_embedded = dsn.startswith("sqlite+libsql:///")
 
     if is_embedded:
-        # Normalize embedded sync_url to HTTPS to avoid HRANA 308 redirects
+        # Ensure sync_url uses HTTPS (avoid 308 redirects / auth issues)
         if "sync_url=libsql://" in dsn:
             dsn = dsn.replace("sync_url=libsql://", "sync_url=https://")
+
+        # Extract file path and query
+        after = dsn.split("sqlite+libsql:///", 1)[1]
+        if "?" in after:
+            path_part, q = after.split("?", 1)
+            q = "?" + q
+        else:
+            path_part, q = after, ""
+
+        # Force an absolute, writable path on Streamlit Cloud (/mount/data)
+        # e.g. vendors-embedded.db  -> /mount/data/vendors-embedded.db
+        abs_path = "/mount/data/" + path_part.lstrip("/")
+        dsn = "sqlite+libsql:////" + abs_path.lstrip("/") + q
+
         # Strip any accidental secure=true on embedded file DSNs
         if "secure=" in dsn.lower():
             dsn = dsn.replace("&secure=true", "").replace("?secure=true", "?").replace("?&", "?")
             if dsn.endswith("?"):
                 dsn = dsn[:-1]
     else:
-        # Enforce TLS only for REMOTE DSNs (host present)
+        # Host DSN: enforce TLS if missing
         if "secure=" not in dsn.lower():
             dsn += ("&secure=true" if "?" in dsn else "?secure=true")
 
     return dsn, is_embedded
-
 
 def _fallback_sqlite(reason: str) -> tuple[Engine, Dict[str, str]]:
     if not ALLOW_SQLITE_FALLBACK:
