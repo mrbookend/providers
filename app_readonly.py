@@ -482,6 +482,10 @@ except Exception:
     st.error("The database is temporarily unavailable. Please try again shortly.")
     st.stop()
 
+except Exception:
+    st.error("The database is temporarily unavailable. Please try again shortly.")
+    st.stop()
+
     if HIDE_ID and "id" in df.columns:
         df = df.drop(columns=["id"])
 
