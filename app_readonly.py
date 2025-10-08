@@ -1,24 +1,22 @@
 # -*- coding: utf-8 -*-
 # app_readonly.py - Providers Read-Only (embedded replica first, remote failover)
-
 from __future__ import annotations
 
 import os
 import html
 import time
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Tuple, Any, Optional
 
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-import sqlalchemy as sa
-from sqlalchemy import create_engine, text as sql_text
+from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 import sqlalchemy_libsql  # registers 'sqlite+libsql' dialect entrypoint
 
 
 # -----------------------------
-# Early page config and styling
+# Page layout FIRST
 # -----------------------------
 def _read_secret_early(name: str, default=None):
     try:
@@ -28,8 +26,7 @@ def _read_secret_early(name: str, default=None):
         pass
     return os.environ.get(name, default)
 
-
-PAGE_TITLE = _read_secret_early("page_title", "Providers")
+PAGE_TITLE = _read_secret_early("page_title", "Vendors Directory")
 PAGE_MAX_WIDTH_PX = int(_read_secret_early("page_max_width_px", 2000))
 SIDEBAR_STATE = _read_secret_early("sidebar_state", "expanded")
 
@@ -53,7 +50,7 @@ st.markdown(
 
 
 # -----------------------------
-# Secrets / env helpers
+# Secrets helpers
 # -----------------------------
 def _get_secret(name: str, default=None):
     try:
@@ -64,13 +61,6 @@ def _get_secret(name: str, default=None):
     return os.environ.get(name, default)
 
 
-def _as_bool(val: Optional[str], default: bool = False) -> bool:
-    if val is None:
-        return default
-    return str(val).strip().lower() in ("1", "true", "yes", "on")
-
-
-# Column widths (px) for the read-only grid
 RAW_COL_WIDTHS = _get_secret("COLUMN_WIDTHS_PX_READONLY") or _get_secret("COLUMN_WIDTHS_PX") or {
     "id": 40,
     "business_name": 160,
@@ -86,9 +76,9 @@ RAW_COL_WIDTHS = _get_secret("COLUMN_WIDTHS_PX_READONLY") or _get_secret("COLUMN
 
 HELP_TITLE = _get_secret("READONLY_HELP_TITLE", "Provider Help / Tips")
 HELP_MD = _get_secret("READONLY_HELP_MD", "Global search matches any part of a word across most columns.")
-STICKY_FIRST = _as_bool(_get_secret("READONLY_STICKY_FIRST_COL", "0"))
-HIDE_ID = _as_bool(_get_secret("READONLY_HIDE_ID", "1"))
-ALLOW_SQLITE_FALLBACK = _as_bool(_get_secret("ALLOW_SQLITE_FALLBACK", "0"))
+STICKY_FIRST = str(_get_secret("READONLY_STICKY_FIRST_COL", "0")).lower() in ("1", "true", "yes")
+HIDE_ID = str(_get_secret("READONLY_HIDE_ID", "1")).lower() in ("1", "true", "yes")
+ALLOW_SQLITE_FALLBACK = str(_get_secret("ALLOW_SQLITE_FALLBACK", "0")).lower() in ("1", "true", "yes")
 
 
 # -----------------------------
@@ -98,7 +88,7 @@ def _normalize_dsn(raw: str) -> tuple[str, bool]:
     """Normalize DSN. Returns (dsn, is_embedded)."""
     dsn = (raw or "").strip()
 
-    # Strip accidental wrapping quotes (from secrets editors)
+    # Strip accidental outer quotes
     if (dsn.startswith("'") and dsn.endswith("'")) or (dsn.startswith('"') and dsn.endswith('"')):
         dsn = dsn[1:-1].strip()
 
@@ -113,22 +103,25 @@ def _normalize_dsn(raw: str) -> tuple[str, bool]:
     is_embedded = dsn.startswith("sqlite+libsql:///")
 
     if is_embedded:
-        # Ensure sync_url uses HTTPS (avoid HRANA 308)
+        # Ensure sync_url uses HTTPS (avoid 308s)
         if "sync_url=libsql://" in dsn:
             dsn = dsn.replace("sync_url=libsql://", "sync_url=https://")
 
-        # Ensure embedded path is absolute under /mount/data
+        # Split file part and query
         after = dsn.split("sqlite+libsql:///", 1)[1]
         if "?" in after:
             path_part, q = after.split("?", 1)
             q = "?" + q
         else:
             path_part, q = after, ""
+
+        # Absolute path? keep it. Otherwise map to /mount/data/<file>
         if path_part.startswith("/"):
-            abs_path = path_part
-            # keep absolute
+            abs_path = path_part  # e.g. /mount/data/vendors-embedded.db
         else:
             abs_path = "/mount/data/" + path_part.lstrip("/")
+
+        # Rebuild DSN with absolute path (no double-prefixing)
         dsn = "sqlite+libsql:///" + abs_path.lstrip("/") + q
 
         # Remove meaningless secure=true on embedded DSNs
@@ -152,7 +145,6 @@ def _fallback_sqlite(reason: str) -> tuple[Engine, Dict[str, str]]:
               " `sqlite+libsql://`. Or set `ALLOW_SQLITE_FALLBACK=true` for local/dev only."
         )
         st.stop()
-
     local_path = os.environ.get("LOCAL_SQLITE_PATH", "vendors.db")
     e = create_engine(f"sqlite:///{local_path}")
     info: Dict[str, str] = {
@@ -174,19 +166,6 @@ def _build_engine_inner() -> tuple[Engine, Dict[str, str]]:
         return _fallback_sqlite("TURSO_DATABASE_URL / TURSO_AUTH_TOKEN missing.")
 
     dsn, is_embedded = _normalize_dsn(str(url))
-
-    # If embedded, make sure the parent dir exists (prevents SQLite CANTOPEN 14)
-    if is_embedded:
-        try:
-            after = dsn.split("sqlite+libsql:///", 1)[1]
-            path_part = after.split("?", 1)[0]
-            if not path_part.startswith("/"):
-                path_part = "/mount/data/" + path_part.lstrip("/")
-            parent = os.path.dirname(path_part)
-            os.makedirs(parent, exist_ok=True)
-        except Exception:
-            pass
-
     try:
         e = create_engine(
             dsn,
@@ -194,16 +173,14 @@ def _build_engine_inner() -> tuple[Engine, Dict[str, str]]:
             pool_pre_ping=True,
             pool_recycle=180,
         )
-        # Probe early to force plugin load and catch auth/network issues
         with e.connect() as conn:
             conn.exec_driver_sql("SELECT 1")
-
         info: Dict[str, str] = {
             "using_remote": True,
             "dialect": e.dialect.name,
             "driver": getattr(e.dialect, "driver", ""),
             "sqlalchemy_url": dsn,
-            "sync_url": dsn,
+            "sync_url": dsn,  # informational
             "strategy": "embedded_replica" if is_embedded else "direct",
         }
         return e, info
@@ -222,14 +199,15 @@ def get_engine_and_info() -> tuple[Engine, Dict[str, str]]:
     return _build_engine_inner()
 
 
+# Build engine now
 engine, engine_info = get_engine_and_info()
 
 
 # -----------------------------
-# Embedded warm-up / failover / return
+# Embedded replica warm-up + automatic failover to direct remote
 # -----------------------------
 def _extract_sync_host_from_dsn(dsn: str) -> str | None:
-    """Extract host from sync_url=... query param."""
+    """Looks for sync_url=... in the DSN and returns host (no scheme, no path)."""
     try:
         qpos = dsn.find("?")
         if qpos == -1:
@@ -249,25 +227,14 @@ def _extract_sync_host_from_dsn(dsn: str) -> str | None:
         return None
 
 
-def _embedded_path_from_engine_info() -> str | None:
-    """Return absolute embedded file path from current DSN, or None if not embedded."""
-    dsn = str(engine_info.get("sqlalchemy_url", "") or "")
-    if not dsn.startswith("sqlite+libsql:///"):
-        return None
-    after = dsn.split("sqlite+libsql:///", 1)[1]
-    path_part = after.split("?", 1)[0]
-    if not path_part.startswith("/"):
-        path_part = "/mount/data/" + path_part.lstrip("/")
-    return path_part
-
-
 def _warmup_embedded_replica(max_wait_seconds: float = 30.0) -> bool:
     """Touch schema and wait for vendors to appear; True if present, else False."""
     url = str(engine_info.get("sqlalchemy_url", ""))
     if not url.startswith("sqlite+libsql:///"):
-        return True  # only embedded needs warm-up
+        return True  # warm-up only applies to embedded file DSNs
     try:
         with engine.connect() as conn:
+            # Touch the schema to trigger replication
             conn.exec_driver_sql("SELECT name FROM sqlite_master LIMIT 1")
             deadline = time.time() + max_wait_seconds
             while time.time() < deadline:
@@ -284,14 +251,14 @@ def _warmup_embedded_replica(max_wait_seconds: float = 30.0) -> bool:
 
 
 def _failover_to_direct_remote_if_needed() -> None:
-    """If embedded has no 'vendors' yet, switch to direct remote temporarily."""
-    global engine
+    global engine  # we rebind engine here if failover is needed
 
+    # If embedded vendors table is still missing, switch engine to direct remote.
     url = str(engine_info.get("sqlalchemy_url", ""))
     if not url.startswith("sqlite+libsql:///"):
-        return  # not embedded
+        return  # not embedded; nothing to do
 
-    # Check table presence one more time
+    # Check table presence one more time; if present, do nothing
     try:
         with engine.connect() as conn:
             row = conn.exec_driver_sql(
@@ -301,7 +268,7 @@ def _failover_to_direct_remote_if_needed() -> None:
             if row:
                 return
     except Exception:
-        pass
+        pass  # ignore and proceed to failover attempt
 
     sync_host = _extract_sync_host_from_dsn(url)
     if not sync_host:
@@ -315,16 +282,18 @@ def _failover_to_direct_remote_if_needed() -> None:
             st.error("Embedded replica not ready and TURSO_AUTH_TOKEN missing; cannot fail over.")
             return
 
-        e2 = create_engine(
+        # Build and probe a remote engine
+        e = create_engine(
             remote_dsn,
             connect_args={"auth_token": remote_token},
             pool_pre_ping=True,
             pool_recycle=180,
         )
-        with e2.connect() as conn:
+        with e.connect() as conn:
             conn.exec_driver_sql("SELECT 1")
 
-        engine = e2
+        # Swap global engine and update info so downstream code uses remote
+        engine = e
         engine_info.update(
             {
                 "using_remote": True,
@@ -351,7 +320,7 @@ def _failover_to_direct_remote_if_needed() -> None:
 
 
 def _maybe_return_to_embedded() -> None:
-    """If we are in failover_remote and embedded becomes ready, switch back."""
+    """If we are in failover_remote and the embedded replica is ready, switch back."""
     global engine
 
     if engine_info.get("strategy") != "failover_remote":
@@ -367,7 +336,7 @@ def _maybe_return_to_embedded() -> None:
     if embedded_dsn.startswith("sqlite+libsql:/") and not embedded_dsn.startswith("sqlite+libsql://"):
         embedded_dsn = "sqlite+libsql:///" + embedded_dsn.split(":/", 1)[1].lstrip("/")
     if not embedded_dsn.startswith("sqlite+libsql:///"):
-        return
+        return  # not an embedded DSN; nothing to return to
     if "sync_url=libsql://" in embedded_dsn:
         embedded_dsn = embedded_dsn.replace("sync_url=libsql://", "sync_url=https://")
     if "secure=" in embedded_dsn.lower():
@@ -395,6 +364,7 @@ def _maybe_return_to_embedded() -> None:
             if not row:
                 return
 
+        # Swap back to embedded
         engine = e2
         engine_info.update(
             {
@@ -405,19 +375,22 @@ def _maybe_return_to_embedded() -> None:
                 "strategy": "embedded_replica",
             }
         )
+
         if not st.session_state.get("ro_returned_info"):
             st.session_state["ro_returned_info"] = True
             st.info("Replica is ready; switched back to embedded.")
+
         try:
             st.cache_data.clear()
         except Exception:
             pass
+
     except Exception:
-        # Stay on failover; try again next run
+        # If anything fails, stay on failover; try again next run
         pass
 
 
-# Warm-up -> failover (if needed) -> attempt return
+# Run warm-up; if schema still missing, fail over to direct remote, then attempt to return later
 if not _warmup_embedded_replica():
     _failover_to_direct_remote_if_needed()
 _maybe_return_to_embedded()
@@ -428,13 +401,13 @@ _maybe_return_to_embedded()
 # -----------------------------
 @st.cache_data(ttl=60)
 def fetch_df(sql: str, params: Dict | None = None) -> pd.DataFrame:
+    # Use the cached engine from get_engine_and_info
     try:
         with engine.connect() as conn:
             if params:
-                # For param bindings, use SQLAlchemy text() path
-                result = conn.execute(sql_text(sql), params)
+                # NOTE: exec_driver_sql with dict params can error on libsql; don't pass params here.
+                result = conn.exec_driver_sql(sql, params)
             else:
-                # For plain SELECTs, exec_driver_sql avoids cursor quirks
                 result = conn.exec_driver_sql(sql)
             rows = result.fetchall()
             cols = result.keys()
@@ -445,6 +418,7 @@ def fetch_df(sql: str, params: Dict | None = None) -> pd.DataFrame:
 
 
 def vendors_df() -> pd.DataFrame:
+    # Case-insensitive ordering without calling lower()
     sql = (
         "SELECT id, business_name, category, service, contact_name, phone, address, website, notes, keywords "
         "FROM vendors ORDER BY business_name COLLATE NOCASE"
@@ -513,6 +487,7 @@ def main():
 
     render_html_table(df, sticky_first_col=STICKY_FIRST)
 
+    # Downloads
     c1, c2 = st.columns(2)
     with c1:
         st.download_button(
@@ -532,52 +507,53 @@ def main():
             "text/csv",
         )
 
-    # Debug / Maintenance (inside main)
+    # Debug / Maintenance (safe for end users; no write ops against DB)
     if st.button("Show Debug / Status", key="dbg_btn_ro"):
         st.write("Status & Secrets (debug)")
         st.json(engine_info)
 
-        # Versions
-        st.json({
-            "streamlit": st.__version__,
-            "pandas": pd.__version__,
-            "SQLAlchemy": sa.__version__,
-            "sqlalchemy-libsql": getattr(sqlalchemy_libsql, "__version__", "unknown"),
-        })
+        # Library versions
+        st.json(
+            {
+                "streamlit": st.__version__,
+                "pandas": pd.__version__,
+                "SQLAlchemy": __import__("sqlalchemy").__version__,
+                "sqlalchemy-libsql": sqlalchemy_libsql.__version__,
+            }
+        )
 
-        # Raw secret/env values (safe lengths only for tokens)
+        # Raw values (length only for token)
+        src_secrets_dsn = st.secrets.get("TURSO_DATABASE_URL")
+        src_secrets_tok = st.secrets.get("TURSO_AUTH_TOKEN")
+        env_dsn = os.environ.get("TURSO_DATABASE_URL")
+        env_tok = os.environ.get("TURSO_AUTH_TOKEN")
+
         def _repr(v):
             return repr(v) if v is not None else "None"
 
-        src_secrets_dsn = st.secrets.get("TURSO_DATABASE_URL")
-        src_secrets_tok = st.secrets.get("TURSO_AUTH_TOKEN")
-        env_dsn         = os.environ.get("TURSO_DATABASE_URL")
-        env_tok         = os.environ.get("TURSO_AUTH_TOKEN")
-
         st.caption("Raw values as seen by the app (repr):")
-        st.json({
-            "secrets.TURSO_DATABASE_URL": _repr(src_secrets_dsn),
-            "secrets.TURSO_AUTH_TOKEN":   f"<len {len(src_secrets_tok) if src_secrets_tok else 0}>",
-            "env.TURSO_DATABASE_URL":     _repr(env_dsn),
-            "env.TURSO_AUTH_TOKEN":       f"<len {len(env_tok) if env_tok else 0}>",
-        })
+        st.json(
+            {
+                "secrets.TURSO_DATABASE_URL": _repr(src_secrets_dsn),
+                "secrets.TURSO_AUTH_TOKEN": f"<len {len(src_secrets_tok) if src_secrets_tok else 0}>",
+                "env.TURSO_DATABASE_URL": _repr(env_dsn),
+                "env.TURSO_AUTH_TOKEN": f"<len {len(env_tok) if env_tok else 0}>",
+            }
+        )
 
         # Embedded file status
-        p = _embedded_path_from_engine_info()
-        st.write("Embedded file status")
-        if p is None:
-            st.write("• Not using embedded DSN (serving from remote host).")
+        url = str(engine_info.get("sqlalchemy_url", ""))
+        if url.startswith("sqlite+libsql:///"):
+            file_part = url.split("sqlite+libsql:///", 1)[1].split("?", 1)[0]
+            embed_path = "/" + file_part.lstrip("/")
+            st.write("Embedded file status")
+            if os.path.exists(embed_path):
+                st.write(f"• {embed_path} — {os.path.getsize(embed_path)} bytes; mtime={time.ctime(os.path.getmtime(embed_path))}")
+            else:
+                st.write(f"• {embed_path} — (not found)")
         else:
-            exists = os.path.exists(p)
-            st.write(f"• path: {p}")
-            st.write(f"• exists: {exists}")
-            if exists:
-                try:
-                    st.write(f"• size: {os.path.getsize(p)} bytes; mtime={time.ctime(os.path.getmtime(p))}")
-                except Exception:
-                    pass
-
-        st.caption("If env.TURSO_DATABASE_URL is set, it may override Secrets. Clear env vars in app settings.")
+            st.write("Embedded file status")
+            st.write("• Not using embedded DSN (serving from remote host).")
 
         # Schema probe
         try:
@@ -593,30 +569,35 @@ def main():
         except Exception as e:
             st.error(f"Probe failed: {e}")
 
-        # Guarded maintenance
-        maint = _as_bool(_get_secret("READONLY_MAINTENANCE_ENABLE", "0"))
-        if maint:
-            st.markdown("### Maintenance (embedded replica)")
-            st.caption("Only enabled when READONLY_MAINTENANCE_ENABLE=1 in secrets. Use carefully.")
-            col_a, col_b = st.columns(2)
-            with col_a:
-                if st.button("Delete embedded file (force re-sync)", key="del_embedded"):
-                    try:
-                        p = _embedded_path_from_engine_info()
-                        if p and os.path.exists(p):
-                            os.remove(p)
-                            st.success(f"Deleted: {p}. Reload the app to re-sync from Turso.")
-                        else:
-                            st.info("No embedded file found for the current DSN.")
-                    except Exception as ex:
-                        st.error(f"Delete failed: {type(ex).__name__}: {ex}")
-            with col_b:
-                if st.button("Clear data cache", key="clear_cache_ro"):
-                    try:
-                        st.cache_data.clear()
-                        st.success("Cache cleared.")
-                    except Exception as ex:
-                        st.error(f"Cache clear failed: {ex}")
+    # Maintenance (optional UI toggle)
+    maint = str(_get_secret("READONLY_MAINTENANCE_ENABLE", "0")).lower() in ("1", "true", "yes")
+    if maint:
+        st.markdown("### Maintenance (embedded replica)")
+        st.caption("Only enabled when READONLY_MAINTENANCE_ENABLE=1 in secrets. Use carefully.")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("Delete embedded file (force re-sync)", key="del_embedded"):
+                try:
+                    # Derive absolute path from current DSN
+                    url = str(engine_info.get("sqlalchemy_url", ""))
+                    if not url.startswith("sqlite+libsql:///"):
+                        st.info("Not using embedded DSN; nothing to delete.")
+                    else:
+                        file_part = url.split("sqlite+libsql:///", 1)[1].split("?", 1)[0]
+                        embed_path = "/" + file_part.lstrip("/")
+                        os.remove(embed_path)
+                        st.success(f"Deleted {embed_path}. Reload the app to re-sync from Turso.")
+                except FileNotFoundError:
+                    st.info("No embedded file found.")
+                except Exception as ex:
+                    st.error(f"Delete failed: {type(ex).__name__}: {ex}")
+        with col_b:
+            if st.button("Clear data cache", key="clear_cache_ro"):
+                try:
+                    st.cache_data.clear()
+                    st.success("Cache cleared.")
+                except Exception as ex:
+                    st.error(f"Cache clear failed: {ex}")
 
 
 if __name__ == "__main__":
