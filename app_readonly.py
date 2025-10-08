@@ -134,56 +134,29 @@ def _sanitize_url(u: str | None) -> str:
 
 
 @st.cache_data(ttl=5)
+def _cache_key_for_engine(e: Engine) -> str:
+    """Stable, secret-safe cache key for the SQLAlchemy Engine."""
+    try:
+        # Use the URL as a cache key but hide credentials
+        return e.url.render_as_string(hide_password=True)
+    except Exception:
+        return "engine"
+
+@st.cache_data(ttl=600, show_spinner=False, hash_funcs={Engine: _cache_key_for_engine})
 def load_df(engine: Engine) -> pd.DataFrame:
     with engine.begin() as conn:
-        df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
-
-    # Ensure columns exist (robustness)
-    needed = [
-        "category",
-        "service",
-        "business_name",
-        "contact_name",
-        "phone",
-        "address",
-        "website",
-        "notes",
-        "keywords",
-        "created_at",
-        "updated_at",
-        "updated_by",
-    ]
-    for col in needed:
-        if col not in df.columns:
-            df[col] = ""
-
-    # Safe string ops (avoid repeated astype)
-    df = df.fillna("")
-
-    # Friendly phone + sanitized url
-    df["phone_fmt"] = df["phone"].apply(_format_phone)
-    df["website"] = df["website"].apply(_sanitize_url)
-
-    # Single lowercase search blob for cheap contains()
-    # (keeps read-only search fast without DB FTS complexity)
-    blob_cols = [
-        "category",
-        "service",
-        "business_name",
-        "contact_name",
-        "phone",
-        "address",
-        "website",
-        "notes",
-        "keywords",
-    ]
-    df["_blob"] = (
-        df[blob_cols]
-        .astype(str)
-        .agg(" ".join, axis=1)
-        .str.lower()
-    )
+        df = pd.read_sql(
+            sql_text("""
+                SELECT id, category, service, business_name, contact_name,
+                       phone, address, website, notes, keywords,
+                       created_at, updated_at, updated_by
+                FROM vendors
+                ORDER BY business_name COLLATE NOCASE
+            """),
+            conn,
+        )
     return df
+
 
 
 # -----------------------------
