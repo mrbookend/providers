@@ -73,12 +73,14 @@ import hmac
 import hashlib
 
 # --- Admin login (robust, with optional debug + hashing support) ---
+import os, hmac, hashlib
+
 with st.form("admin_login", clear_on_submit=False):
     pw = st.text_input("Admin password", type="password", key="admin_pw")
     submitted = st.form_submit_button("Sign in", use_container_width=True)
 
     if submitted:
-        # Optional bypass for dev
+        # Optional one-click bypass for dev
         bypass = str(
             st.secrets.get("DISABLE_ADMIN_PASSWORD", os.environ.get("DISABLE_ADMIN_PASSWORD", "0"))
         ).lower() in ("1", "true", "yes")
@@ -86,6 +88,46 @@ with st.form("admin_login", clear_on_submit=False):
             st.session_state["admin_authed"] = True
             st.success("Signed in (bypass).")
             st.rerun()
+
+        # Pull configured secret
+        raw_secret = st.secrets.get("ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD")
+        if not raw_secret:
+            st.error("ADMIN_PASSWORD is not set in this app's Secrets (or env).")
+            st.stop()
+
+        # Normalize to avoid hidden newline/space mismatches (can be disabled via ADMIN_PASSWORD_STRIP=0)
+        strip_cfg = str(
+            st.secrets.get("ADMIN_PASSWORD_STRIP", os.environ.get("ADMIN_PASSWORD_STRIP", "1"))
+        ).lower() in ("1", "true", "yes")
+        def norm(s: str) -> str:
+            return s.strip() if strip_cfg else s
+
+        # Compare (supports either plain or sha256:<hex> in ADMIN_PASSWORD)
+        ok = False
+        if isinstance(raw_secret, str) and raw_secret.startswith("sha256:"):
+            stored_hash = raw_secret.split("sha256:", 1)[1]
+            typed_hash  = hashlib.sha256(pw.encode("utf-8")).hexdigest()
+            ok = hmac.compare_digest(typed_hash, stored_hash)
+        else:
+            ok = hmac.compare_digest(norm(pw), norm(str(raw_secret)))
+
+        # Optional debug (no secrets shown). Enable with DEBUG_ADMIN_AUTH="1" in Secrets.
+        dbg = str(st.secrets.get("DEBUG_ADMIN_AUTH", os.environ.get("DEBUG_ADMIN_AUTH", "0"))).lower() in ("1","true","yes")
+        if dbg:
+            st.caption(
+                f"Auth debug: strip={strip_cfg}, "
+                f"len(typed)={len(pw)}, len(config)={len(str(raw_secret))}, "
+                f"eq_plain={pw == str(raw_secret)}, eq_strip={norm(pw) == norm(str(raw_secret))}"
+            )
+
+        if not ok:
+            st.error("Invalid password.")
+            st.stop()
+
+        st.session_state["admin_authed"] = True
+        st.success("Signed in.")
+        st.rerun()
+
 
         # Pull configured admin password from secrets or env
         raw_secret = st.secrets.get("ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD")
