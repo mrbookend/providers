@@ -66,11 +66,8 @@ st.markdown(
 # Admin auth (temporarily disabled)
 # -----------------------------
 st.session_state["admin_authed"] = True
-# (To re-enable later, restore the original form-based block and set DISABLE_ADMIN_PASSWORD="0" in Secrets.)
-
-else:
-    st.caption("Signed in as admin.")
-
+# To re-enable later, restore the original form-based block and set
+# DISABLE_ADMIN_PASSWORD="0" (and set ADMIN_PASSWORD) in Secrets.
 
 # -----------------------------
 # Engine builder (Direct Remote; hardened)
