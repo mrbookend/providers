@@ -66,7 +66,35 @@ authed = False
 if DISABLE_ADMIN_PASSWORD:
     authed = True
 else:
-    with st.form("admin_login", clear_on_submit=False, enter_to_submit=True):
+    import os  # safe to import here in case it's not at top
+
+with st.form("admin_login", clear_on_submit=False):
+    pw = st.text_input("Admin password", type="password", key="admin_pw")
+    submitted = st.form_submit_button("Sign in", use_container_width=True)
+
+    if submitted:
+        # Optional bypass for dev if flag is set in secrets/env
+        bypass = str(
+            st.secrets.get("DISABLE_ADMIN_PASSWORD", os.environ.get("DISABLE_ADMIN_PASSWORD", "0"))
+        ).lower() in ("1", "true", "yes")
+
+        if bypass:
+            st.session_state["admin_authed"] = True
+            st.rerun()
+
+        admin_pw = st.secrets.get("ADMIN_PASSWORD") or os.environ.get("ADMIN_PASSWORD")
+        if not admin_pw:
+            st.error("ADMIN_PASSWORD is not set in secrets or env.")
+            st.stop()
+
+        if pw != admin_pw:
+            st.error("Invalid password.")
+            st.stop()
+
+        st.session_state["admin_authed"] = True
+        st.success("Signed in.")
+        st.rerun()
+
         pw = st.text_input("Admin password", type="password")
         submitted = st.form_submit_button("Sign in")
     if not submitted:
