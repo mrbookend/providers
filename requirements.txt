@@ -1,4 +1,5 @@
-streamlit==1.38.0
-pandas==2.2.2
-SQLAlchemy==2.0.32
-sqlalchemy-libsql==0.2.0
+streamlit>=1.36
+pandas>=2.2
+SQLAlchemy>=2.0
+sqlalchemy-libsql>=0.3
+libsql-client>=0.3
