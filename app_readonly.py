@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import io
 import re
-from datetime import datetime
 from typing import Dict, Tuple, List, Optional
 
 import pandas as pd
@@ -98,11 +97,9 @@ st.markdown(
 )
 
 # Cosmetic column labels/widths from secrets (optional)
-READONLY_COLUMN_LABELS = (
-    _get_secret("READONLY_COLUMN_LABELS") if isinstance(_get_secret("READONLY_COLUMN_LABELS"), dict) else None
-)
-# Fallback: allow a simple mapping defined in secrets.toml-like dict style flattened by Streamlit
-# If you provided a dict in Secrets, st.secrets already gives a proper dict. If not, ignore.
+READONLY_COLUMN_LABELS = _get_secret("READONLY_COLUMN_LABELS")
+if not isinstance(READONLY_COLUMN_LABELS, dict):
+    READONLY_COLUMN_LABELS = None
 
 COLUMN_WIDTHS = _get_secret("COLUMN_WIDTHS_PX_READONLY")
 if not isinstance(COLUMN_WIDTHS, dict):
@@ -200,10 +197,12 @@ def build_engine() -> Tuple[Engine, Dict]:
 
 
 # =============================
-# Data loading (read-only)
+# Data loading (read-only, cached)
+#   NOTE: do NOT pass Engine into cache (it’s unhashable).
+#   This uses a no-arg loader that closes over the global `engine`.
 # =============================
-@st.cache_data(show_spinner=False)
-def load_df(engine: Engine) -> pd.DataFrame:
+@st.cache_data(show_spinner=False, ttl=120)
+def load_df() -> pd.DataFrame:
     # Read all vendors ordered by name (lowercased for stable order)
     with engine.begin() as conn:
         df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
@@ -248,8 +247,8 @@ engine, engine_info = build_engine()
 
 st.title(PAGE_TITLE)
 
-# Load once with caching
-df = load_df(engine)
+# Load once with caching (no engine param)
+df = load_df()
 
 # --- Top bar: 25% width search input, table remains full width ---
 left, right = st.columns([0.25, 0.75], vertical_alignment="bottom")
@@ -290,11 +289,8 @@ vdf = filtered[present].rename(columns={"phone_fmt": "phone"})
 vdf = vdf.reset_index(drop=True)
 
 # Column labels (optional)
-rename_map = {}
 if isinstance(READONLY_COLUMN_LABELS, dict):
-    # e.g., {"business_name": "Provider"} or {"provider": "Provider"} depending on your secrets
-    rename_map = READONLY_COLUMN_LABELS
-    vdf = vdf.rename(columns=rename_map)
+    vdf = vdf.rename(columns=READONLY_COLUMN_LABELS)
 
 # Render table (read-only)
 st.dataframe(
@@ -319,10 +315,7 @@ try:
         "Download filtered view (Excel)",
         data=xlsx_bytes,
         file_name="providers.xlsx",
-        mime=(
-            # generic Excel MIME (works broadly)
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 except RuntimeError as e:
     # If missing writer engine, show a soft note
