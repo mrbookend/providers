@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+from io import BytesIO
 from typing import Any, Tuple
 
 import pandas as pd
@@ -266,6 +267,32 @@ st.download_button(
     file_name="providers.csv",
     mime="text/csv",
 )
+# --- Download filtered view (Excel) ---
+# Tries openpyxl first, falls back to xlsxwriter. Shows a hint if neither is available.
+try:
+    import openpyxl  # noqa: F401
+    _excel_engine = "openpyxl"
+except Exception:
+    try:
+        import xlsxwriter  # noqa: F401
+        _excel_engine = "xlsxwriter"
+    except Exception:
+        _excel_engine = None
+
+if _excel_engine:
+    _buf = BytesIO()
+    with pd.ExcelWriter(_buf, engine=_excel_engine) as writer:
+        vdf.to_excel(writer, index=False, sheet_name="Providers")
+    _buf.seek(0)
+    st.download_button(
+        "Download filtered view (Excel)",
+        data=_buf.getvalue(),
+        file_name="providers.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+else:
+    st.caption("Excel export requires `openpyxl` or `xlsxwriter` in requirements.")
+
 
 # =========================================================
 # Optional maintenance/debug panel
