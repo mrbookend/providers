@@ -356,12 +356,16 @@ qq = (st.session_state.get("q") or "").strip().lower()
 filtered = df[df["_blob"].str.contains(qq, regex=False, na=False)] if qq else df
 
 # --- Select & rename columns (business_name -> providers) ---
+# --- Select & rename columns (business_name -> providers) ---
+# NOTE: 'keywords' is intentionally excluded from display/downloads,
+# but it remains part of the search index via '_blob'.
 view_cols = [
     "category", "service", "business_name", "contact_name",
-    "phone_fmt", "address", "website", "notes", "keywords",
+    "phone_fmt", "address", "website", "notes",
 ]
 present = [c for c in view_cols if c in filtered.columns]
 vdf = filtered[present].rename(columns={"phone_fmt": "phone"})
+
 
 # Force the business_name label to "providers" regardless of secrets
 label_map = {"business_name": "providers"}
