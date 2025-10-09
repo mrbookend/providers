@@ -427,13 +427,14 @@ with _tabs[0]:
             df["_blob"] = ""
 
     # --- Fast local search (no regex, uses the prebuilt blob) ---
+    left_col, _ = st.columns([1, 3])  # ~25% width
+with left_col:
     q = st.text_input(
-        "Search",  # non-empty to avoid Streamlit warnings
+        "Search",
         placeholder="Search providers… (press Enter)",
         label_visibility="collapsed",
         key="q",
     )
-
     qq = (st.session_state.get("q") or "").strip().lower()
     if qq:
         filtered = df[df["_blob"].str.contains(qq, regex=False, na=False)]
