@@ -1,6 +1,7 @@
 streamlit==1.38.0
-pandas==2.2.2
-SQLAlchemy==2.0.32
+pandas>=2.2,<2.4
+SQLAlchemy>=2.0,<2.1
 sqlalchemy-libsql==0.2.0
-libsql-experimental==0.0.55
+rich>=10.14,<14
+# remove: libsql-experimental
 
