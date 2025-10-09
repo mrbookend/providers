@@ -4,5 +4,6 @@ SQLAlchemy>=2.0,<2.1
 sqlalchemy-libsql==0.2.0
 rich>=10.14,<14
 XlsxWriter>=3.2.0
+streamlit-aggrid>=0.3.4
 # remove: libsql-experimental
 
