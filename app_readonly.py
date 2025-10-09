@@ -107,21 +107,8 @@ if not isinstance(COLUMN_WIDTHS, dict):
 
 ENABLE_DEBUG = _as_bool(_get_secret("READONLY_MAINTENANCE_ENABLE", "0"), False)
 
-HELP_MD = _get_secret(
-    "HELP_MD",
-    """# HCR Providers (Read-Only)
-
-**How to use this list**
-- Use the search box to find providers by any word fragment (e.g., typing `plumb` matches “Plumbing”, “Plumber”, etc.).
-- Click the CSV/Excel buttons to download exactly what you’re viewing.
-- Phone is formatted for readability; original data remains unchanged.
-- Data are read-only here; changes happen in the Admin app.
-
-**Tips**
-- Use short fragments for broader matches (e.g., `elec` to catch “electric”, “electrical”).
-- Websites open in a new tab.
-"""
-)
+# Help content comes entirely from secrets; no default header injected
+HELP_MD = _get_secret("HELP_MD", "")
 
 # Global CSS: layout and HTML-table wrapping rules
 st.markdown(
@@ -197,9 +184,11 @@ def _close_help_page():
         st.experimental_rerun()
 
 def _render_help_page():
-    # Full-width help page, driven by HELP_MD (secrets) or code default
-    st.markdown("## HCR Providers (Read-Only) — Help")
-    st.markdown(HELP_MD)
+    # Full-width help page; content comes entirely from HELP_MD in secrets
+    content = (HELP_MD or "").strip()
+    if not content:
+        content = "_No help content configured. Edit `HELP_MD` in `.streamlit/secrets.toml`._"
+    st.markdown(content)
     st.divider()
     if st.button("⬅︎ Back to list", use_container_width=False):
         _close_help_page()
