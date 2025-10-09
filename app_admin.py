@@ -59,6 +59,7 @@ def _get_secret(name: str, default: str | None = None):
 DISABLE_LOGIN = _as_bool(_get_secret("DISABLE_ADMIN_PASSWORD", "0"))
 
 if DISABLE_LOGIN:
+        st.info("Admin login bypass is ACTIVE (DISABLE_ADMIN_PASSWORD).")
     # Ensure at least one indented statement exists in this branch
     st.info("Admin login bypass is ACTIVE (DISABLE_ADMIN_PASSWORD).")
 else:
