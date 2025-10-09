@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import os
@@ -15,22 +16,24 @@ try:
 except Exception:
     pass
 
+
 # -----------------------------
-# Page config & left padding (no title rendered)
+# Page config & light CSS
 # -----------------------------
-PAGE_TITLE = (
-    st.secrets.get("page_title", "Providers (Read-only)")
-    if hasattr(st, "secrets")
-    else "Providers (Read-only)"
-)
-SIDEBAR_STATE = (
-    st.secrets.get("sidebar_state", "expanded")
-    if hasattr(st, "secrets")
-    else "expanded"
-)
+def _get_secret(name: str, default: str | None = None) -> str | None:
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return os.getenv(name, default)
+
+
+PAGE_TITLE = _get_secret("page_title", "Providers (Read-only)") or "Providers (Read-only)"
+SIDEBAR_STATE = _get_secret("sidebar_state", "expanded") or "expanded"
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
 
-LEFT_PAD_PX = int(st.secrets.get("page_left_padding_px", 20)) if hasattr(st, "secrets") else 20
+LEFT_PAD_PX = int(_get_secret("page_left_padding_px", "20") or "20")
 st.markdown(
     f"""
     <style>
@@ -38,20 +41,25 @@ st.markdown(
         padding-left: {LEFT_PAD_PX}px !important;
         padding-right: 0 !important;
       }}
+      div[data-testid="stDataFrame"] table {{ white-space: nowrap; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
+
 # -----------------------------
-# Engine (embedded replica) + gated fallback
+# Engine (embedded replica) + gated local fallback
 # -----------------------------
 @st.cache_resource
 def build_engine() -> tuple[Engine, dict[str, Any]]:
-    """Embedded replica to Turso. Fall back to local ONLY if FORCE_LOCAL=1."""
+    """
+    Connect via Turso libsql embedded replica if configured.
+    Fall back to local sqlite:///vendors.db only if FORCE_LOCAL=1.
+    """
     info: dict[str, Any] = {}
-    url = (st.secrets.get("TURSO_DATABASE_URL") or os.getenv("TURSO_DATABASE_URL") or "").strip()
-    token = (st.secrets.get("TURSO_AUTH_TOKEN") or os.getenv("TURSO_AUTH_TOKEN") or "").strip()
+    url = (_get_secret("TURSO_DATABASE_URL", "") or "").strip()
+    token = (_get_secret("TURSO_AUTH_TOKEN", "") or "").strip()
 
     if not url:
         eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
@@ -66,13 +74,12 @@ def build_engine() -> tuple[Engine, dict[str, Any]]:
         return eng, info
 
     try:
-        # Normalize: embedded REQUIRES libsql:// (not sqlite+libsql://...?secure=true)
-        raw = url
-        if raw.startswith("sqlite+libsql://"):
-            host = raw.split("://", 1)[1].split("?", 1)[0]
+        # Embedded replica requires libsql:// (not sqlite+libsql://...?secure=true)
+        if url.startswith("sqlite+libsql://"):
+            host = url.split("://", 1)[1].split("?", 1)[0]
             sync_url = f"libsql://{host}"
         else:
-            sync_url = raw
+            sync_url = url
 
         eng = create_engine(
             "sqlite+libsql:///vendors-embedded.db",
@@ -96,7 +103,7 @@ def build_engine() -> tuple[Engine, dict[str, Any]]:
 
     except Exception as e:
         info["remote_error"] = f"{e}"
-        if os.getenv("FORCE_LOCAL") == "1":
+        if (_get_secret("FORCE_LOCAL", "0") or "0").strip() == "1":
             eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
             info.update(
                 {
@@ -114,129 +121,155 @@ def build_engine() -> tuple[Engine, dict[str, Any]]:
 
 engine, engine_info = build_engine()
 
+
 # -----------------------------
 # Helpers + data loader
 # -----------------------------
-def _format_phone(val: str | None) -> str:
-    s = re.sub(r"\D", "", str(val or ""))
-    if len(s) == 10:
-        return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
-    return (val or "").strip()
-
-
-def _sanitize_url(u: str | None) -> str:
-    u = (u or "").strip()
-    if not u:
-        return ""
-    if not re.match(r"^https?://", u, re.I):
-        u = "https://" + u
-    return u
-
-
-@st.cache_data(ttl=5)
 def _cache_key_for_engine(e: Engine) -> str:
     """Stable, secret-safe cache key for the SQLAlchemy Engine."""
     try:
-        # Use the URL as a cache key but hide credentials
         return e.url.render_as_string(hide_password=True)
     except Exception:
         return "engine"
 
+
 @st.cache_data(ttl=600, show_spinner=False, hash_funcs={Engine: _cache_key_for_engine})
 def load_df(engine: Engine) -> pd.DataFrame:
+    # For < 1k rows we can load the full table and filter client-side.
     with engine.begin() as conn:
         df = pd.read_sql(
-            sql_text("""
+            sql_text(
+                """
                 SELECT id, category, service, business_name, contact_name,
                        phone, address, website, notes, keywords,
                        created_at, updated_at, updated_by
                 FROM vendors
                 ORDER BY business_name COLLATE NOCASE
-            """),
+                """
+            ),
             conn,
         )
+    # Ensure expected columns exist even if DB schema is older
+    for col in [
+        "id",
+        "category",
+        "service",
+        "business_name",
+        "contact_name",
+        "phone",
+        "address",
+        "website",
+        "notes",
+        "keywords",
+        "created_at",
+        "updated_at",
+        "updated_by",
+    ]:
+        if col not in df.columns:
+            df[col] = ""
     return df
 
 
-
 # -----------------------------
-# UI (single page; no title; no tabs)
+# UI (single page; no tabs)
 # -----------------------------
 if "show_debug" not in st.session_state:
     st.session_state["show_debug"] = False
+if "q" not in st.session_state:
+    st.session_state["q"] = ""
 
 # Top controls
-top_l, top_r = st.columns([1, 1])
-with top_l:
-    q = st.text_input(
-        "",
-        placeholder="Search providers… (press Enter)",
-        label_visibility="collapsed",
-    )
-with top_r:
-    if st.button("Refresh data"):
-        st.cache_data.clear()
+left, right = st.columns([1, 1])
+with left:
+    q = st.text_input("", placeholder="Search providers…", label_visibility="collapsed", key="q")
+with right:
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        if st.button("Refresh data"):
+            st.cache_data.clear()
+            st.rerun()
+    with c2:
+        if st.button("Reset search"):
+            st.session_state["q"] = ""
+            st.rerun()
 
+# Load and enrich once per run
 df = load_df(engine)
 
-# Filter quickly via precomputed blob
-_filtered = df
-qq = (q or "").strip().lower()
-if qq:
-    _filtered = _filtered[_filtered["_blob"].str.contains(qq, regex=False)]
+# ---------- enrich df for display & search ----------
+import re as _re
 
-# Columns to show (hide 'id' and 'keywords'); use formatted phone
-view_cols = [
-    "category",
-    "service",
-    "business_name",
-    "contact_name",
-    "phone_fmt",
-    "address",
-    "website",
-    "notes",
-]
-# Ensure phone_fmt exists (format 10-digit US numbers), then build the grid data safely
-if "phone_fmt" not in _filtered.columns:
-    import re
+# phone_fmt for display
+if "phone_fmt" not in df.columns:
     def _fmt_phone(v):
-        s = re.sub(r"\D+", "", str(v or ""))
-        if len(s) == 10:
-            return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
-        return str(v or "")
-    _filtered = _filtered.assign(phone_fmt=_filtered["phone"].map(_fmt_phone))
+        s = _re.sub(r"\D+", "", str(v or ""))
+        return f"({s[0:3]}) {s[3:6]}-{s[6:10]}" if len(s) == 10 else str(v or "")
+    if "phone" in df.columns:
+        df = df.assign(phone_fmt=df["phone"].map(_fmt_phone))
+    else:
+        df["phone_fmt"] = ""
 
-# Columns to display (use phone_fmt, then rename to 'phone')
+# normalized website for clickable links
+if "website_norm" not in df.columns:
+    def _san(u):
+        u = (u or "").strip()
+        if not u:
+            return ""
+        if not _re.match(r"^https?://", u, _re.I):
+            u = "https://" + u
+        return u
+    if "website" in df.columns:
+        df = df.assign(website_norm=df["website"].map(_san))
+    else:
+        df["website_norm"] = ""
+
+# unified, lowercase search blob across common fields
+_blob_cols = ["category", "service", "business_name", "contact_name", "phone", "address", "website", "notes", "keywords"]
+def _to_str(x): return "" if x is None else str(x)
+df["_blob"] = (
+    df.reindex(columns=[c for c in _blob_cols if c in df.columns])
+      .applymap(_to_str)
+      .agg(" ".join, axis=1)
+      .str.lower()
+)
+# ---------- /enrich ----------
+
+# Filtering (safe, client-side)
+_filtered = df
+qq = (st.session_state.get("q") or "").strip().lower()
+if qq:
+    _filtered = _filtered[_filtered["_blob"].str.contains(qq, regex=False, na=False)]
+
+# Columns to show (sanitized link + formatted phone)
 view_cols = [
     "business_name", "category", "service", "contact_name",
-    "phone_fmt", "address", "website", "notes", "keywords"
+    "phone_fmt", "address", "website_norm", "notes",
 ]
-
-# Guarded reindex avoids KeyError if any optional columns are missing
-_cols = [c for c in view_cols if c in _filtered.columns]
-grid_df = _filtered.reindex(columns=_cols).rename(
-    columns={"business_name": "provider", "phone_fmt": "phone"}
+cols_present = [c for c in view_cols if c in _filtered.columns]
+grid_df = (
+    _filtered
+    .reindex(columns=cols_present)
+    .rename(columns={"business_name": "provider", "phone_fmt": "phone", "website_norm": "website"})
 )
 
-
-# Render fast, virtualized table; clickable website links
+# Render fast, virtualized table
 st.dataframe(
     grid_df,
     use_container_width=True,
     column_config={
-        "provider": st.column_config.TextColumn("Provider", width=240),
-        "category": st.column_config.TextColumn("Category", width=140),
-        "service": st.column_config.TextColumn("Service", width=160),
+        "provider":     st.column_config.TextColumn("Provider", width=240),
+        "category":     st.column_config.TextColumn("Category", width=140),
+        "service":      st.column_config.TextColumn("Service", width=160),
         "contact_name": st.column_config.TextColumn("Contact", width=180),
-        "phone": st.column_config.TextColumn("Phone", width=140),
-        "address": st.column_config.TextColumn("Address", width=260),
-        "website": st.column_config.LinkColumn("Website", max_chars=40),
-        "notes": st.column_config.TextColumn("Notes", width=420),
+        "phone":        st.column_config.TextColumn("Phone", width=140),
+        "address":      st.column_config.TextColumn("Address", width=260),
+        "website":      st.column_config.LinkColumn("Website", max_chars=40),
+        "notes":        st.column_config.TextColumn("Notes", width=420, max_chars=240),
     },
-    height=560,  # tweak if you want more/less visible rows
+    height=560,
 )
 
-# CSV download (filtered view): formatted phones only
+# CSV download (filtered view)
 st.download_button(
     "Download CSV file of Providers",
     data=grid_df.to_csv(index=False).encode("utf-8"),
@@ -245,18 +278,16 @@ st.download_button(
 )
 
 # -----------------------------
-# Debug (button toggled at bottom)
+# Debug (toggle)
 # -----------------------------
 st.divider()
-btn_label = "Show debug" if not st.session_state["show_debug"] else "Hide debug"
-if st.button(btn_label):
+btn = "Show debug" if not st.session_state["show_debug"] else "Hide debug"
+if st.button(btn):
     st.session_state["show_debug"] = not st.session_state["show_debug"]
     st.rerun()
 
 if st.session_state["show_debug"]:
     st.subheader("Status & Secrets (debug)")
-
-    # mask sync_url in screenshots/logs
     safe_info = dict(engine_info)
     if isinstance(safe_info.get("sync_url"), str):
         s = safe_info["sync_url"]
