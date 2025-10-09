@@ -73,9 +73,11 @@ def _to_excel_bytes(df: pd.DataFrame) -> bytes:
 PAGE_TITLE = _get_secret("page_title", "HCR Providers (Read-Only)") or "HCR Providers (Read-Only)"
 SIDEBAR_STATE = _get_secret("sidebar_state", "collapsed") or "collapsed"
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
+st.caption(f"Streamlit {st.__version__}")  # temporary; remove later
 
 LEFT_PAD_PX = int(_get_secret("page_left_padding_px", "20") or "20")
 MAX_WIDTH_PX = int(_get_secret("page_max_width_px", "2300") or "2300")
+
 
 # Optional column labels (cosmetic). We’ll also force business_name -> providers below.
 READONLY_COLUMN_LABELS = _get_secret("READONLY_COLUMN_LABELS")
