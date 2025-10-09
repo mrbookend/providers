@@ -69,7 +69,6 @@ DISABLE_LOGIN = _as_bool(_get_secret("DISABLE_ADMIN_PASSWORD", "0"))
 if DISABLE_LOGIN:
     pass  # no banner
 else:
-    ...
     ADMIN_PASSWORD = (_get_secret("ADMIN_PASSWORD", "") or "").strip()
     if not ADMIN_PASSWORD:
         st.error("ADMIN_PASSWORD is not set in Secrets. Add it in Settings → Secrets.")
@@ -415,25 +414,25 @@ _tabs = st.tabs(
 with _tabs[0]:
     df = load_df(engine)
 
-    # --- Build a lowercase search blob once (cheap & safe) ---
+    # --- Build a lowercase search blob once (guarded) ---
     if "_blob" not in df.columns:
-        _parts = []
-        for col in ["business_name", "category", "service", "contact_name", "phone", "address", "website", "notes", "keywords"]:
-            if col in df.columns:
-                _parts.append(df[col].astype(str))
-        if _parts:
-            df["_blob"] = pd.concat(_parts, axis=1).agg(" ".join, axis=1).str.lower()
-        else:
-            df["_blob"] = ""
+        parts = [
+            df.get(c, pd.Series("", index=df.index)).astype(str)
+            for c in ["business_name", "category", "service", "contact_name", "phone", "address", "website", "notes", "keywords"]
+        ]
+        df["_blob"] = pd.concat(parts, axis=1).agg(" ".join, axis=1).str.lower()
 
-    # --- Fast local search (no regex, uses the prebuilt blob) ---
-    q = st.text_input(
-        "Search",  # non-empty to avoid Streamlit warnings
-        placeholder="Search providers… (press Enter)",
-        label_visibility="collapsed",
-        key="q",
-    )
+    # --- Search input at 25% width (table remains full width) ---
+    left, right = st.columns([1, 3])  # 25% / 75% split for this row only
+    with left:
+        q = st.text_input(
+            "Search",  # non-empty to avoid Streamlit warnings
+            placeholder="Search providers… (press Enter)",
+            label_visibility="collapsed",
+            key="q",
+        )
 
+    # Fast local filter using the prebuilt blob (no regex)
     qq = (st.session_state.get("q") or "").strip().lower()
     if qq:
         filtered = df[df["_blob"].str.contains(qq, regex=False, na=False)]
@@ -452,11 +451,12 @@ with _tabs[0]:
         "notes",
         "keywords",
     ]
+
     vdf = filtered[view_cols].rename(columns={"phone_fmt": "phone"})
 
     st.data_editor(
         vdf,
-        use_container_width=False,
+        use_container_width=True,   # table spans full main area
         hide_index=True,
         disabled=True,
         column_config={
@@ -712,7 +712,7 @@ with _tabs[3]:
             new = st.text_input("New name", key="svc_rename")
             if st.button("Rename Service"):
                 if not new.strip():
-                    st.error("Enter a name.")
+                    st.error("Enter a new name.")
                 else:
                     with engine.begin() as conn:
                         conn.execute(sql_text("UPDATE services SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
