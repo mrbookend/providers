@@ -414,43 +414,31 @@ _tabs = st.tabs(
 # ---------- Browse
 with _tabs[0]:
     df = load_df(engine)
-# --- Build a lowercase search blob once (guarded) ---
-if "_blob" not in df.columns:
-    _parts = []
-    for col in ["business_name", "category", "service", "contact_name", "phone", "address", "website", "notes", "keywords"]:
-        if col in df.columns:
-            _parts.append(df[col].astype(str))
-    if _parts:
-        df["_blob"] = (
-            pd.concat(_parts, axis=1)
-            .agg(" ".join, axis=1)
-            .str.lower()
-        )
-    else:
-        df["_blob"] = ""
-    
+
+    # --- Build a lowercase search blob once (cheap & safe) ---
+    if "_blob" not in df.columns:
+        _parts = []
+        for col in ["business_name", "category", "service", "contact_name", "phone", "address", "website", "notes", "keywords"]:
+            if col in df.columns:
+                _parts.append(df[col].astype(str))
+        if _parts:
+            df["_blob"] = pd.concat(_parts, axis=1).agg(" ".join, axis=1).str.lower()
+        else:
+            df["_blob"] = ""
+
+    # --- Fast local search (no regex, uses the prebuilt blob) ---
     q = st.text_input(
-        "",
-        placeholder="Search — e.g., plumb returns any record with 'plumb' anywhere",
+        "Search",  # non-empty to avoid Streamlit warnings
+        placeholder="Search providers… (press Enter)",
         label_visibility="collapsed",
+        key="q",
     )
 
-    def _filter(_df: pd.DataFrame, q: str) -> pd.DataFrame:
-        if not q:
-            return _df
-        qq = re.escape(q)
-        mask = (
-            _df["category"].astype(str).str.contains(qq, case=False, na=False)
-            | _df["service"].astype(str).str.contains(qq, case=False, na=False)
-            | _df["business_name"].astype(str).str.contains(qq, case=False, na=False)
-            | _df["contact_name"].astype(str).str.contains(qq, case=False, na=False)
-            | _df["phone"].astype(str).str.contains(qq, case=False, na=False)
-            | _df["address"].astype(str).str.contains(qq, case=False, na=False)
-            | _df["website"].astype(str).str.contains(qq, case=False, na=False)
-            | _df["notes"].astype(str).str.contains(qq, case=False, na=False)
-            | _df["keywords"].astype(str).str.contains(qq, case=False, na=False)
-        )
-        return _df[mask]
+    qq = (st.session_state.get("q") or "").strip().lower()
+    if qq:
+        filtered = df[df["_blob"].str.contains(qq, regex=False, na=False)]
+    else:
+        filtered = df
 
     view_cols = [
         "id",
@@ -464,7 +452,7 @@ if "_blob" not in df.columns:
         "notes",
         "keywords",
     ]
-    vdf = _filter(df, q)[view_cols].rename(columns={"phone_fmt": "phone"})
+    vdf = filtered[view_cols].rename(columns={"phone_fmt": "phone"})
 
     st.data_editor(
         vdf,
