@@ -414,6 +414,21 @@ _tabs = st.tabs(
 # ---------- Browse
 with _tabs[0]:
     df = load_df(engine)
+# --- Build a lowercase search blob once (guarded) ---
+if "_blob" not in df.columns:
+    _parts = []
+    for col in ["business_name", "category", "service", "contact_name", "phone", "address", "website", "notes", "keywords"]:
+        if col in df.columns:
+            _parts.append(df[col].astype(str))
+    if _parts:
+        df["_blob"] = (
+            pd.concat(_parts, axis=1)
+            .agg(" ".join, axis=1)
+            .str.lower()
+        )
+    else:
+        df["_blob"] = ""
+    
     q = st.text_input(
         "",
         placeholder="Search — e.g., plumb returns any record with 'plumb' anywhere",
