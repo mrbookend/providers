@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import io
+import re
 import html
 import textwrap
 from typing import Dict, List, Optional, Tuple
@@ -20,7 +21,7 @@ except Exception:
     pass
 
 # =============================
-# Secrets / config helpers
+# Utilities
 # =============================
 def _get_secret(name: str, default: Optional[str | int | dict | bool] = None):
     """Prefer Streamlit secrets; tolerate local/no-secrets contexts."""
@@ -41,6 +42,32 @@ def _as_bool(v: Optional[str | bool], default: bool = False) -> bool:
     if v is None:
         return default
     return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _to_int(v, default: int) -> int:
+    """Coerce widths to int safely:
+    - ints/floats -> int()
+    - strings like '200px', ' 180 ' -> digits extracted
+    - empty/invalid -> default
+    """
+    try:
+        if isinstance(v, bool):
+            return default
+        if isinstance(v, (int,)):
+            return int(v)
+        if isinstance(v, float):
+            return int(v)
+        s = str(v).strip()
+        if not s:
+            return default
+        # extract first integer in the string (e.g., "200px" -> 200)
+        m = re.search(r"-?\d+", s)
+        if not m:
+            return default
+        n = int(m.group(0))
+        return n if n > 0 else default
+    except Exception:
+        return default
 
 
 def _get_help_md() -> str:
@@ -69,7 +96,7 @@ def _get_help_md() -> str:
 # Page config
 # =============================
 PAGE_TITLE = _get_secret("page_title", "HCR Providers — Read-Only")
-PAGE_MAX_WIDTH_PX = int(_get_secret("page_max_width_px", 2300))
+PAGE_MAX_WIDTH_PX = _to_int(_get_secret("page_max_width_px", 2300), 2300)
 SIDEBAR_STATE = _get_secret("sidebar_state", "collapsed")
 
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
@@ -121,19 +148,14 @@ st.markdown(
 # =============================
 # Column labels & widths (from secrets)
 # =============================
-# Raw (may be Streamlit's read-only AttrDict)
+# Raw (may be Streamlit's read-only AttrDict). Normalize to plain dicts.
 _readonly_labels_raw = _get_secret("READONLY_COLUMN_LABELS", {}) or {}
 _col_widths_raw = _get_secret("COLUMN_WIDTHS_PX_READONLY", {}) or {}
 
-# Normalize to *plain dicts* so we can safely operate on them
 READONLY_COLUMN_LABELS: Dict[str, str] = dict(_readonly_labels_raw)
-# Coerce width values to int in case TOML strings were used
-COLUMN_WIDTHS_PX_READONLY: Dict[str, int] = {str(k): int(v) for k, v in dict(_col_widths_raw).items()}
-
-STICKY_FIRST_COL: bool = _as_bool(_get_secret("READONLY_STICKY_FIRST_COL", False), False)
 
 # Reasonable defaults
-DEFAULT_WIDTHS = {
+_DEFAULT_WIDTHS = {
     "id": 40,
     "business_name": 180,
     "category": 175,
@@ -146,9 +168,21 @@ DEFAULT_WIDTHS = {
     "keywords": 90,
 }
 
-# Merge defaults (left) with user-specified (right); user values win
-COLUMN_WIDTHS_PX_READONLY = {**DEFAULT_WIDTHS, **COLUMN_WIDTHS_PX_READONLY}
+# Build user widths safely (coerce each value)
+_user_widths: Dict[str, int] = {}
+for k, v in dict(_col_widths_raw).items():
+    _user_widths[str(k)] = _to_int(v, _DEFAULT_WIDTHS.get(str(k), 140))
 
+# Merge defaults (left) with user-specified (right); user values win
+COLUMN_WIDTHS_PX_READONLY: Dict[str, int] = {**_DEFAULT_WIDTHS, **_user_widths}
+
+# Optional hardening clamp (keeps us safe if future changes inject bad values)
+for k, v in list(COLUMN_WIDTHS_PX_READONLY.items()):
+    if not isinstance(v, int) or v <= 0:
+        COLUMN_WIDTHS_PX_READONLY[k] = _DEFAULT_WIDTHS.get(k, 120)
+
+# Optional sticky first column
+STICKY_FIRST_COL: bool = _as_bool(_get_secret("READONLY_STICKY_FIRST_COL", False), False)
 
 
 # =============================
@@ -173,7 +207,7 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
         )
         return engine, info
 
-    # Fallback (optional; useful for local dev). In prod you may disable this path.
+    # Fallback (useful for local dev). In prod you may disable this path.
     local_path = os.path.abspath("./vendors.db")
     local_url = f"sqlite:///{local_path}"
     engine = create_engine(local_url, pool_pre_ping=True)
@@ -213,19 +247,21 @@ def fetch_vendors(engine: Engine) -> pd.DataFrame:
     sql = "SELECT " + ", ".join(VENDOR_COLS) + " FROM vendors ORDER BY lower(business_name)"
     with engine.begin() as conn:
         df = pd.read_sql(sql_text(sql), conn)
-    # Normalize website to clickable markdown if it looks like a URL
-    def _mk_link(v: str) -> str:
+
+    # Normalize website to clickable HTML anchor if it looks like a URL
+    def _mk_anchor(v: str) -> str:
         if not isinstance(v, str) or not v.strip():
             return ""
         u = v.strip()
         if not (u.startswith("http://") or u.startswith("https://")):
             u = "https://" + u
-        # Escape label only; allow href as-is
         label = html.escape(v.strip())
-        return f"[{label}]({u})"
+        href = html.escape(u, quote=True)
+        return f'<a href="{href}" target="_blank" rel="noopener noreferrer">{label}</a>'
 
     if "website" in df.columns:
-        df["website"] = df["website"].fillna("").astype(str).map(_mk_link)
+        df["website"] = df["website"].fillna("").astype(str).map(_mk_anchor)
+
     # Ensure strings (for consistent search)
     for c in df.columns:
         if c not in ("id", "created_at", "updated_at"):  # let id remain int if it is
@@ -253,7 +289,7 @@ def apply_global_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
 def _rename_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
     """Apply label mapping; return df and reverse map (for width lookups)."""
     mapping = {k: READONLY_COLUMN_LABELS.get(k, k.replace("_", " ").title()) for k in df.columns}
-    df2 = df.rename(columns=mapping)
+    df2 = df.rename(columns={k: mapping[k] for k in df.columns})
     # Reverse map: display -> original
     rev = {v: k for k, v in mapping.items()}
     return df2, rev
@@ -269,7 +305,9 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
         orig = rev[col]
         width = COLUMN_WIDTHS_PX_READONLY.get(orig, 140)
         sticky_cls = "sticky" if sticky_first and (col == df_disp.columns[0]) else ""
-        headers.append(f'<th class="{sticky_cls}" style="min-width:{width}px;max-width:{width}px;">{html.escape(col)}</th>')
+        headers.append(
+            f'<th class="{sticky_cls}" style="min-width:{width}px;max-width:{width}px;">{html.escape(col)}</th>'
+        )
     thead = "<thead><tr>" + "".join(headers) + "</tr></thead>"
 
     # Build body
@@ -281,10 +319,13 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
             orig = rev[col]
             val = row[col]
             width = COLUMN_WIDTHS_PX_READONLY.get(orig, 140)
-            # Website column is markdown link; ensure it remains markdown-supported via st.markdown
-            cell = str(val) if val is not None else ""
             sticky_cls = "sticky" if (sticky_first and col == first_col_name) else ""
-            tds.append(f'<td class="{sticky_cls}" style="min-width:{width}px;max-width:{width}px;">{cell}</td>')
+            # For website column we already built an <a>; for others escape HTML
+            if orig == "website":
+                cell_html = val  # already safe anchor or empty string
+            else:
+                cell_html = html.escape(str(val) if val is not None else "")
+            tds.append(f'<td class="{sticky_cls}" style="min-width:{width}px;max-width:{width}px;">{cell_html}</td>')
         rows_html.append("<tr>" + "".join(tds) + "</tr>")
     tbody = "<tbody>" + "".join(rows_html) + "</tbody>"
 
@@ -334,15 +375,13 @@ def main():
     q = st.session_state.get("q", "")
     filtered = apply_global_search(df, q)
 
-    # Sort client-side by clicking header (not server-side ordering here)
-    # Render as lightweight HTML so wrapping + pixel widths are honored.
+    # Render as lightweight HTML so wrapping + pixel widths are honored
     html_table = _build_table_html(filtered, sticky_first=STICKY_FIRST_COL)
     st.markdown(html_table, unsafe_allow_html=True)
 
     # Download CSV (place near the bottom, before debug)
     csv_buf = io.StringIO()
-    # Use original column names for CSV, not the labeled versions
-    filtered.to_csv(csv_buf, index=False)
+    filtered.to_csv(csv_buf, index=False)  # use original column names (not the labeled versions)
     st.download_button(
         "Download providers.csv",
         data=csv_buf.getvalue().encode("utf-8"),
@@ -358,6 +397,7 @@ def main():
         dbg = {
             "DB (resolved)": info,
             "Secrets keys": sorted(list(getattr(st, "secrets", {}).keys())) if hasattr(st, "secrets") else [],
+            "Widths (effective)": COLUMN_WIDTHS_PX_READONLY,
         }
         st.write(dbg)
         # Also show a tiny probe of the DB
