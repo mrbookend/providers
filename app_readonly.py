@@ -1,131 +1,110 @@
-# app_readonly.py
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import os
 import re
 from io import BytesIO
-from typing import Any, Tuple
+from typing import Dict, Tuple
 
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
 
-# Try to register the sqlite+libsql dialect (works with sqlalchemy-libsql==0.2.x)
+# Ensure the libsql dialect (must be AFTER streamlit import)
 try:
     import sqlalchemy_libsql  # noqa: F401
 except Exception:
     pass
 
+# ---------- Optional Excel engine availability ----------
+try:
+    import xlsxwriter  # noqa: F401
+    _xlsx_available = True
+except Exception:
+    _xlsx_available = False
 
-# =========================================================
-# Page config and simple styling
-# =========================================================
-def _get_secret(name: str, default: Any) -> Any:
-    return st.secrets.get(name, default) if hasattr(st, "secrets") else os.getenv(name, default)
+
+# =============================
+# Helpers
+# =============================
+def _as_bool(v, default: bool = False) -> bool:
+    if v is None:
+        return default
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 
-PAGE_TITLE = _get_secret("page_title", "Providers — Read-only")
-SIDEBAR_STATE = _get_secret("sidebar_state", "collapsed")  # "expanded" | "collapsed"
-PAGE_MAX_WIDTH = int(_get_secret("page_max_width_px", 2300))
-LEFT_PAD_PX = int(_get_secret("page_left_padding_px", 20))
+def _get_secret(name: str, default: str | None = None) -> str | None:
+    """Prefer Streamlit secrets, fallback to environment."""
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return os.getenv(name, default)
+
+
+def _to_xlsx_bytes(df: pd.DataFrame) -> bytes:
+    out = BytesIO()
+    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="providers")
+    out.seek(0)
+    return out.read()
+
+
+# =============================
+# Page config & CSS
+# =============================
+PAGE_TITLE = _get_secret("page_title", "Providers — Read-only") or "Providers — Read-only"
+SIDEBAR_STATE = _get_secret("sidebar_state", "collapsed") or "collapsed"
+LEFT_PAD_PX = int(_get_secret("page_left_padding_px", "20") or "20")
+MAX_WIDTH_PX = int(_get_secret("page_max_width_px", "2300") or "2300")
 
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
 
 st.markdown(
     f"""
     <style>
-      .main .block-container {{
+      .app-container-max {{
+        max-width:{MAX_WIDTH_PX}px;
+        margin: 0 auto;
+      }}
+      [data-testid="stAppViewContainer"] .main .block-container {{
         padding-left: {LEFT_PAD_PX}px !important;
         padding-right: 0 !important;
-        max-width: {PAGE_MAX_WIDTH}px !important;
       }}
+      /* Prevent table text wrapping for compact view */
+      div[data-testid="stDataFrame"] table {{ white-space: nowrap; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# =========================================================
-# Turso engine builder (sanitizer + validator + gated fallback)
-# =========================================================
-def _sanitize_turso_url(raw: str) -> str:
+st.markdown('<div class="app-container-max">', unsafe_allow_html=True)
+
+
+# =============================
+# Engine builder (sanitized)
+# =============================
+def build_engine() -> Tuple[Engine, Dict]:
     """
-    Accepts various incoming forms and returns a clean libsql://host path
-    that libsql can handle. Strips querystrings/paths that cause InvalidUri.
+    Prefer Turso embedded replica (sqlite+libsql) if TURSO_DATABASE_URL is provided.
+    Sanitize URL to libsql:// form without query params. Validate connectivity.
+    Fallback to local sqlite only if FORCE_LOCAL=1 (string truthy).
     """
-    if not raw:
-        return ""
-    raw = raw.strip()
+    info: Dict = {}
 
-    # If it already starts with libsql://, strip everything except host
-    if raw.lower().startswith("libsql://"):
-        core = raw.split("://", 1)[1]
-        # remove path / query / fragment
-        core = core.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
-        return f"libsql://{core}"
+    url = (_get_secret("TURSO_DATABASE_URL", "") or "").strip()
+    token = (_get_secret("TURSO_AUTH_TOKEN", "") or "").strip()
+    force_local = _as_bool(_get_secret("FORCE_LOCAL", "0"), False)
 
-    # Some people paste https URLs (browser endpoints) — keep only host
-    if raw.lower().startswith("https://") or raw.lower().startswith("http://"):
-        core = raw.split("://", 1)[1]
-        core = core.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
-        return f"libsql://{core}"
-
-    # Bare host
-    core = raw.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
-    if core:
-        return f"libsql://{core}"
-
-    return ""
-
-
-@st.cache_resource
-def build_engine() -> Tuple[Engine, dict[str, Any]]:
-    """
-    Preferred: embedded replica engine to Turso (sqlite+libsql:///… with sync_url & token).
-    Fallback to local sqlite:///vendors.db ONLY if FORCE_LOCAL="1".
-    """
-    info: dict[str, Any] = {}
-    raw_url = str(_get_secret("TURSO_DATABASE_URL", "") or "").strip()
-    auth_token = str(_get_secret("TURSO_AUTH_TOKEN", "") or "").strip()
-    force_local = str(_get_secret("FORCE_LOCAL", os.getenv("FORCE_LOCAL", "0"))).strip()
-
-    if raw_url:
-        sync_url = _sanitize_turso_url(raw_url)
-        if not sync_url.lower().startswith("libsql://"):
-            info["remote_error"] = "Sanitized URL is not libsql://…"
-        elif not auth_token:
-            info["remote_error"] = "TURSO_AUTH_TOKEN missing"
-        else:
-            try:
-                eng = create_engine(
-                    "sqlite+libsql:///vendors-embedded.db",
-                    connect_args={"sync_url": sync_url, "auth_token": auth_token},
-                    pool_pre_ping=True,
-                )
-                # Validate connectivity early
-                with eng.connect() as c:
-                    c.exec_driver_sql("select 1;")
-
-                info.update(
-                    {
-                        "using_remote": True,
-                        "strategy": "embedded_replica",
-                        "sqlalchemy_url": "sqlite+libsql:///vendors-embedded.db",
-                        "dialect": eng.dialect.name,
-                        "driver": getattr(eng.dialect, "driver", ""),
-                        "sync_url": sync_url,
-                    }
-                )
-                return eng, info
-            except Exception as e:
-                info["remote_error"] = f"{e}"
-
-    # Reaching here means remote path failed or not configured
-    if force_local == "1":
+    if not url:
+        # No remote at all → local only
         eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
         info.update(
             {
                 "using_remote": False,
+                "strategy": "local_sqlite",
                 "sqlalchemy_url": "sqlite:///vendors.db",
                 "dialect": eng.dialect.name,
                 "driver": getattr(eng.dialect, "driver", ""),
@@ -133,81 +112,152 @@ def build_engine() -> Tuple[Engine, dict[str, Any]]:
         )
         return eng, info
 
-    st.error(
-        "Remote DB unavailable (or misconfigured), and FORCE_LOCAL is not set to '1'. "
-        "Please set secrets properly or enable local fallback."
-    )
-    raise RuntimeError("No valid database connection available.")
-
-
-engine, engine_info = build_engine()
-
-# =========================================================
-# Cache helpers + data loader
-# =========================================================
-@st.cache_data(ttl=5)
-def _cache_key_for_engine(e: Engine) -> str:
+    # Sanitize to libsql://<host> (strip query params, accept sqlite+libsql:// forms)
     try:
-        return e.url.render_as_string(hide_password=True)
-    except Exception:
-        return "engine"
+        raw = url
+        if raw.startswith("sqlite+libsql://"):
+            host = raw.split("://", 1)[1].split("?", 1)[0]
+            sync_url = f"libsql://{host}"
+        else:
+            # Already libsql://... → strip any query string
+            if "://" in raw:
+                scheme, rest = raw.split("://", 1)
+                if scheme != "libsql":
+                    raise ValueError("TURSO_DATABASE_URL must use libsql:// scheme for embedded mode.")
+                rest = rest.split("?", 1)[0]
+                sync_url = f"libsql://{rest}"
+            else:
+                raise ValueError("Invalid TURSO_DATABASE_URL format.")
+        if not token:
+            raise ValueError("TURSO_AUTH_TOKEN is missing for remote database.")
+    except Exception as e:
+        if force_local:
+            eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+            info.update(
+                {
+                    "using_remote": False,
+                    "strategy": "local_sqlite",
+                    "warn": f"Remote URL invalid: {e}. Using local due to FORCE_LOCAL=1.",
+                    "sqlalchemy_url": "sqlite:///vendors.db",
+                }
+            )
+            return eng, info
+        st.error(f"Remote DB configuration invalid: {e}")
+        raise
 
-
-@st.cache_data(ttl=600, show_spinner=False, hash_funcs={Engine: _cache_key_for_engine})
-def load_df(e: Engine) -> pd.DataFrame:
-    with e.begin() as conn:
-        df = pd.read_sql(
-            sql_text(
-                """
-                SELECT id, category, service, business_name, contact_name,
-                       phone, address, website, notes, keywords,
-                       created_at, updated_at, updated_by
-                FROM vendors
-                ORDER BY business_name COLLATE NOCASE
-                """
-            ),
-            conn,
+    # Attempt embedded replica (file-backed)
+    try:
+        eng = create_engine(
+            "sqlite+libsql:///vendors-embedded.db",
+            connect_args={"auth_token": token, "sync_url": sync_url},
+            pool_pre_ping=True,
         )
+        # Validate connectivity
+        with eng.connect() as c:
+            c.exec_driver_sql("select 1;")
+
+        info.update(
+            {
+                "using_remote": True,
+                "strategy": "embedded_replica",
+                "sqlalchemy_url": "sqlite+libsql:///vendors-embedded.db",
+                "dialect": eng.dialect.name,
+                "driver": getattr(eng.dialect, "driver", ""),
+                "sync_url": sync_url,
+            }
+        )
+        return eng, info
+    except Exception as e:
+        if force_local:
+            eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+            info.update(
+                {
+                    "using_remote": False,
+                    "strategy": "local_sqlite",
+                    "warn": f"Remote unavailable: {e}. Using local due to FORCE_LOCAL=1.",
+                    "sqlalchemy_url": "sqlite:///vendors.db",
+                }
+            )
+            return eng, info
+        st.error(f"Remote DB unavailable and FORCE_LOCAL is 0. Error: {e}")
+        raise
+
+
+def ensure_schema(engine: Engine) -> None:
+    """Read-only app, but creating tables if absent is harmless and prevents crashes."""
+    stmts = [
+        """
+        CREATE TABLE IF NOT EXISTS vendors (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          category TEXT NOT NULL,
+          service TEXT,
+          business_name TEXT NOT NULL,
+          contact_name TEXT,
+          phone TEXT,
+          address TEXT,
+          website TEXT,
+          notes TEXT,
+          keywords TEXT,
+          created_at TEXT,
+          updated_at TEXT,
+          updated_by TEXT
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_vendors_cat ON vendors(category)",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_bus ON vendors(business_name)",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_kw  ON vendors(keywords)",
+    ]
+    with engine.begin() as conn:
+        for s in stmts:
+            conn.execute(sql_text(s))
+
+
+@st.cache_data(show_spinner=False)
+def load_df(engine: Engine) -> pd.DataFrame:
+    with engine.begin() as conn:
+        df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
+
+    # Friendly phone (don't change stored digits)
+    def _format_phone(val: str | None) -> str:
+        s = re.sub(r"\D", "", str(val or ""))
+        if len(s) == 10:
+            return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
+        return (val or "").strip()
+
+    if "phone" in df.columns:
+        df["phone_fmt"] = df["phone"].apply(_format_phone)
+    else:
+        df["phone_fmt"] = ""
+
+    # Build a lowercase search blob once (guarded)
+    if "_blob" not in df.columns:
+        parts = []
+        for col in ["business_name", "category", "service", "contact_name", "phone", "address", "website", "notes", "keywords"]:
+            if col in df.columns:
+                parts.append(df[col].astype(str))
+        df["_blob"] = (pd.concat(parts, axis=1).agg(" ".join, axis=1).str.lower()) if parts else ""
+
     return df
 
 
-df = load_df(engine)
+# =============================
+# App UI
+# =============================
+engine, engine_info = build_engine()
+ensure_schema(engine)
 
-# --- Build phone_fmt once (guarded)
-if "phone_fmt" not in df.columns:
-    def _fmt_phone(v: Any) -> str:
-        s = re.sub(r"\D+", "", str(v or ""))
-        if len(s) == 10:
-            return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
-        return str(v or "")
-    df["phone_fmt"] = df["phone"].map(_fmt_phone) if "phone" in df.columns else ""
+st.title(PAGE_TITLE)
 
-# --- Build a lowercase search blob once (guarded)
-if "_blob" not in df.columns:
-    parts = []
-    for col in [
-        "business_name",
-        "category",
-        "service",
-        "contact_name",
-        "phone",
-        "address",
-        "website",
-        "notes",
-        "keywords",
-    ]:
-        if col in df.columns:
-            parts.append(df[col].astype(str))
-    if parts:
-        df["_blob"] = pd.concat(parts, axis=1).agg(" ".join, axis=1).str.lower()
-    else:
-        df["_blob"] = ""
+# Optional maintenance/debug toggle (no refresh button here)
+enable_debug = _as_bool(_get_secret("READONLY_MAINTENANCE_ENABLE", "0"), False)
+if enable_debug and "show_debug" not in st.session_state:
+    st.session_state["show_debug"] = False
 
-# =========================================================
-# UI — top controls and fast local search
-# =========================================================
+# Top row: left (search), right (optional debug toggle)
 top_l, top_r = st.columns([1, 1])
+
 with top_l:
+    # Non-empty label avoids repeated Streamlit warnings
     q = st.text_input(
         "Search",
         placeholder="Search providers… (press Enter)",
@@ -215,128 +265,109 @@ with top_l:
         key="q",
     )
 
+with top_r:
+    if enable_debug:
+        btn_label = "Show debug" if not st.session_state["show_debug"] else "Hide debug"
+        if st.button(btn_label):
+            st.session_state["show_debug"] = not st.session_state["show_debug"]
+            st.rerun()
+
+# Load data
+df = load_df(engine)
+
+# Fast local search (no regex): uses prebuilt _blob
 qq = (st.session_state.get("q") or "").strip().lower()
 if qq:
     filtered = df[df["_blob"].str.contains(qq, regex=False, na=False)]
 else:
     filtered = df
 
-# =========================================================
-# Grid render (no clickable phone/website)
-# =========================================================
-# Columns to display (and order). Keep them defensive.
+# Columns to show (hide id & keywords, show formatted phone)
 view_cols = [
-    "business_name",
     "category",
     "service",
+    "business_name",
     "contact_name",
     "phone_fmt",
     "address",
     "website",
     "notes",
-    # "keywords"  # omit from view; still in CSV export via filtered if desired
 ]
-cols_present = [c for c in view_cols if c in filtered.columns]
-grid_df = filtered.reindex(columns=cols_present).rename(
-    columns={
-        "business_name": "provider",
-        "phone_fmt": "phone",
-    }
+vdf = filtered.copy()
+vdf = vdf.reindex(columns=[c for c in view_cols if c in vdf.columns]).rename(columns={"business_name": "provider", "phone_fmt": "phone"})
+
+# Cosmetic renames via secrets (optional)
+# Example in Secrets: READONLY_COLUMN_LABELS = { provider = "Provider" }
+label_map = {}
+try:
+    # st.secrets requires TOML-like mapping; convert to dict if present
+    if "READONLY_COLUMN_LABELS" in st.secrets:
+        # Streamlit returns MappingProxy, safe to cast
+        label_map = dict(st.secrets["READONLY_COLUMN_LABELS"])
+except Exception:
+    pass
+
+if label_map:
+    vdf = vdf.rename(columns=label_map)
+
+# Widths (optional): COLUMN_WIDTHS_PX_READONLY in Secrets
+col_config = {}
+try:
+    widths = st.secrets.get("COLUMN_WIDTHS_PX_READONLY", None)
+    if widths:
+        # Build column configs with widths where provided
+        for col in vdf.columns:
+            w = widths.get(col) if isinstance(widths, dict) else None
+            if w:
+                col_config[col] = st.column_config.TextColumn(col, width=int(w))
+except Exception:
+    pass
+
+st.data_editor(
+    vdf,
+    use_container_width=True,  # full width table
+    hide_index=True,
+    disabled=True,
+    column_config=col_config if col_config else None,
 )
 
-st.dataframe(
-    grid_df,
-    use_container_width=True,
-    column_config={
-        "provider": st.column_config.TextColumn(_get_secret("READONLY_COLUMN_LABELS", {}).get("provider", "Provider"), width=220),
-        "category": st.column_config.TextColumn("Category", width=160),
-        "service": st.column_config.TextColumn("Service", width=160),
-        "contact_name": st.column_config.TextColumn("Contact", width=180),
-        "phone": st.column_config.TextColumn("Phone", width=140),
-        "address": st.column_config.TextColumn("Address", width=260),
-        "website": st.column_config.TextColumn("Website", width=220),
-        "notes": st.column_config.TextColumn("Notes", width=420),
-    },
-    height=560,
-)
-
-# CSV download (filtered, with formatted phone)
+# ---- Downloads ----
 st.download_button(
-    "Download CSV file of Providers",
-    data=grid_df.to_csv(index=False).encode("utf-8"),
+    "Download filtered view (CSV)",
+    data=vdf.to_csv(index=False).encode("utf-8"),
     file_name="providers.csv",
     mime="text/csv",
 )
-# --- Download filtered view (Excel) ---
-# Tries openpyxl first, falls back to xlsxwriter. Shows a hint if neither is available.
-try:
-    import openpyxl  # noqa: F401
-    _excel_engine = "openpyxl"
-except Exception:
-    try:
-        import xlsxwriter  # noqa: F401
-        _excel_engine = "xlsxwriter"
-    except Exception:
-        _excel_engine = None
-
-if _excel_engine:
-    _buf = BytesIO()
-    with pd.ExcelWriter(_buf, engine=_excel_engine) as writer:
-        vdf.to_excel(writer, index=False, sheet_name="Providers")
-    _buf.seek(0)
+if _xlsx_available:
     st.download_button(
         "Download filtered view (Excel)",
-        data=_buf.getvalue(),
+        data=_to_xlsx_bytes(vdf),
         file_name="providers.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 else:
-    st.caption("Excel export requires `openpyxl` or `xlsxwriter` in requirements.")
+    st.caption("ⓘ Excel export unavailable (install XlsxWriter to enable).")
 
-
-# =========================================================
-# Optional maintenance/debug panel
-# =========================================================
-if "show_debug" not in st.session_state:
-    st.session_state["show_debug"] = False
-
-enable_debug = str(_get_secret("READONLY_MAINTENANCE_ENABLE", "0")).strip() == "1"
-
-if enable_debug:
+# ---- Debug panel (optional) ----
+if enable_debug and st.session_state.get("show_debug"):
     st.divider()
-    btn_label = "Show debug" if not st.session_state["show_debug"] else "Hide debug"
-    if st.button(btn_label):
-        st.session_state["show_debug"] = not st.session_state["show_debug"]
-        st.rerun()
+    st.subheader("Status & Secrets (debug)")
+    st.json(engine_info)
 
-    if st.session_state["show_debug"]:
-        st.subheader("Status & Secrets (debug)")
+    with engine.begin() as conn:
+        vendors_cols = conn.execute(sql_text("PRAGMA table_info(vendors)")).fetchall()
+        idx_rows = conn.execute(sql_text("PRAGMA index_list(vendors)")).fetchall()
+        counts = {"vendors": conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0}
 
-        safe_info = dict(engine_info)
-        if isinstance(safe_info.get("sync_url"), str):
-            s = safe_info["sync_url"]
-            if len(s) > 20:
-                safe_info["sync_url"] = s[:10] + "…•••…" + s[-8:]
-        st.json(safe_info)
+    vendors_indexes = [
+        {"seq": r[0], "name": r[1], "unique": bool(r[2]), "origin": r[3], "partial": bool(r[4])} for r in idx_rows
+    ]
+    st.json(
+        {
+            "vendors_columns": [c[1] for c in vendors_cols],
+            "counts": counts,
+            "vendors_indexes": vendors_indexes,
+        }
+    )
 
-        try:
-            with engine.begin() as conn:
-                vendors_cols = conn.execute(sql_text("PRAGMA table_info(vendors)")).fetchall()
-                categories_cols = conn.execute(sql_text("PRAGMA table_info(categories)")).fetchall()
-                services_cols = conn.execute(sql_text("PRAGMA table_info(services)")).fetchall()
-                counts = {
-                    "vendors": conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0,
-                    "categories": conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar() or 0,
-                    "services": conn.execute(sql_text("SELECT COUNT(*) FROM services")).scalar() or 0,
-                }
-            st.subheader("DB Probe")
-            st.json(
-                {
-                    "vendors_columns": [c[1] for c in vendors_cols],
-                    "categories_columns": [c[1] for c in categories_cols],
-                    "services_columns": [c[1] for c in services_cols],
-                    "counts": counts,
-                }
-            )
-        except Exception as e:
-            st.warning(f"Debug probe failed: {e}")
+st.markdown("</div>", unsafe_allow_html=True)
