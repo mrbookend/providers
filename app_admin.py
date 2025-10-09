@@ -44,7 +44,7 @@ st.markdown(
 )
 
 # -----------------------------
-# Admin sign-in gate (single, sane source of truth)
+# Admin sign-in gate (single source of truth; 4-space indents only)
 # -----------------------------
 
 def _get_secret(name: str, default: str | None = None):
@@ -59,8 +59,6 @@ def _get_secret(name: str, default: str | None = None):
 DISABLE_LOGIN = _as_bool(_get_secret("DISABLE_ADMIN_PASSWORD", "0"))
 
 if DISABLE_LOGIN:
-        st.info("Admin login bypass is ACTIVE (DISABLE_ADMIN_PASSWORD).")
-    # Ensure at least one indented statement exists in this branch
     st.info("Admin login bypass is ACTIVE (DISABLE_ADMIN_PASSWORD).")
 else:
     ADMIN_PASSWORD = (_get_secret("ADMIN_PASSWORD", "") or "").strip()
@@ -75,7 +73,7 @@ else:
         st.subheader("Admin sign-in")
         pw = st.text_input("Password", type="password", key="admin_pw")
         if st.button("Sign in"):
-            # (Optional later: constant-time compare + hashed secret)
+            # (Optional: swap to constant-time compare & hashed secret later)
             if (pw or "").strip() == ADMIN_PASSWORD:
                 st.session_state["auth_ok"] = True
                 st.rerun()
