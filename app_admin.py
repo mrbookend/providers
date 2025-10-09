@@ -67,8 +67,9 @@ st.markdown(
 DISABLE_LOGIN = _as_bool(_get_secret("DISABLE_ADMIN_PASSWORD", "0"))
 
 if DISABLE_LOGIN:
-    st.info("Admin login bypass is ACTIVE (DISABLE_ADMIN_PASSWORD).")
+    pass  # no banner
 else:
+    ...
     ADMIN_PASSWORD = (_get_secret("ADMIN_PASSWORD", "") or "").strip()
     if not ADMIN_PASSWORD:
         st.error("ADMIN_PASSWORD is not set in Secrets. Add it in Settings → Secrets.")
