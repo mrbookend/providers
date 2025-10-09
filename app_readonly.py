@@ -1,356 +1,406 @@
-# app_readonly.py
-# -*- coding: utf-8 -*-
+# app_readonly.py — HCR Vendors (Read-Only) v3.6
+# - AgGrid: NO per-column filters; selected columns wrap + auto-expand rows
+# - Columns with wrap+autoHeight: category, service, business_name, contact_name, address, website, notes (+ Website URL)
+# - Replaces "View" title with a Help button that opens a wide modal page of instructions (from secrets)
+# - Quick filter under Help; CSV at bottom; Debug expander at very bottom
+# - Website column shows "Website" link only when URL is valid; adjacent "Website URL" shows full link
+# - Reads labels/widths/help from secrets
+
 from __future__ import annotations
 
 import os
-import io
-import re
-from typing import Dict, Tuple, List, Optional
+from urllib.parse import urlparse
+from typing import Dict, List
 
 import pandas as pd
 import streamlit as st
-from sqlalchemy import create_engine, text as sql_text
-from sqlalchemy.engine import Engine
+from sqlalchemy import create_engine
+from sqlalchemy.sql import text as sql_text
 
-# ---- register libsql dialect (must be AFTER "import streamlit as st") ----
+# ---- AgGrid (optional; app falls back if not installed) ----
 try:
-    import sqlalchemy_libsql  # noqa: F401  (ensures 'sqlite+libsql' dialect is registered)
+    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode, GridUpdateMode, ColumnsAutoSizeMode
+    _AGGRID_AVAILABLE = True
 except Exception:
-    pass
-# -------------------------------------------------------------------------
+    _AGGRID_AVAILABLE = False
 
 
-# =============================
-# Helpers
-# =============================
-def _as_bool(v: Optional[str], default: bool = False) -> bool:
-    if v is None:
-        return default
-    return str(v).strip().lower() in ("1", "true", "yes", "on")
-
-
-def _get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
-    """Prefer Streamlit secrets, fallback to environment variables."""
+# -----------------------------
+# Secrets / env helpers
+# -----------------------------
+def _read_secret(name: str, default=None):
     try:
         if name in st.secrets:
             return st.secrets[name]
     except Exception:
         pass
-    return os.getenv(name, default)
+    return os.environ.get(name, default)
+
+def _get_bool(val, default=False):
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.strip().lower() in ("1","true","yes","on")
+    return bool(default)
 
 
-def _format_phone(val: str | None) -> str:
-    s = re.sub(r"\D", "", str(val or ""))
-    if len(s) == 10:
-        return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
-    return (val or "").strip()
-
-
-def _to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """
-    Returns an .xlsx file (as bytes) using xlsxwriter if present, else openpyxl.
-    """
-    out = io.BytesIO()
-    engine = None
-    # prefer xlsxwriter if available
+# -----------------------------
+# Page config / layout
+# -----------------------------
+def _apply_layout():
+    st.set_page_config(
+        page_title=_read_secret("page_title", "HCR Vendors (Read-Only)"),
+        layout="wide",
+        initial_sidebar_state=_read_secret("sidebar_state", "expanded"),
+    )
+    maxw = _read_secret("page_max_width_px", 2300)
     try:
-        import xlsxwriter  # noqa: F401
-        engine = "xlsxwriter"
+        maxw = int(maxw)
     except Exception:
-        try:
-            import openpyxl  # noqa: F401
-            engine = "openpyxl"
-        except Exception:
-            # last resort: tell user in UI later
-            raise RuntimeError("Missing Excel writer. Please add 'xlsxwriter' or 'openpyxl' to requirements.txt.")
+        maxw = 2300
+    st.markdown(f"<style>.block-container {{ max-width: {maxw}px; }}</style>", unsafe_allow_html=True)
 
-    with pd.ExcelWriter(out, engine=engine) as writer:
-        df.to_excel(writer, index=False, sheet_name="providers")
-    out.seek(0)
-    return out.read()
+_apply_layout()
 
 
-# =============================
-# Page config & CSS
-# =============================
-PAGE_TITLE = _get_secret("page_title", "Providers — Read-only") or "Providers — Read-only"
-SIDEBAR_STATE = _get_secret("sidebar_state", "collapsed") or "collapsed"
-st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
+# -----------------------------
+# Config from secrets
+# -----------------------------
+LABEL_OVERRIDES: Dict[str, str] = _read_secret("READONLY_COLUMN_LABELS", {}) or {}
+COLUMN_WIDTHS: Dict[str, int]   = _read_secret("COLUMN_WIDTHS_PX_READONLY", {}) or {}
+STICKY_FIRST: bool              = _get_bool(_read_secret("READONLY_STICKY_FIRST_COL", False), False)
 
-LEFT_PAD_PX = int(_get_secret("page_left_padding_px", "20") or "20")
-MAX_WIDTH_PX = int(_get_secret("page_max_width_px", "2300") or "2300")
-
-st.markdown(
-    f"""
-    <style>
-      /* Main container padding and max width */
-      [data-testid="stAppViewContainer"] .main .block-container {{
-        padding-left: {LEFT_PAD_PX}px !important;
-        padding-right: 0 !important;
-        max-width: {MAX_WIDTH_PX}px !important;
-      }}
-      /* Keep data table full width; avoid shrinking due to the narrow search column */
-      div[data-testid="stDataFrame"] table {{ white-space: nowrap; }}
-    </style>
-    """,
-    unsafe_allow_html=True,
+HELP_TITLE: str = (
+    _read_secret("READONLY_HELP_TITLE")
+    or LABEL_OVERRIDES.get("readonly_help_title")
+    or "Providers Help / Tips"
+)
+HELP_MD: str = (
+    _read_secret("READONLY_HELP_MD")
+    or LABEL_OVERRIDES.get("readonly_help_md")
+    or ""
+)
+HELP_DEBUG: bool = _get_bool(
+    _read_secret("READONLY_HELP_DEBUG"),
+    _get_bool(LABEL_OVERRIDES.get("readonly_help_debug"), False),
 )
 
-# Cosmetic column labels/widths from secrets (optional)
-READONLY_COLUMN_LABELS = _get_secret("READONLY_COLUMN_LABELS")
-if not isinstance(READONLY_COLUMN_LABELS, dict):
-    READONLY_COLUMN_LABELS = None
-
-COLUMN_WIDTHS = _get_secret("COLUMN_WIDTHS_PX_READONLY")
-if not isinstance(COLUMN_WIDTHS, dict):
-    COLUMN_WIDTHS = {
-        "provider": 220,
-        "category": 160,
-        "service": 160,
-        "contact_name": 180,
-        "phone": 140,
-        "address": 260,
-        "website": 220,
-        "notes": 420,
-    }
-
-ENABLE_DEBUG = _as_bool(_get_secret("READONLY_MAINTENANCE_ENABLE", "0"), False)
+RAW_COLS = ["id","business_name","category","service","contact_name","phone","address","website","notes","keywords"]
 
 
-# =============================
-# Engine (sanitized + validated)
-# =============================
-def build_engine() -> Tuple[Engine, Dict]:
-    """
-    Prefer Turso/libsql embedded replica (read-only behavior here),
-    else fall back to local vendors.db if FORCE_LOCAL=1.
-    """
-    info: Dict = {}
-    url_raw = (_get_secret("TURSO_DATABASE_URL", "") or "").strip()
-    token = (_get_secret("TURSO_AUTH_TOKEN", "") or "").strip()
+# -----------------------------
+# Engine (Turso/libSQL with fallback)
+# -----------------------------
+def _engine():
+    url = _read_secret("TURSO_DATABASE_URL", "sqlite+libsql://vendors-prod-mrbookend.aws-us-west-2.turso.io?secure=true")
+    token = _read_secret("TURSO_AUTH_TOKEN", None)
+    if isinstance(url, str) and url.startswith("sqlite+libsql://"):
+        try:
+            eng = create_engine(url, connect_args={"auth_token": token} if token else {}, pool_pre_ping=True)
+            with eng.connect() as c:
+                c.execute(sql_text("SELECT 1"))
+            return eng
+        except Exception as e:
+            st.warning(f"Turso connection failed ({e}). Falling back to local SQLite vendors.db.")
+    local = "/mount/src/vendors-readonly-app/vendors.db"
+    if not os.path.exists(local):
+        local = "vendors.db"
+    return create_engine(f"sqlite:///{local}")
 
-    force_local = _as_bool(_get_secret("FORCE_LOCAL", "0"), False)
+eng = _engine()
 
-    if not url_raw or force_local:
-        eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
-        info.update(
-            {
-                "using_remote": False,
-                "strategy": "local_sqlite",
-                "sqlalchemy_url": "sqlite:///vendors.db",
-                "dialect": eng.dialect.name,
-                "driver": getattr(eng.dialect, "driver", ""),
-            }
+
+# -----------------------------
+# CSS (fallback table only)
+# -----------------------------
+def _apply_css(field_order: List[str]):
+    rules = []
+    for idx, col in enumerate(field_order, start=1):
+        px = COLUMN_WIDTHS.get(col)
+        if not px: continue
+        rules.append(
+            f"""
+            div[data-testid='stDataFrame'] table thead tr th:nth-child({idx}),
+            div[data-testid='stDataFrame'] table tbody tr td:nth-child({idx}) {{
+                min-width:{px}px !important; max-width:{px}px !important; width:{px}px !important;
+                white-space: normal !important; overflow-wrap:anywhere !important; word-break:break-word !important;
+            }}
+            """
         )
-        return eng, info
+    sticky = ""
+    if STICKY_FIRST and field_order:
+        sticky = """
+        div[data-testid='stDataFrame'] table thead tr th:nth-child(1),
+        div[data-testid='stDataFrame'] table tbody tr td:nth-child(1){
+            position:sticky;left:0;z-index:2;background:var(--background-color,white);box-shadow:1px 0 0 rgba(0,0,0,0.06);
+        }
+        div[data-testid='stDataFrame'] table thead tr th:nth-child(1){z-index:3;}
+        """
+    st.markdown(
+        f"""
+        <style>
+        div[data-testid='stDataFrame'] table {{ table-layout: fixed !important; }}
+        div[data-testid='stDataFrame'] table td, div[data-testid='stDataFrame'] table th {{
+            white-space: normal !important; overflow-wrap:anywhere !important; word-break:break-word !important;
+        }}
+        {''.join(rules)}
+        {sticky}
+        </style>
+        """, unsafe_allow_html=True
+    )
 
-    # Sanitize sync_url: must be libsql://host (no query params)
-    if url_raw.startswith("sqlite+libsql://"):
-        host = url_raw.split("://", 1)[1].split("?", 1)[0]
-        sync_url = f"libsql://{host}"
-    else:
-        sync_url = url_raw.split("?", 1)[0]
 
+# -----------------------------
+# URL helper
+# -----------------------------
+def _normalize_url(u: str) -> str:
+    s = (u or "").strip()
+    if not s: return ""
+    if not s.lower().startswith(("http://","https://")):
+        s = "http://" + s
     try:
-        eng = create_engine(
-            "sqlite+libsql:///vendors-embedded.db",
-            connect_args={
-                "auth_token": token,
-                "sync_url": sync_url,
-            },
-            pool_pre_ping=True,
-        )
-        # lightweight validation
-        with eng.connect() as c:
-            c.exec_driver_sql("select 1;")
+        p = urlparse(s)
+        if p.scheme not in ("http","https"): return ""
+        if not p.netloc or "." not in p.netloc: return ""
+        return s
+    except Exception:
+        return ""
 
-        info.update(
-            {
-                "using_remote": True,
-                "strategy": "embedded_replica",
-                "sqlalchemy_url": "sqlite+libsql:///vendors-embedded.db",
-                "dialect": eng.dialect.name,
-                "driver": getattr(eng.dialect, "driver", ""),
-                "sync_url": sync_url,
-            }
-        )
-        return eng, info
 
-    except Exception as e:
-        info["remote_error"] = f"{e}"
-        if force_local:
-            eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
-            info.update(
-                {
-                    "using_remote": False,
-                    "strategy": "local_sqlite",
-                    "sqlalchemy_url": "sqlite:///vendors.db",
-                    "dialect": eng.dialect.name,
-                    "driver": getattr(eng.dialect, "driver", ""),
-                }
+# -----------------------------
+# Help (modal) + Quick filter
+# -----------------------------
+# Wide modal with instructions (from secrets)
+try:
+    # Streamlit >= 1.31
+    @st.dialog(HELP_TITLE, width="large")
+    def _help_modal():
+        if HELP_MD.strip():
+            st.markdown(HELP_MD)
+            if HELP_DEBUG:
+                st.caption("Raw help (debug preview)")
+                st.code(HELP_MD, language=None)
+        else:
+            st.markdown(
+                """
+                ### Finding Providers
+                - Use the **Quick filter** below. Type words or parts of words (e.g., *plumber*, *roof*, ZIP).
+                - The filter matches across Provider, Category, Service, Address, Website, Notes, and Keywords.
+
+                ### Sorting & Reading
+                - Click a column header to sort.
+                - Long text (Address, Notes, Website URL) **wraps** and the row **expands** to fit.
+
+                ### Copying & Links
+                - Select text and press **Ctrl/Cmd+C**.
+                - Click **Website** to open in a new tab; the **Website URL** column shows the full link.
+
+                ### Column Sizes
+                - Columns start at fixed widths for readability; you can resize columns.
+
+                ### Contribute Updates
+                - Post recommended changes in the HCR Facebook group.
+                """
             )
-            return eng, info
+except Exception:
+    _help_modal = None  # Streamlit too old; we’ll fall back
 
-        # Read-only app: do not fall back silently unless FORCE_LOCAL=1
-        st.error("Remote database is unavailable and FORCE_LOCAL is not enabled.")
-        raise
+def _help_button_and_filter():
+    cols = st.columns([1, 3])
+    with cols[0]:
+        if st.button("Help / How to Use", type="primary"):
+            if _help_modal:
+                _help_modal()
+            else:
+                # Fallback: open an expander if dialogs are unavailable
+                with st.expander(HELP_TITLE, expanded=True):
+                    st.markdown(HELP_MD or "No help content configured.")
+    with cols[1]:
+        q = st.text_input("Quick filter (type words or parts of words):", "", placeholder="e.g., plumber roof 78240")
+    return q
+
+def _apply_quick_filter(df: pd.DataFrame, query: str) -> pd.DataFrame:
+    q = (query or "").strip().lower()
+    if not q:
+        return df
+    terms = [t for t in q.split() if t]
+    if not terms:
+        return df
+    cols = [c for c in df.columns if c.lower() in {
+        "business_name","provider","category","service","contact_name",
+        "phone","address","website","notes","keywords","website url"
+    }]
+    if not cols:
+        return df
+    blob = df[cols].fillna("").astype(str).agg(" ".join, axis=1).str.lower()
+    mask = pd.Series(True, index=df.index)
+    for t in terms:
+        mask &= blob.str.contains(t, na=False)
+    return df[mask]
 
 
-# =============================
-# Data loading (read-only, cached)
-#   NOTE: do NOT pass Engine into cache (it’s unhashable).
-#   This uses a no-arg loader that closes over the global `engine`.
-# =============================
-@st.cache_data(show_spinner=False, ttl=120)
-def load_df() -> pd.DataFrame:
-    # Read all vendors ordered by name (lowercased for stable order)
-    with engine.begin() as conn:
-        df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
-
-    # Ensure expected columns exist (for robustness)
-    for col in [
-        "category",
-        "service",
-        "business_name",
-        "contact_name",
-        "phone",
-        "address",
-        "website",
-        "notes",
-        "keywords",
-        "created_at",
-        "updated_at",
-        "updated_by",
-    ]:
+# -----------------------------
+# Data access
+# -----------------------------
+def _fetch_df() -> pd.DataFrame:
+    with eng.connect() as c:
+        df = pd.read_sql_query(sql_text("SELECT * FROM vendors"), c)
+    for col in RAW_COLS:
         if col not in df.columns:
             df[col] = ""
+    return df[RAW_COLS]
 
-    # Display-friendly phone
-    df["phone_fmt"] = df["phone"].apply(_format_phone)
-
-    # Prebuild a lowercase blob for fast, non-regex contains()
-    if "_blob" not in df.columns:
-        parts: List[pd.Series] = []
-        for c in ["business_name", "category", "service", "contact_name", "phone", "address", "website", "notes", "keywords"]:
-            if c in df.columns:
-                parts.append(df[c].astype(str))
-        df["_blob"] = pd.concat(parts, axis=1).agg(" ".join, axis=1).str.lower() if parts else ""
-
-    return df
+def _apply_labels(df: pd.DataFrame) -> pd.DataFrame:
+    if not LABEL_OVERRIDES:
+        return df
+    mapping = {k:v for k,v in LABEL_OVERRIDES.items() if k in df.columns and isinstance(v,str) and v}
+    return df.rename(columns=mapping)
 
 
-# =============================
-# UI
-# =============================
-engine, engine_info = build_engine()
-# NOTE: Read-only app — do NOT mutate schema or data. No ensure_schema() call.
+# -----------------------------
+# AgGrid renderer (no per-column filters; selected columns autoHeight)
+# -----------------------------
+def _aggrid_view(df_show: pd.DataFrame, website_label: str = "website"):
+    if df_show.empty:
+        st.info("No rows to display.")
+        return
 
-st.title(PAGE_TITLE)
-
-# Load once with caching (no engine param)
-df = load_df()
-
-# --- Top bar: 25% width search input, table remains full width ---
-left, right = st.columns([0.25, 0.75], vertical_alignment="bottom")
-
-with left:
-    q = st.text_input(
-        "Search",  # non-empty label avoids Streamlit warnings
-        placeholder="Search providers… (press Enter)",
-        label_visibility="collapsed",
-        key="q",
+    website_key = website_label if website_label in df_show.columns else next(
+        (c for c in df_show.columns if c.lower()=="website"), None
     )
 
-# No refresh button in read-only app; right column intentionally left blank
-with right:
-    st.write("")
+    _df = df_show.copy()
+    url_col = None
+    if website_key:
+        raw_guess = "website"
+        norm = _df[raw_guess].map(_normalize_url) if raw_guess in _df.columns else _df[website_key].map(_normalize_url)
+        url_col = f"{website_key} URL" if website_key.lower() != "website" else "Website URL"
+        widx = _df.columns.get_loc(website_key)
+        _df.insert(widx + 1, url_col, norm)
 
-# --- Fast local filtering using prebuilt _blob (no regex) ---
-qq = (st.session_state.get("q") or "").strip().lower()
-if qq:
-    filtered = df[df["_blob"].str.contains(qq, regex=False, na=False)]
-else:
-    filtered = df
+    gob = GridOptionsBuilder.from_dataframe(_df)
 
-# --- Columns to display (friendly phone) ---
-view_cols = [
-    "category",
-    "service",
-    "business_name",
-    "contact_name",
-    "phone_fmt",
-    "address",
-    "website",
-    "notes",
-    "keywords",
-]
-present = [c for c in view_cols if c in filtered.columns]
-vdf = filtered[present].rename(columns={"phone_fmt": "phone"})
-vdf = vdf.reset_index(drop=True)
-
-# Column labels (optional)
-if isinstance(READONLY_COLUMN_LABELS, dict):
-    vdf = vdf.rename(columns=READONLY_COLUMN_LABELS)
-
-# Render table (read-only)
-st.dataframe(
-    vdf,
-    use_container_width=True,
-    hide_index=True,
-)
-
-# --- Downloads ---
-csv_bytes = vdf.to_csv(index=False).encode("utf-8")
-st.download_button(
-    "Download filtered view (CSV)",
-    data=csv_bytes,
-    file_name="providers.csv",
-    mime="text/csv",
-)
-
-# Excel download (xlsx)
-try:
-    xlsx_bytes = _to_excel_bytes(vdf)
-    st.download_button(
-        "Download filtered view (Excel)",
-        data=xlsx_bytes,
-        file_name="providers.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    # Disable per-column filters; keep sort/resize
+    gob.configure_default_column(
+        resizable=True,
+        sortable=True,
+        filter=False,
+        wrapText=False,
+        autoHeight=False,
     )
-except RuntimeError as e:
-    # If missing writer engine, show a soft note
-    st.info(f"Excel export unavailable: {e}")
 
-# --- Optional debug panel ---
-if ENABLE_DEBUG:
-    st.divider()
-    btn_label = "Show debug" if not st.session_state.get("show_debug") else "Hide debug"
-    if st.button(btn_label):
-        st.session_state["show_debug"] = not st.session_state.get("show_debug", False)
-        st.rerun()
+    # Widths from secrets (map displayed -> raw if renamed)
+    display_to_raw = {disp: raw for raw, disp in LABEL_OVERRIDES.items() if isinstance(disp, str) and disp}
+    for col in _df.columns:
+        raw_key = display_to_raw.get(col, col)
+        px = COLUMN_WIDTHS.get(raw_key)
+        if px:
+            gob.configure_column(col, width=px)
 
-    if st.session_state.get("show_debug"):
-        st.subheader("Status & Secrets (debug)")
-        st.json(
-            {
-                "using_remote": engine_info.get("using_remote"),
-                "strategy": engine_info.get("strategy"),
-                "sqlalchemy_url": engine_info.get("sqlalchemy_url"),
-                "dialect": engine_info.get("dialect"),
-                "driver": engine_info.get("driver"),
-                "sync_url": engine_info.get("sync_url"),
-                "remote_error": engine_info.get("remote_error"),
-            }
+    # Columns that must wrap + auto expand
+    # (category, service, business_name, contact_name, address, website, notes) + dynamic Website URL column
+    must_wrap = {"category","service","business_name","contact_name","address","website","notes"}
+    # Include displayed names (after label mapping) and dynamic URL col
+    wrap_targets = set()
+    for col in list(_df.columns):
+        low = col.lower()
+        raw_guess = display_to_raw.get(col, col).lower()
+        if low in must_wrap or raw_guess in must_wrap:
+            wrap_targets.add(col)
+    if url_col:
+        wrap_targets.add(url_col)
+
+    for col in wrap_targets:
+        gob.configure_column(
+            col,
+            wrapText=True,
+            autoHeight=True,
+            cellStyle={"whiteSpace": "normal", "wordBreak": "break-word", "overflowWrap": "anywhere"},
         )
-        with engine.begin() as conn:
-            idx_rows = conn.execute(sql_text("PRAGMA index_list(vendors)")).fetchall()
-            vendors_indexes = [
-                {"seq": r[0], "name": r[1], "unique": bool(r[2]), "origin": r[3], "partial": bool(r[4])} for r in idx_rows
-            ]
-            counts = {
-                "vendors": conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0,
-                "categories": conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar() or 0,
-                "services": conn.execute(sql_text("SELECT COUNT(*) FROM services")).scalar() or 0,
-            }
-        st.subheader("DB Probe")
-        st.json({"counts": counts, "vendors_indexes": vendors_indexes})
+
+    # Clickable "Website" label only if URL is valid (url_col exists)
+    if website_key and url_col:
+        link_renderer = JsCode(f"""
+            function(params){{
+                const url = params.data && params.data["{url_col}"] ? params.data["{url_col}"] : "";
+                if (!url) return "";
+                return `<a href="${{url}}" target="_blank" rel="noopener noreferrer">Website</a>`;
+            }}
+        """)
+        gob.configure_column(website_key, cellRenderer=link_renderer)
+
+    grid_options = gob.build()
+    grid_options["floatingFilter"] = False
+    grid_options["suppressMenuHide"] = True
+
+    AgGrid(
+        _df,
+        gridOptions=grid_options,
+        update_mode=GridUpdateMode.NO_UPDATE,
+        fit_columns_on_grid_load=False,
+        allow_unsafe_jscode=True,
+        enable_enterprise_modules=False,
+        columns_auto_size_mode=ColumnsAutoSizeMode.FIT_CONTENTS,
+        height=620,  # scrollable grid; stable layout
+        theme="streamlit",
+    )
+
+
+# -----------------------------
+# View body (help button + quick filter; CSV at bottom)
+# -----------------------------
+def render_view():
+    # Help button (opens modal) and quick filter right under it
+    query = _help_button_and_filter()
+
+    df = _fetch_df()
+    df_show = _apply_labels(df)
+    df_show = _apply_quick_filter(df_show, query)
+
+    if _AGGRID_AVAILABLE:
+        _aggrid_view(df_show, website_label=LABEL_OVERRIDES.get("website", "website"))
+    else:
+        st.warning("`streamlit-aggrid` not installed — showing basic table.")
+        _apply_css(df.columns.tolist())
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+    # CSV download at the BOTTOM (just ahead of debug)
+    st.download_button(
+        label="Download Providers (CSV)",
+        data=df_show.to_csv(index=False).encode("utf-8"),
+        file_name="providers_readonly.csv",
+        mime="text/csv",
+    )
+
+
+# -----------------------------
+# Status & Secrets (debug) — END (BOTTOM)
+# -----------------------------
+def render_status_debug():
+    with st.expander("Status & Secrets (debug)", expanded=False):
+        backend = "libsql" if str(_read_secret("TURSO_DATABASE_URL","")).startswith("sqlite+libsql://") else "sqlite"
+        st.write("DB")
+        st.code({"backend": backend, "dsn": _read_secret("TURSO_DATABASE_URL",""),
+                 "auth": "token_set" if bool(_read_secret("TURSO_AUTH_TOKEN")) else "none"})
+        try:
+            keys = list(st.secrets.keys())
+        except Exception:
+            keys = []
+        st.write("Secrets keys (present)"); st.code(keys)
+        st.write("Help MD:", "present" if bool(HELP_MD) else "(missing or empty)")
+        st.write("Sticky first col enabled:", STICKY_FIRST)
+        st.write("Raw COLUMN_WIDTHS_PX_READONLY (type)", type(COLUMN_WIDTHS).__name__); st.code(COLUMN_WIDTHS)
+        st.write("Column label overrides (if any)"); st.code(LABEL_OVERRIDES)
+
+
+# -----------------------------
+# Main
+# -----------------------------
+def main():
+    # No title row; just render the table section
+    render_view()
+    # Ensure debug expander is at the very bottom of the page
+    render_status_debug()
+
+if __name__ == "__main__":
+    main()
