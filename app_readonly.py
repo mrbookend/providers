@@ -48,9 +48,12 @@ def _format_phone(val: str | None) -> str:
 
 
 def _to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Returns an .xlsx file (as bytes) using xlsxwriter if present, else openpyxl."""
+    """
+    Returns an .xlsx file (as bytes) using xlsxwriter if present, else openpyxl.
+    """
     out = io.BytesIO()
     engine = None
+    # prefer xlsxwriter if available
     try:
         import xlsxwriter  # noqa: F401
         engine = "xlsxwriter"
@@ -59,6 +62,7 @@ def _to_excel_bytes(df: pd.DataFrame) -> bytes:
             import openpyxl  # noqa: F401
             engine = "openpyxl"
         except Exception:
+            # last resort: tell user in UI later
             raise RuntimeError("Missing Excel writer. Please add 'xlsxwriter' or 'openpyxl' to requirements.txt.")
 
     with pd.ExcelWriter(out, engine=engine) as writer:
@@ -73,11 +77,12 @@ def _to_excel_bytes(df: pd.DataFrame) -> bytes:
 PAGE_TITLE = _get_secret("page_title", "HCR Providers (Read-Only)") or "HCR Providers (Read-Only)"
 SIDEBAR_STATE = _get_secret("sidebar_state", "collapsed") or "collapsed"
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
-st.caption(f"Streamlit {st.__version__}")  # temporary; remove later
+
+# Uncomment temporarily if you want to verify runtime version
+# st.caption(f"Streamlit {st.__version__}")  # temporary; remove later
 
 LEFT_PAD_PX = int(_get_secret("page_left_padding_px", "20") or "20")
 MAX_WIDTH_PX = int(_get_secret("page_max_width_px", "2300") or "2300")
-
 
 # Optional column labels (cosmetic). We’ll also force business_name -> providers below.
 READONLY_COLUMN_LABELS = _get_secret("READONLY_COLUMN_LABELS")
@@ -97,7 +102,7 @@ if not isinstance(COLUMN_WIDTHS, dict):
         "address": 260,
         "website": 220,
         "notes": 420,
-        "keywords": 120,
+        # "keywords": 120,    # intentionally hidden from display/downloads
     }
 
 ENABLE_DEBUG = _as_bool(_get_secret("READONLY_MAINTENANCE_ENABLE", "0"), False)
@@ -114,7 +119,7 @@ HELP_MD = _get_secret(
 """
 )
 
-# Global CSS: layout, modal width, and HTML-table wrapping rules
+# Global CSS: layout, dialog width, and HTML-table wrapping rules
 st.markdown(
     f"""
     <style>
@@ -125,8 +130,8 @@ st.markdown(
         max-width: {MAX_WIDTH_PX}px !important;
       }}
 
-      /* Make modal close to full width */
-      div[data-testid="stModal"] > div {{
+      /* Make dialog close to full width (Streamlit 1.38+ uses stDialog) */
+      div[data-testid="stDialog"] > div {{
         width: min(95vw, {MAX_WIDTH_PX}px) !important;
         max-width: none !important;
       }}
@@ -273,9 +278,7 @@ def load_df() -> pd.DataFrame:
 # =============================
 def _width_for(col: str) -> Optional[int]:
     """Look up a width for either the renamed or original column key."""
-    return COLUMN_WIDTHS.get(col) or COLUMN_WIDTHS.get({
-        "providers": "business_name"
-    }.get(col, ""))
+    return COLUMN_WIDTHS.get(col) or COLUMN_WIDTHS.get({"providers": "business_name"}.get(col, ""))
 
 def _as_link(url: str) -> str:
     u = (url or "").strip()
@@ -345,19 +348,26 @@ with right:
         key="q",
     )
 
-# Modal (near full width)
+# Show Help dialog (Streamlit 1.38+)
 if st.session_state.get("show_help"):
-    with st.modal("HCR Providers (Read-Only) — Help", key="help_modal"):
+    @st.dialog("HCR Providers (Read-Only) — Help")
+    def _dlg():
         st.markdown(HELP_MD)
         if st.button("Close"):
             st.session_state["show_help"] = False
-            st.rerun()
+            try:
+                st.rerun()
+            except Exception:
+                try:
+                    st.experimental_rerun()
+                except Exception:
+                    pass
+    _dlg()
 
 # --- Fast local filtering (case-insensitive, non-regex) ---
 qq = (st.session_state.get("q") or "").strip().lower()
 filtered = df[df["_blob"].str.contains(qq, regex=False, na=False)] if qq else df
 
-# --- Select & rename columns (business_name -> providers) ---
 # --- Select & rename columns (business_name -> providers) ---
 # NOTE: 'keywords' is intentionally excluded from display/downloads,
 # but it remains part of the search index via '_blob'.
@@ -367,7 +377,6 @@ view_cols = [
 ]
 present = [c for c in view_cols if c in filtered.columns]
 vdf = filtered[present].rename(columns={"phone_fmt": "phone"})
-
 
 # Force the business_name label to "providers" regardless of secrets
 label_map = {"business_name": "providers"}
@@ -380,7 +389,7 @@ wrap_cols = ["category", "service", "providers", "contact_name", "address", "web
 html_table = render_html_table(vdf, wrap_cols=wrap_cols)
 st.markdown(html_table, unsafe_allow_html=True)
 
-# --- Downloads (CSV / Excel) ---
+# --- Downloads (CSV / Excel) — keywords excluded by design ---
 csv_bytes = vdf.to_csv(index=False).encode("utf-8")
 st.download_button(
     "Download filtered view (CSV)",
