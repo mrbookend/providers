@@ -213,9 +213,6 @@ with top_l:
         label_visibility="collapsed",
         key="q",
     )
-with top_r:
-    if st.button("Refresh data"):
-        st.cache_data.clear()
 
 qq = (st.session_state.get("q") or "").strip().lower()
 if qq:
