@@ -15,6 +15,10 @@ try:
 except Exception:
     pass
 # ---- end dialect registration ----
+def _as_bool(v, default=False):
+    if v is None:
+        return default
+    return str(v).strip().lower() in ("1","true","yes","on")
 
 # -----------------------------
 # Page config & CSS (full width, no left margin; nowrap table)
@@ -40,37 +44,53 @@ st.markdown(
 )
 
 # -----------------------------
-# Admin sign-in gate (robust)
+# Admin sign-in gate (single, sane source of truth)
 # -----------------------------
-ADMIN_PASSWORD = (st.secrets.get("ADMIN_PASSWORD") or os.getenv("ADMIN_PASSWORD") or "").strip()
-# Dev bypass: set DISABLE_ADMIN_PASSWORD=1 in the environment to skip sign-in
-if os.getenv("DISABLE_ADMIN_PASSWORD") == "1":
-    st.session_state["auth_ok"] = True
-# right after the bypass block in app_admin.py
-if os.getenv("DISABLE_ADMIN_PASSWORD") == "1":
-    st.info("⚠️ Admin password is DISABLED for this session (DEV).")
+def _get_secret(name: str, default: str | None = None):
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return os.getenv(name, default)
 
-if os.getenv("DISABLE_ADMIN_PASSWORD") != "1" and (not isinstance(ADMIN_PASSWORD, str) or not ADMIN_PASSWORD):
-    st.error("ADMIN_PASSWORD is not set in Secrets. Add it in Settings → Secrets.")
-    st.stop()
+DISABLE_LOGIN = _as_bool(_get_secret("DISABLE_ADMIN_PASSWORD", "0"))
 
-if "auth_ok" not in st.session_state:
-    st.session_state["auth_ok"] = False
+if DISABLE_LOGIN:
+    st.info("Admin login bypass is ACTIVE (DISABLE_ADMIN_PASSWORD).")
+else:
+    ADMIN_PASSWORD = (_get_secret("ADMIN_PASSWORD", "") or "").strip()
+    if not ADMIN_PASSWORD:
+        st.error("ADMIN_PASSWORD is not set in Secrets. Add it in Settings → Secrets.")
+        st.stop()
 
-if not st.session_state["auth_ok"]:
-    st.subheader("Admin sign-in")
-    pw = st.text_input("Password", type="password", key="admin_pw")
-    if st.button("Sign in"):
-        if (pw or "").strip() == ADMIN_PASSWORD:
-            st.session_state["auth_ok"] = True
-            st.rerun()
-        else:
-            st.error("Incorrect password.")
-    st.stop()
+    if "auth_ok" not in st.session_state:
+        st.session_state["auth_ok"] = False
+
+    if not st.session_state["auth_ok"]:
+        st.subheader("Admin sign-in")
+        pw = st.text_input("Password", type="password", key="admin_pw")
+        if st.button("Sign in"):
+            # Optional: swap to a constant-time compare if you later use hashes
+            if (pw or "").strip() == ADMIN_PASSWORD:
+                st.session_state["auth_ok"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+        st.stop()
 
 # Small sanity check in Debug panel later:
 # st.write({"FORCE_LOCAL": os.getenv("FORCE_LOCAL")})
 
+DISABLE_LOGIN = _as_bool(st.secrets.get("DISABLE_ADMIN_PASSWORD", "0"))
+
+if not DISABLE_LOGIN:
+    # --- existing login UI & check ---
+    # pwd = st.text_input("Admin password", type="password")
+    # valid = constant_time_compare(pwd, st.secrets.get("ADMIN_PASSWORD", ""))
+    # if not valid: st.stop()
+else:
+    st.info("Admin login bypass is ACTIVE (DISABLE_ADMIN_PASSWORD).")
 
 # -----------------------------
 # DB helpers
