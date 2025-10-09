@@ -46,6 +46,7 @@ st.markdown(
 # -----------------------------
 # Admin sign-in gate (single, sane source of truth)
 # -----------------------------
+
 def _get_secret(name: str, default: str | None = None):
     try:
         if name in st.secrets:
@@ -54,6 +55,7 @@ def _get_secret(name: str, default: str | None = None):
         pass
     return os.getenv(name, default)
 
+# Uses your existing _as_bool helper defined earlier
 DISABLE_LOGIN = _as_bool(_get_secret("DISABLE_ADMIN_PASSWORD", "0"))
 
 if DISABLE_LOGIN:
@@ -71,7 +73,7 @@ else:
         st.subheader("Admin sign-in")
         pw = st.text_input("Password", type="password", key="admin_pw")
         if st.button("Sign in"):
-            # Optional: swap to a constant-time compare if you later use hashes
+            # (Optional later: replace with constant-time compare and hashed secret)
             if (pw or "").strip() == ADMIN_PASSWORD:
                 st.session_state["auth_ok"] = True
                 st.rerun()
