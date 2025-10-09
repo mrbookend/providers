@@ -121,11 +121,18 @@ st.markdown(
 # =============================
 # Column labels & widths (from secrets)
 # =============================
-READONLY_COLUMN_LABELS: Dict[str, str] = _get_secret("READONLY_COLUMN_LABELS", {}) or {}
-COLUMN_WIDTHS_PX_READONLY: Dict[str, int] = _get_secret("COLUMN_WIDTHS_PX_READONLY", {}) or {}
+# Raw (may be Streamlit's read-only AttrDict)
+_readonly_labels_raw = _get_secret("READONLY_COLUMN_LABELS", {}) or {}
+_col_widths_raw = _get_secret("COLUMN_WIDTHS_PX_READONLY", {}) or {}
+
+# Normalize to *plain dicts* so we can safely operate on them
+READONLY_COLUMN_LABELS: Dict[str, str] = dict(_readonly_labels_raw)
+# Coerce width values to int in case TOML strings were used
+COLUMN_WIDTHS_PX_READONLY: Dict[str, int] = {str(k): int(v) for k, v in dict(_col_widths_raw).items()}
+
 STICKY_FIRST_COL: bool = _as_bool(_get_secret("READONLY_STICKY_FIRST_COL", False), False)
 
-# Reasonable defaults if not provided
+# Reasonable defaults
 DEFAULT_WIDTHS = {
     "id": 40,
     "business_name": 180,
@@ -138,12 +145,10 @@ DEFAULT_WIDTHS = {
     "notes": 220,
     "keywords": 90,
 }
-if not COLUMN_WIDTHS_PX_READONLY:
-    COLUMN_WIDTHS_PX_READONLY = DEFAULT_WIDTHS.copy()
-else:
-    # Ensure any missing keys get a decent default
-    for k, v in DEFAULT_WIDTHS.items():
-        COLUMN_WIDTHS_PX_READONLY.setdefault(k, v)
+
+# Merge defaults (left) with user-specified (right); user values win
+COLUMN_WIDTHS_PX_READONLY = {**DEFAULT_WIDTHS, **COLUMN_WIDTHS_PX_READONLY}
+
 
 
 # =============================
