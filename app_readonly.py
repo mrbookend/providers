@@ -116,10 +116,14 @@ HELP_MD = _get_secret(
 - Click the CSV/Excel buttons to download exactly what you’re viewing.
 - Phone is formatted for readability; original data remains unchanged.
 - Data are read-only here; changes happen in the Admin app.
+
+**Tips**
+- Use short fragments for broader matches (e.g., `elec` to catch “electric”, “electrical”).
+- Websites open in a new tab.
 """
 )
 
-# Global CSS: layout, dialog width, and HTML-table wrapping rules
+# Global CSS: layout and HTML-table wrapping rules
 st.markdown(
     f"""
     <style>
@@ -128,12 +132,6 @@ st.markdown(
         padding-left: {LEFT_PAD_PX}px !important;
         padding-right: 0 !important;
         max-width: {MAX_WIDTH_PX}px !important;
-      }}
-
-      /* Make dialog close to full width (Streamlit 1.38+ uses stDialog) */
-      div[data-testid="stDialog"] > div {{
-        width: min(95vw, {MAX_WIDTH_PX}px) !important;
-        max-width: none !important;
       }}
 
       /* HTML table defaults: no wrap by default; we will enable on chosen cols */
@@ -169,6 +167,52 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# -------- Full-page Help router helpers (query-param based) --------
+def _open_help_page():
+    # Set ?help=1 then rerun
+    try:
+        st.query_params["help"] = "1"
+    except Exception:
+        # Fallback for older Streamlit
+        st.experimental_set_query_params(help="1")
+    try:
+        st.rerun()
+    except Exception:
+        st.experimental_rerun()
+
+def _close_help_page():
+    # Remove ?help and rerun
+    try:
+        qp = dict(st.query_params)
+        qp.pop("help", None)
+        st.query_params.clear()
+        if qp:
+            st.query_params.update(qp)
+    except Exception:
+        st.experimental_set_query_params()  # clear all
+    try:
+        st.rerun()
+    except Exception:
+        st.experimental_rerun()
+
+def _render_help_page():
+    # Full-width help page, driven by HELP_MD (secrets) or code default
+    st.markdown("## HCR Providers (Read-Only) — Help")
+    st.markdown(HELP_MD)
+    st.divider()
+    if st.button("⬅︎ Back to list", use_container_width=False):
+        _close_help_page()
+
+# --- Route: if ?help=1, render the help page and stop ---
+try:
+    show_help_page = st.query_params.get("help") == "1"
+except Exception:
+    show_help_page = False
+
+if show_help_page:
+    _render_help_page()
+    st.stop()
 
 
 # =============================
@@ -324,21 +368,18 @@ def render_html_table(df: pd.DataFrame, wrap_cols: List[str]) -> str:
 
 
 # =============================
-# UI
+# UI (List view)
 # =============================
 engine, engine_info = build_engine()
 
 # NOTE: per request, NO visible st.title here. (Tab title still set via set_page_config.)
 
-# Load once
-df = load_df()
-
-# --- Top controls row: Help button + Search input
+# Top controls row: Help button + Search input
 left, right = st.columns([0.14, 0.86], vertical_alignment="bottom")
 
 with left:
     if st.button("Help / Instructions", use_container_width=True, key="help_btn"):
-        st.session_state["show_help"] = True
+        _open_help_page()
 
 with right:
     q = st.text_input(
@@ -348,27 +389,14 @@ with right:
         key="q",
     )
 
-# Show Help dialog (Streamlit 1.38+)
-if st.session_state.get("show_help"):
-    @st.dialog("HCR Providers (Read-Only) — Help")
-    def _dlg():
-        st.markdown(HELP_MD)
-        if st.button("Close"):
-            st.session_state["show_help"] = False
-            try:
-                st.rerun()
-            except Exception:
-                try:
-                    st.experimental_rerun()
-                except Exception:
-                    pass
-    _dlg()
+# Load data once
+df = load_df()
 
-# --- Fast local filtering (case-insensitive, non-regex) ---
+# Fast local filtering (case-insensitive, non-regex)
 qq = (st.session_state.get("q") or "").strip().lower()
 filtered = df[df["_blob"].str.contains(qq, regex=False, na=False)] if qq else df
 
-# --- Select & rename columns (business_name -> providers) ---
+# Select & rename columns (business_name -> providers)
 # NOTE: 'keywords' is intentionally excluded from display/downloads,
 # but it remains part of the search index via '_blob'.
 view_cols = [
@@ -384,12 +412,12 @@ if isinstance(READONLY_COLUMN_LABELS, dict):
     label_map.update(READONLY_COLUMN_LABELS)  # allow additional labels via secrets (won’t override our forced one)
 vdf = vdf.rename(columns=label_map)
 
-# --- Render HTML table with wrapping on specified columns ---
+# Render HTML table with wrapping on specified columns
 wrap_cols = ["category", "service", "providers", "contact_name", "address", "website", "notes"]
 html_table = render_html_table(vdf, wrap_cols=wrap_cols)
 st.markdown(html_table, unsafe_allow_html=True)
 
-# --- Downloads (CSV / Excel) — keywords excluded by design ---
+# Downloads (CSV / Excel) — keywords excluded by design
 csv_bytes = vdf.to_csv(index=False).encode("utf-8")
 st.download_button(
     "Download filtered view (CSV)",
@@ -409,7 +437,7 @@ try:
 except RuntimeError as e:
     st.info(f"Excel export unavailable: {e}")
 
-# --- Optional debug panel ---
+# Optional debug panel
 if ENABLE_DEBUG:
     st.divider()
     btn_label = "Show debug" if not st.session_state.get("show_debug") else "Hide debug"
