@@ -144,6 +144,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+st.caption(f"HELP_MD present: {'HELP_MD' in getattr(st, 'secrets', {})}")
 
 # =============================
 # Column labels & widths (from secrets)
