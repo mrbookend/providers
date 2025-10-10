@@ -32,7 +32,7 @@ def _get_secret(name: str, default: Optional[str | int | dict | bool] = None):
     except Exception:
         pass
     if isinstance(default, (str, type(None))):
-        return os.getenv(name, default)  # env fallback
+        return os.getenv(name, default)  # env fallback for strings
     return default
 
 
@@ -63,6 +63,24 @@ def _to_int(v, default: int) -> int:
         return n if n > 0 else default
     except Exception:
         return default
+
+
+def _css_len_from_secret(v: str | int | None, fallback_px: int) -> str:
+    """
+    Accepts e.g. "0", "20", "18px", "1rem", "0.5em".
+    Returns a safe CSS length string; defaults to '{fallback_px}px' on bad input.
+    """
+    if v is None:
+        return f"{fallback_px}px"
+    s = str(v).strip()
+    if not s:
+        return f"{fallback_px}px"
+    # numeric with optional unit
+    if re.fullmatch(r"\d+(\.\d+)?(px|rem|em)?", s):
+        if s.endswith(("px", "rem", "em")):
+            return s
+        return f"{s}px"
+    return f"{fallback_px}px"
 
 
 def _get_help_md() -> str:
@@ -103,6 +121,23 @@ PAGE_MAX_WIDTH_PX = _to_int(_get_secret("page_max_width_px", 2300), 2300)
 SIDEBAR_STATE = _get_secret("sidebar_state", "collapsed")
 SHOW_DIAGS = _as_bool(_get_secret("READONLY_SHOW_DIAGS", False), False)
 
+# NEW: secrets-driven padding (matches admin app behavior)
+PAD_LEFT_CSS = _css_len_from_secret(_get_secret("page_left_padding_px", "12"), 12)
+
+# NEW: secrets-driven viewport rows (10–40 clamp)
+def _viewport_rows() -> int:
+    n = _to_int(_get_secret("READONLY_VIEWPORT_ROWS", 10), 10)
+    if n < 10:
+        return 10
+    if n > 40:
+        return 40
+    return n
+
+VIEWPORT_ROWS = _viewport_rows()
+ROW_PX = 32  # approximate row height
+HEADER_PX = 44
+SCROLL_MAX_HEIGHT = HEADER_PX + ROW_PX * VIEWPORT_ROWS  # pixels
+
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
 
 st.markdown(
@@ -110,7 +145,7 @@ st.markdown(
     <style>
       .block-container {{
         max-width: {PAGE_MAX_WIDTH_PX}px;
-        padding-left: 0.75rem;
+        padding-left: {PAD_LEFT_CSS};
       }}
       .prov-table td, .prov-table th {{
         white-space: normal;
@@ -127,9 +162,9 @@ st.markdown(
         border-bottom: 2px solid #ddd;
       }}
       .prov-wrap {{ overflow-x: auto; }}
-      /* NEW: vertical scroll viewport (like admin app) */
+      /* vertical scroll viewport (mouse-wheel scroll to end) */
       .prov-scroll {{
-        max-height: 520px;
+        max-height: {SCROLL_MAX_HEIGHT}px;
         overflow-y: auto;
       }}
       .help-row {{ display: flex; align-items: center; gap: 12px; }}
@@ -144,6 +179,7 @@ if SHOW_DIAGS:
         "Turso secrets — URL: %s | TOKEN: %s"
         % (bool(_get_secret("TURSO_DATABASE_URL", "")), bool(_get_secret("TURSO_AUTH_TOKEN", "")))
     )
+    st.caption(f"Viewport rows: {VIEWPORT_ROWS} (height ≈ {SCROLL_MAX_HEIGHT}px)")
 
 
 # =============================
@@ -182,7 +218,7 @@ for k, v in list(COLUMN_WIDTHS_PX_READONLY.items()):
     if not isinstance(v, int) or v <= 0:
         COLUMN_WIDTHS_PX_READONLY[k] = _DEFAULT_WIDTHS.get(k, 120)
 
-# Do NOT pin first column
+# Do NOT pin first column (per request)
 STICKY_FIRST_COL: bool = False
 
 # Hide these in display; still searchable
@@ -247,10 +283,9 @@ def fetch_vendors(engine: Engine) -> pd.DataFrame:
         u = v.strip()
         if not (u.startswith("http://") or u.startswith("https://")):
             u = "https://" + u
-        # compact label
-        label = "Launch website"
+        # compact label for display
         href = html.escape(u, quote=True)
-        return f'<a href="{href}" target="_blank" rel="noopener noreferrer">{label}</a>'
+        return f'<a href="{href}" target="_blank" rel="noopener noreferrer">Launch website</a>'
 
     if "website" in df.columns:
         df["website"] = df["website"].fillna("").astype(str).map(_mk_anchor)
@@ -306,10 +341,11 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
                 cell_html = val
             else:
                 cell_html = html.escape(str(val) if val is not None else "")
-            tds.append(f'<td style="min-width:{width}px;max-width:{width}px;">{cell_html}</td>')
+            sticky_cls = ""  # not used (unpinned)
+            tds.append(f'<td class="{sticky_cls}" style="min-width:{width}px;max-width:{width}px;">{cell_html}</td>')
         rows_html.append("<tr>" + "".join(tds) + "</tr>")
     tbody = "<tbody>" + "".join(rows_html) + "</tbody>"
-    # NOTE: prov-scroll enables the vertical scroll viewport
+    # prov-scroll enables the vertical scroll viewport sized by secrets
     return f'<div class="prov-wrap prov-scroll"><table class="prov-table">{thead}{tbody}</table></div>'
 
 
@@ -354,7 +390,6 @@ def main():
     df_disp_all = filtered_full[disp_cols]
 
     # ---------------- Top downloads (avoid scrolling) ----------------
-    # CSV export matches what you SEE (columns)
     csv_buf = io.StringIO()
     df_disp_all.to_csv(csv_buf, index=False)
     dcol1, dcol2, dcol3 = st.columns([2, 2, 6])
@@ -367,7 +402,6 @@ def main():
             type="secondary",
             use_container_width=True,
         )
-    # Excel export: requires XlsxWriter in requirements.txt
     excel_df = df_disp_all.copy()
     if "website" in excel_df.columns:
         # Convert anchor to plain URL for Excel
@@ -386,9 +420,10 @@ def main():
             use_container_width=True,
         )
     with dcol3:
-        st.caption(f"{len(df_disp_all)} matching provider(s). Scroll the table below to view all.")
+        st.caption(f"{len(df_disp_all)} matching provider(s). Scroll the table below to view all. "
+                   f"Viewport rows: {VIEWPORT_ROWS}")
 
-    # ---------------- Scrollable full table (like admin app) ----------------
+    # ---------------- Scrollable full table (admin-style viewport) ----------------
     st.markdown(_build_table_html(df_disp_all, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
 
     # Debug
@@ -398,10 +433,11 @@ def main():
             "DB (resolved)": info,
             "Secrets keys": sorted(list(getattr(st, "secrets", {}).keys())) if hasattr(st, "secrets") else [],
             "Widths (effective)": COLUMN_WIDTHS_PX_READONLY,
+            "Viewport rows": VIEWPORT_ROWS,
+            "Scroll height px": SCROLL_MAX_HEIGHT,
         }
         st.write(dbg)
         st.caption(f"HELP_MD present (top-level): {'HELP_MD' in getattr(st, 'secrets', {})}")
-        # Also show whether nested HELP_MD exists
         try:
             nested = st.secrets.get("COLUMN_WIDTHS_PX_READONLY", {})
             has_nested_help = isinstance(nested, dict) and bool((nested.get("HELP_MD", "") or "").strip())
