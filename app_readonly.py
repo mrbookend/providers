@@ -32,7 +32,7 @@ def _get_secret(name: str, default: Optional[str | int | dict | bool] = None):
     except Exception:
         pass
     if isinstance(default, (str, type(None))):
-        return os.getenv(name, default)
+        return os.getenv(name, default)  # env fallback
     return default
 
 
@@ -89,7 +89,7 @@ def _get_help_md() -> str:
         # How to use this list
         - Use the global search box below to match any word or partial word across all columns.
         - Click any column header to sort ascending/descending (client-side).
-        - Use **Download** at the bottom to export the current table to CSV or Excel.
+        - Use **Download** to export the current table to CSV or Excel.
         - Notes and Address wrap to show more text. Phone is normalized when available.
         """
     ).strip()
@@ -110,7 +110,6 @@ st.markdown(
     <style>
       .block-container {{
         max-width: {PAGE_MAX_WIDTH_PX}px;
-        /* tighten left margin ~50% */
         padding-left: 0.75rem;
       }}
       .prov-table td, .prov-table th {{
@@ -126,13 +125,6 @@ st.markdown(
         background: #fff;
         z-index: 2;
         border-bottom: 2px solid #ddd;
-      }}
-      .prov-table td.sticky, .prov-table th.sticky {{
-        position: sticky;
-        left: 0;
-        background: #fff;
-        z-index: 3;
-        box-shadow: 1px 0 0 #eee;
       }}
       .prov-wrap {{ overflow-x: auto; }}
       .help-row {{ display: flex; align-items: center; gap: 12px; }}
@@ -165,7 +157,7 @@ _DEFAULT_WIDTHS = {
     "contact_name": 110,
     "phone": 120,
     "address": 220,
-    "website": 200,
+    "website": 160,
     "notes": 220,
     "keywords": 90,
 }
@@ -185,7 +177,8 @@ for k, v in list(COLUMN_WIDTHS_PX_READONLY.items()):
     if not isinstance(v, int) or v <= 0:
         COLUMN_WIDTHS_PX_READONLY[k] = _DEFAULT_WIDTHS.get(k, 120)
 
-STICKY_FIRST_COL: bool = _as_bool(_get_secret("READONLY_STICKY_FIRST_COL", False), False)
+# Do NOT pin first column
+STICKY_FIRST_COL: bool = False
 
 # Hide these in display; still searchable
 HIDE_IN_DISPLAY = {"id", "keywords", "created_at", "updated_at", "updated_by"}
@@ -249,7 +242,8 @@ def fetch_vendors(engine: Engine) -> pd.DataFrame:
         u = v.strip()
         if not (u.startswith("http://") or u.startswith("https://")):
             u = "https://" + u
-        label = html.escape(v.strip())
+        # always show compact label
+        label = "Launch website"
         href = html.escape(u, quote=True)
         return f'<a href="{href}" target="_blank" rel="noopener noreferrer">{label}</a>'
 
@@ -291,26 +285,24 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
     for col in df_disp.columns:
         orig = rev[col]
         width = COLUMN_WIDTHS_PX_READONLY.get(orig, 140)
-        sticky_cls = "sticky" if sticky_first and (col == df_disp.columns[0]) else ""
+        # no sticky first col
         headers.append(
-            f'<th class="{sticky_cls}" style="min-width:{width}px;max-width:{width}px;">{html.escape(col)}</th>'
+            f'<th style="min-width:{width}px;max-width:{width}px;">{html.escape(col)}</th>'
         )
     thead = "<thead><tr>" + "".join(headers) + "</tr></thead>"
 
     rows_html: List[str] = []
-    first_col_name = df_disp.columns[0] if len(df_disp.columns) else None
     for _, row in df_disp.iterrows():
         tds: List[str] = []
         for col in df_disp.columns:
             orig = rev[col]
             val = row[col]
             width = COLUMN_WIDTHS_PX_READONLY.get(orig, 140)
-            sticky_cls = "sticky" if (sticky_first and col == first_col_name) else ""
             if orig == "website":
                 cell_html = val
             else:
                 cell_html = html.escape(str(val) if val is not None else "")
-            tds.append(f'<td class="{sticky_cls}" style="min-width:{width}px;max-width:{width}px;">{cell_html}</td>')
+            tds.append(f'<td style="min-width:{width}px;max-width:{width}px;">{cell_html}</td>')
         rows_html.append("<tr>" + "".join(tds) + "</tr>")
     tbody = "<tbody>" + "".join(rows_html) + "</tbody>"
     return f'<div class="prov-wrap"><table class="prov-table">{thead}{tbody}</table></div>'
@@ -354,38 +346,47 @@ def main():
     filtered_full = apply_global_search(df_full, q)
 
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
-    df_disp = filtered_full[disp_cols]
+    df_disp_all = filtered_full[disp_cols]
+    total = len(df_disp_all)
 
-    st.markdown(_build_table_html(df_disp, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
-
-    # Downloads (export what you SEE; switch to filtered_full if you want all columns)
+    # ---------------- Top downloads (avoid scrolling) ----------------
+    # CSV export matches what you SEE (columns)
     csv_buf = io.StringIO()
-    df_disp.to_csv(csv_buf, index=False)
-    st.download_button(
-        "Download providers.csv",
-        data=csv_buf.getvalue().encode("utf-8"),
-        file_name="providers.csv",
-        mime="text/csv",
-        type="secondary",
-        use_container_width=False,
-    )
-
-    excel_df = df_disp.copy()
+    df_disp_all.to_csv(csv_buf, index=False)
+    dcol1, dcol2, dcol3 = st.columns([2, 2, 6])
+    with dcol1:
+        st.download_button(
+            "Download providers.csv",
+            data=csv_buf.getvalue().encode("utf-8"),
+            file_name="providers.csv",
+            mime="text/csv",
+            type="secondary",
+            use_container_width=True,
+        )
+    # Excel export: requires XlsxWriter in requirements.txt
+    excel_df = df_disp_all.copy()
     if "website" in excel_df.columns:
+        # Convert anchor to plain URL for Excel
         excel_df["website"] = excel_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
-
     xlsx_buf = io.BytesIO()
     with pd.ExcelWriter(xlsx_buf, engine="xlsxwriter") as writer:
         excel_df.to_excel(writer, sheet_name="providers", index=False)
     xlsx_buf.seek(0)
-    st.download_button(
-        "Download providers.xlsx",
-        data=xlsx_buf.getvalue(),
-        file_name="providers.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="secondary",
-        use_container_width=False,
-    )
+    with dcol2:
+        st.download_button(
+            "Download providers.xlsx",
+            data=xlsx_buf.getvalue(),
+            file_name="providers.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="secondary",
+            use_container_width=True,
+        )
+    with dcol3:
+        st.caption(f"Showing a preview of 10 out of {total} matching providers below.")
+
+    # ---------------- Preview only first 10 rows ----------------
+    df_preview = df_disp_all.head(10)
+    st.markdown(_build_table_html(df_preview, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
 
     # Debug
     st.divider()
