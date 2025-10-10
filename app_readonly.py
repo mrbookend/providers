@@ -401,6 +401,13 @@ def main():
             "Widths (effective)": COLUMN_WIDTHS_PX_READONLY,
         }
         st.write(dbg)
+            # Secrets presence diagnostics (temporary)
+    st.caption(f"HELP_MD present: {'HELP_MD' in getattr(st, 'secrets', {})}")
+    st.caption("Turso secrets — URL: %s | TOKEN: %s" % (
+        bool(_get_secret("TURSO_DATABASE_URL","")),
+        bool(_get_secret("TURSO_AUTH_TOKEN","")),
+    ))
+
         # Also show a tiny probe of the DB
         try:
             with engine.begin() as conn:
