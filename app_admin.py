@@ -20,106 +20,11 @@ try:
 except Exception:
     pass
 # ---- end dialect registration ----
-# ============================================================
-# Additions: Security helpers (PBKDF2) and secrets accessor
-# ============================================================
-import hashlib
-
-def _as_bool(v, default: bool = False) -> bool:
-    if v is None:
-        return default
-    return str(v).strip().lower() in ("1", "true", "yes", "on")
-
-def _get_secret(name: str, default: str | None = None) -> str | None:
-    """Prefer Streamlit secrets, fallback to environment variables."""
-    try:
-        if name in st.secrets:
-            return st.secrets[name]
-    except Exception:
-        pass
-    return os.getenv(name, default)
-
-def _pbkdf2_sha256(password: str, salt: str, iterations: int = 120_000) -> str:
-    data = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), iterations)
-    return data.hex()
-
-def _check_password() -> bool:
-    """
-    Toggleable PBKDF2 gate with constant-time compare.
-    Controls (set in Streamlit secrets or env):
-      - ADMIN_PASSWORD_ENABLED: "true"/"false"
-      - ADMIN_PASSWORD_SALT: random string
-      - ADMIN_PASSWORD_HASH: hex PBKDF2(salt, password)
-    """
-    enabled = _as_bool(_get_secret("ADMIN_PASSWORD_ENABLED", "true"), True)
-    if not enabled:
-        return True  # Gate disabled
-
-    stored = _get_secret("ADMIN_PASSWORD_HASH", "")
-    salt   = _get_secret("ADMIN_PASSWORD_SALT", "")
-    if not stored or not salt:
-        st.error("Admin password enabled but not configured. Access denied.")
-        return False
-
-    # Session sticky
-    if st.session_state.get("admin_authed") is True:
-        return True
-
-    with st.container(border=True):
-        st.subheader("Admin Access Required")
-        pwd = st.text_input("Enter admin password", type="password")
-        if st.button("Unlock Admin"):
-            cand = _pbkdf2_sha256(pwd or "", salt)
-            if hmac.compare_digest(cand, stored):
-                st.session_state["admin_authed"] = True
-                st.success("Admin unlocked.")
-                return True
-            st.error("Incorrect password.")
-            st.session_state["admin_authed"] = False
-    return False
 
 
 # -----------------------------
 # Helpers
 # -----------------------------
-
-# ============================================================
-# Additions: Centralized engine factory (Turso + local fallback)
-# ============================================================
-def get_engine() -> tuple[Engine, dict]:
-    """
-    Primary: Turso (libSQL) via secrets;
-    Fallback: local SQLite vendors.db.
-    Non-disruptive: you can gradually adopt this where convenient.
-    """
-    status = {}
-    url = _get_secret("TURSO_DATABASE_URL")
-    token = _get_secret("TURSO_AUTH_TOKEN")
-
-    if url and token:
-        status["backend"] = "libsql"
-        status["dsn"] = "sqlite+libsql://<redacted-host>"
-        try:
-            eng = create_engine(url, connect_args={"auth_token": token})
-            with eng.connect() as conn:
-                conn.execute(sql_text("SELECT 1"))
-            status["connected"] = "true"
-            return eng, status
-        except Exception as e:
-            status["error"] = f"libsql connect failed: {type(e).__name__}"
-
-    # Local fallback
-    status.setdefault("backend", "sqlite")
-    status["dsn"] = "sqlite:///vendors.db"
-    eng = create_engine("sqlite:///vendors.db")
-    try:
-        with eng.connect() as conn:
-            conn.execute(sql_text("SELECT 1"))
-        status["connected"] = "true"
-    except Exception as e:
-        status["error"] = f"sqlite connect failed: {type(e).__name__}"
-    return eng, status
-
 def _as_bool(v, default: bool = False) -> bool:
     if v is None:
         return default
@@ -378,10 +283,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-# --- Admin gate: require password unless disabled ---
-if not _check_password():
-    st.stop()
-# --- end gate ---
 
 
 # -----------------------------
