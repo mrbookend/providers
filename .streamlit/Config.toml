@@ -8,3 +8,9 @@ showErrorDetails = true
 
 [browser]
 gatherUsageStats = false
+[server]
+headless = true
+enableCORS = false
+
+[ui]
+hideTopBar = false
