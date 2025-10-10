@@ -104,7 +104,7 @@ def _init_edit_form_defaults():
 def _apply_edit_reset_if_needed():
     """
     Apply queued reset BEFORE rendering edit widgets.
-    CHANGE: also clear the selection (edit_vendor_id) and the selectbox key so the UI returns to “— Select —”.
+    Also clear the selection (edit_vendor_id) and the selectbox key so the UI returns to “— Select —”.
     """
     if st.session_state.get("_pending_edit_reset"):
         # Clear all edit fields AND selection
@@ -149,6 +149,12 @@ def _nonce(name: str) -> str:
 
 def _nonce_rotate(name: str) -> None:
     st.session_state[f"{name}_nonce"] = uuid.uuid4().hex
+
+# Tiny general-purpose key clearer (used in Category/Service admins)
+def _clear_keys(*keys: str) -> None:
+    for k in keys:
+        if k in st.session_state:
+            del st.session_state[k]
 
 
 # -----------------------------
@@ -832,7 +838,7 @@ with _tabs[1]:
                         else:
                             st.session_state["edit_last_done"] = edit_nonce
                             st.success(f"Vendor updated: {bn}")
-                            _queue_edit_form_reset()   # <— now clears selection AND fields
+                            _queue_edit_form_reset()   # clears selection AND fields
                             _nonce_rotate("edit")
                             st.rerun()
                     except Exception as e:
@@ -895,8 +901,8 @@ with _tabs[2]:
     colA, colB = st.columns(2)
     with colA:
         st.subheader("Add Category")
-        new_cat = st.text_input("New category name")
-        if st.button("Add Category"):
+        new_cat = st.text_input("New category name", key="cat_add")
+        if st.button("Add Category", key="cat_add_btn"):
             if not (new_cat or "").strip():
                 st.error("Enter a name.")
             else:
@@ -904,15 +910,16 @@ with _tabs[2]:
                     with engine.begin() as conn:
                         conn.execute(sql_text("INSERT OR IGNORE INTO categories(name) VALUES(:n)"), {"n": new_cat.strip()})
                     st.success("Added (or already existed).")
+                    _clear_keys("cat_add")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Add category failed: {e}")
 
         st.subheader("Rename Category")
         if cats:
-            old = st.selectbox("Current", options=cats)
+            old = st.selectbox("Current", options=cats, key="cat_old")
             new = st.text_input("New name", key="cat_rename")
-            if st.button("Rename"):
+            if st.button("Rename", key="cat_rename_btn"):
                 if not (new or "").strip():
                     st.error("Enter a new name.")
                 else:
@@ -921,6 +928,7 @@ with _tabs[2]:
                             conn.execute(sql_text("UPDATE categories SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
                             conn.execute(sql_text("UPDATE vendors SET category=:new WHERE category=:old"), {"new": new.strip(), "old": old})
                         st.success("Renamed and reassigned.")
+                        _clear_keys("cat_old", "cat_rename")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Rename category failed: {e}")
@@ -932,23 +940,25 @@ with _tabs[2]:
             cnt = usage_count(engine, "category", tgt)
             st.write(f"In use by {cnt} vendor(s).")
             if cnt == 0:
-                if st.button("Delete category (no usage)"):
+                if st.button("Delete category (no usage)", key="cat_del_btn"):
                     try:
                         with engine.begin() as conn:
                             conn.execute(sql_text("DELETE FROM categories WHERE name=:n"), {"n": tgt})
                         st.success("Deleted.")
+                        _clear_keys("cat_del")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Delete category failed: {e}")
             else:
                 repl_options = [c for c in cats if c != tgt]
-                repl = st.selectbox("Reassign vendors to…", options=repl_options)
-                if st.button("Reassign vendors then delete"):
+                repl = st.selectbox("Reassign vendors to…", options=repl_options, key="cat_reassign_to")
+                if st.button("Reassign vendors then delete", key="cat_reassign_btn"):
                     try:
                         with engine.begin() as conn:
                             conn.execute(sql_text("UPDATE vendors SET category=:r WHERE category=:t"), {"r": repl, "t": tgt})
                             conn.execute(sql_text("DELETE FROM categories WHERE name=:t"), {"t": tgt})
                         st.success("Reassigned and deleted.")
+                        _clear_keys("cat_del", "cat_reassign_to")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Reassign+delete failed: {e}")
@@ -961,8 +971,8 @@ with _tabs[3]:
     colA, colB = st.columns(2)
     with colA:
         st.subheader("Add Service")
-        new_s = st.text_input("New service name")
-        if st.button("Add Service"):
+        new_s = st.text_input("New service name", key="svc_add")
+        if st.button("Add Service", key="svc_add_btn"):
             if not (new_s or "").strip():
                 st.error("Enter a name.")
             else:
@@ -970,15 +980,16 @@ with _tabs[3]:
                     with engine.begin() as conn:
                         conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new_s.strip()})
                     st.success("Added (or already existed).")
+                    _clear_keys("svc_add")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Add service failed: {e}")
 
         st.subheader("Rename Service")
         if servs:
-            old = st.selectbox("Current", options=servs)
+            old = st.selectbox("Current", options=servs, key="svc_old")
             new = st.text_input("New name", key="svc_rename")
-            if st.button("Rename Service"):
+            if st.button("Rename Service", key="svc_rename_btn"):
                 if not (new or "").strip():
                     st.error("Enter a new name.")
                 else:
@@ -987,6 +998,7 @@ with _tabs[3]:
                             conn.execute(sql_text("UPDATE services SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
                             conn.execute(sql_text("UPDATE vendors SET service=:new WHERE service=:old"), {"new": new.strip(), "old": old})
                         st.success("Renamed and reassigned.")
+                        _clear_keys("svc_old", "svc_rename")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Rename service failed: {e}")
@@ -998,23 +1010,25 @@ with _tabs[3]:
             cnt = usage_count(engine, "service", tgt)
             st.write(f"In use by {cnt} vendor(s).")
             if cnt == 0:
-                if st.button("Delete service (no usage)"):
+                if st.button("Delete service (no usage)", key="svc_del_btn"):
                     try:
                         with engine.begin() as conn:
                             conn.execute(sql_text("DELETE FROM services WHERE name=:n"), {"n": tgt})
                         st.success("Deleted.")
+                        _clear_keys("svc_del")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Delete service failed: {e}")
             else:
                 repl_options = [s for s in servs if s != tgt]
-                repl = st.selectbox("Reassign vendors to…", options=repl_options)
-                if st.button("Reassign vendors then delete service"):
+                repl = st.selectbox("Reassign vendors to…", options=repl_options, key="svc_reassign_to")
+                if st.button("Reassign vendors then delete service", key="svc_reassign_btn"):
                     try:
                         with engine.begin() as conn:
                             conn.execute(sql_text("UPDATE vendors SET service=:r WHERE service=:t"), {"r": repl, "t": tgt})
                             conn.execute(sql_text("DELETE FROM services WHERE name=:t"), {"t": tgt})
                         st.success("Reassigned and deleted.")
+                        _clear_keys("svc_del", "svc_reassign_to")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Reassign+delete service failed: {e}")
