@@ -731,7 +731,7 @@ with _tabs[1]:
             if i is None:
                 return "— Select —"
             r = id_to_row.get(int(i), None)
-            if not r:
+            if r is None:
                 return f"{i}"
             cat = (r.get("category") or "")
             svc = (r.get("service") or "")
