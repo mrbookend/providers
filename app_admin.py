@@ -56,8 +56,7 @@ def _init_add_form_defaults():
     for k in ADD_FORM_KEYS:
         if k not in st.session_state:
             st.session_state[k] = ""
-    if "add_form_version" not in st.session_state:
-        st.session_state["add_form_version"] = 0
+    st.session_state.setdefault("add_form_version", 0)
     st.session_state.setdefault("_pending_add_reset", False)
     st.session_state.setdefault("add_last_done", None)
     st.session_state.setdefault("add_nonce", uuid.uuid4().hex)
@@ -77,23 +76,37 @@ def _queue_add_form_reset():
 EDIT_FORM_KEYS = [
     "edit_vendor_id", "edit_business_name", "edit_category", "edit_service",
     "edit_contact_name", "edit_phone", "edit_address", "edit_website",
-    "edit_notes", "edit_keywords", "edit_row_updated_at",
+    "edit_notes", "edit_keywords", "edit_row_updated_at", "edit_last_loaded_id",
 ]
 
 def _init_edit_form_defaults():
-    for k in EDIT_FORM_KEYS:
-        if k not in st.session_state:
-            st.session_state[k] = "" if k not in ("edit_vendor_id", "edit_row_updated_at") else None
-    if "edit_form_version" not in st.session_state:
-        st.session_state["edit_form_version"] = 0
+    defaults = {
+        "edit_vendor_id": None,
+        "edit_business_name": "",
+        "edit_category": "",
+        "edit_service": "",
+        "edit_contact_name": "",
+        "edit_phone": "",
+        "edit_address": "",
+        "edit_website": "",
+        "edit_notes": "",
+        "edit_keywords": "",
+        "edit_row_updated_at": None,
+        "edit_last_loaded_id": None,
+    }
+    for k, v in defaults.items():
+        st.session_state.setdefault(k, v)
+    st.session_state.setdefault("edit_form_version", 0)
     st.session_state.setdefault("_pending_edit_reset", False)
     st.session_state.setdefault("edit_last_done", None)
     st.session_state.setdefault("edit_nonce", uuid.uuid4().hex)
 
 def _apply_edit_reset_if_needed():
     if st.session_state.get("_pending_edit_reset"):
+        keep = {"edit_vendor_id"}  # keep current selection; blank the fields
         for k in EDIT_FORM_KEYS:
-            st.session_state[k] = "" if k not in ("edit_vendor_id", "edit_row_updated_at") else None
+            if k not in keep:
+                st.session_state[k] = "" if k not in ("edit_vendor_id", "edit_row_updated_at", "edit_last_loaded_id") else (None if k != "edit_last_loaded_id" else None)
         st.session_state["_pending_edit_reset"] = False
         st.session_state["edit_form_version"] += 1
 
@@ -101,22 +114,18 @@ def _queue_edit_form_reset():
     st.session_state["_pending_edit_reset"] = True
 
 # Delete form keys
-DELETE_FORM_KEYS = ["delete_vendor_id", "delete_typed"]
+DELETE_FORM_KEYS = ["delete_vendor_id"]
 
 def _init_delete_form_defaults():
-    for k in DELETE_FORM_KEYS:
-        if k not in st.session_state:
-            st.session_state[k] = None if k == "delete_vendor_id" else ""
-    if "delete_form_version" not in st.session_state:
-        st.session_state["delete_form_version"] = 0
+    st.session_state.setdefault("delete_vendor_id", None)
+    st.session_state.setdefault("delete_form_version", 0)
     st.session_state.setdefault("_pending_delete_reset", False)
     st.session_state.setdefault("delete_last_done", None)
     st.session_state.setdefault("delete_nonce", uuid.uuid4().hex)
 
 def _apply_delete_reset_if_needed():
     if st.session_state.get("_pending_delete_reset"):
-        for k in DELETE_FORM_KEYS:
-            st.session_state[k] = None if k == "delete_vendor_id" else ""
+        st.session_state["delete_vendor_id"] = None
         st.session_state["_pending_delete_reset"] = False
         st.session_state["delete_form_version"] += 1
 
@@ -523,7 +532,7 @@ with _tabs[0]:
     left, right = st.columns([1, 3])  # 25% / 75% split for this row only
     with left:
         q = st.text_input(
-            "Search",
+            "Search",  # non-empty to avoid Streamlit warnings
             placeholder="Search providers… (press Enter)",
             label_visibility="collapsed",
             key="q",
@@ -553,7 +562,7 @@ with _tabs[0]:
 
     st.data_editor(
         vdf,
-        use_container_width=True,
+        use_container_width=True,   # table spans full main area
         hide_index=True,
         disabled=True,
         column_config={
@@ -573,7 +582,7 @@ with _tabs[0]:
 
 # ---------- Add/Edit/Delete Vendor
 with _tabs[1]:
-    # ===== Add Vendor (resettable + idempotent) =====
+    # ===== Add Vendor =====
     st.subheader("Add Vendor")
     _init_add_form_defaults()
     _apply_add_reset_if_needed()  # apply queued reset BEFORE creating widgets
@@ -587,22 +596,17 @@ with _tabs[1]:
         with col1:
             st.text_input("Provider *", key="add_business_name")
 
-            # Category: include "" placeholder to match default session state
+            # Category select—options include "" placeholder; we DON'T pass index when using session state
             _add_cat_options = [""] + (cats or [])
-            _add_cat_value = (st.session_state.get("add_category") or "")
-            if _add_cat_value not in _add_cat_options:
-                _add_cat_value = ""
-            _add_cat_index = _add_cat_options.index(_add_cat_value)
-            st.selectbox(
-                "Category *",
-                options=_add_cat_options,
-                index=_add_cat_index,
-                key="add_category",
-                placeholder="Select category",
-            )
+            if (st.session_state.get("add_category") or "") not in _add_cat_options:
+                st.session_state["add_category"] = ""
+            st.selectbox("Category *", options=_add_cat_options, key="add_category", placeholder="Select category")
 
-            # Service: keep "" first
-            st.selectbox("Service (optional)", options=[""] + (servs or []), index=0, key="add_service")
+            # Service select—same pattern
+            _add_svc_options = [""] + (servs or [])
+            if (st.session_state.get("add_service") or "") not in _add_svc_options:
+                st.session_state["add_service"] = ""
+            st.selectbox("Service (optional)", options=_add_svc_options, key="add_service")
 
             st.text_input("Contact Name", key="add_contact_name")
             st.text_input("Phone (10 digits or blank)", key="add_phone")
@@ -612,8 +616,7 @@ with _tabs[1]:
             st.text_area("Notes", height=100, key="add_notes")
             st.text_input("Keywords (comma separated)", key="add_keywords")
 
-        add_ready = bool((st.session_state["add_business_name"] or "").strip() and (st.session_state["add_category"] or "").strip())
-        submitted = st.form_submit_button("Add Vendor", disabled=not add_ready)
+        submitted = st.form_submit_button("Add Vendor")  # no disable gating
 
     if submitted:
         add_nonce = _nonce("add")
@@ -680,75 +683,79 @@ with _tabs[1]:
         _apply_edit_reset_if_needed()
         _apply_delete_reset_if_needed()
 
-        # Build selection options as IDs with a format_func for unique labels
-        def _row_label(row):
-            return f"[{row['id']}] {row['business_name']} — {(row['category'] or '')} / {(row['service'] or '')}"
+        # ----- Provider selection with typeahead (no IDs in UI) -----
+        # Build label -> id mapping (labels: "Business — Category / Service")
+        def _label_for(row):
+            cat = (row.get("category") or "")
+            svc = (row.get("service") or "")
+            tail = f"{cat} / {svc}".strip(" /")
+            return f"{row['business_name']} — {tail}" if tail else f"{row['business_name']}"
 
-        id_to_row = {int(r["id"]): r for _, r in df_all.iterrows()}
-        edit_options = [None] + list(id_to_row.keys())
+        labels = []
+        id_lookup: Dict[str, int] = {}
+        for _, r in df_all.iterrows():
+            label = _label_for(r)
+            # If duplicates, append a minimal disambiguator silently (suffix space-dot sequence) to keep UI clean
+            while label in id_lookup:
+                label = label + " "  # invisible-ish difference for duplicates
+            labels.append(label)
+            id_lookup[label] = int(r["id"])
 
-        selected_id = st.selectbox(
-            "Select provider",
-            options=edit_options,
-            format_func=lambda vid: "— Select —" if vid is None else _row_label(id_to_row.get(int(vid))),
-            key="edit_vendor_id",
+        # ---- Edit: selection + prefill ----
+        sel_label_edit = st.selectbox(
+            "Select provider to edit (type to search)",
+            options=["— Select —"] + labels,
+            index=0 if st.session_state.get("edit_vendor_id") is None else (["— Select —"] + labels).index(
+                next((k for k, v in id_lookup.items() if v == st.session_state["edit_vendor_id"]), "— Select —")
+            ),
+            key="edit_provider_label",
         )
 
-        # Prefill edit fields once when a selection is made
-        if selected_id is not None:
-            r = id_to_row[int(selected_id)]
-            for k, src in [
-                ("edit_business_name", "business_name"),
-                ("edit_category", "category"),
-                ("edit_service", "service"),
-                ("edit_contact_name", "contact_name"),
-                ("edit_phone", "phone"),
-                ("edit_address", "address"),
-                ("edit_website", "website"),
-                ("edit_notes", "notes"),
-                ("edit_keywords", "keywords"),
-            ]:
-                if not st.session_state.get(k):
-                    st.session_state[k] = (r.get(src) or "").strip()
-            if st.session_state.get("edit_row_updated_at") is None:
-                st.session_state["edit_row_updated_at"] = (r.get("updated_at") or "")
+        # translate label -> id
+        if sel_label_edit != "— Select —":
+            sel_id = id_lookup[sel_label_edit]
+            st.session_state["edit_vendor_id"] = sel_id
+        else:
+            st.session_state["edit_vendor_id"] = None
 
-        # -------- Edit form --------
+        # Prefill only when selection changes (avoid double-binding warnings)
+        if st.session_state["edit_vendor_id"] is not None:
+            if st.session_state["edit_last_loaded_id"] != st.session_state["edit_vendor_id"]:
+                row = df_all.loc[df_all["id"] == st.session_state["edit_vendor_id"]].iloc[0].to_dict()
+                st.session_state.update({
+                    "edit_business_name": row.get("business_name") or "",
+                    "edit_category": row.get("category") or "",
+                    "edit_service": row.get("service") or "",
+                    "edit_contact_name": row.get("contact_name") or "",
+                    "edit_phone": row.get("phone") or "",
+                    "edit_address": row.get("address") or "",
+                    "edit_website": row.get("website") or "",
+                    "edit_notes": row.get("notes") or "",
+                    "edit_keywords": row.get("keywords") or "",
+                    "edit_row_updated_at": row.get("updated_at") or "",
+                    "edit_last_loaded_id": st.session_state["edit_vendor_id"],
+                })
+
+        # -------- Edit form (no index/value params; rely on session_state) --------
         edit_form_key = f"edit_vendor_form_{st.session_state['edit_form_version']}"
         with st.form(edit_form_key, clear_on_submit=False):
             col1, col2 = st.columns(2)
             with col1:
                 st.text_input("Provider *", key="edit_business_name")
+
                 # refresh choices each render
                 cats = list_names(engine, "categories")
                 servs = list_names(engine, "services")
 
-                # CATEGORY: include "" so a blank/default doesn't crash
                 _edit_cat_options = [""] + (cats or [])
-                _edit_cat_value = (st.session_state.get("edit_category") or "")
-                if _edit_cat_value not in _edit_cat_options:
-                    _edit_cat_value = ""
-                _edit_cat_index = _edit_cat_options.index(_edit_cat_value)
-                st.selectbox(
-                    "Category *",
-                    options=_edit_cat_options,
-                    index=_edit_cat_index,
-                    key="edit_category",
-                    placeholder="Select category",
-                )
+                if (st.session_state.get("edit_category") or "") not in _edit_cat_options:
+                    st.session_state["edit_category"] = ""
+                st.selectbox("Category *", options=_edit_cat_options, key="edit_category", placeholder="Select category")
 
-                # SERVICE: keep "" first
-                svc_opts = [""] + (servs or [])
-                _edit_svc_value = (st.session_state.get("edit_service") or "")
-                if _edit_svc_value not in svc_opts:
-                    _edit_svc_value = ""
-                _edit_svc_index = svc_opts.index(_edit_svc_value)
-                st.selectbox(
-                    "Service (optional)",
-                    options=svc_opts,
-                    index=_edit_svc_index,
-                    key="edit_service",
-                )
+                _edit_svc_options = [""] + (servs or [])
+                if (st.session_state.get("edit_service") or "") not in _edit_svc_options:
+                    st.session_state["edit_service"] = ""
+                st.selectbox("Service (optional)", options=_edit_svc_options, key="edit_service")
 
                 st.text_input("Contact Name", key="edit_contact_name")
                 st.text_input("Phone (10 digits or blank)", key="edit_phone")
@@ -758,10 +765,7 @@ with _tabs[1]:
                 st.text_area("Notes", height=100, key="edit_notes")
                 st.text_input("Keywords (comma separated)", key="edit_keywords")
 
-            edit_ready = bool((st.session_state["edit_vendor_id"] is not None)
-                              and (st.session_state["edit_business_name"] or "").strip()
-                              and (st.session_state["edit_category"] or "").strip())
-            edited = st.form_submit_button("Save Changes", disabled=not edit_ready)
+            edited = st.form_submit_button("Save Changes")
 
         if edited:
             edit_nonce = _nonce("edit")
@@ -816,33 +820,29 @@ with _tabs[1]:
                             st.warning("No changes applied (stale selection or already updated). Refresh and try again.")
                         else:
                             st.session_state["edit_last_done"] = edit_nonce
-                            st.success(f"Vendor id {vid} updated.")
+                            st.success(f"Vendor updated: {bn}")
                             _queue_edit_form_reset()
                             _nonce_rotate("edit")
                             st.rerun()
                     except Exception as e:
                         st.error(f"Update failed: {e}")
 
-        # -------- Delete form --------
+        # ---- Delete: selection with typeahead; no typed confirmation ----
         st.markdown("---")
+        # Keep a separate delete selection so it doesn't fight with edit selection
+        sel_label_del = st.selectbox(
+            "Select provider to delete (type to search)",
+            options=["— Select —"] + labels,
+            key="delete_provider_label",
+        )
+        if sel_label_del != "— Select —":
+            st.session_state["delete_vendor_id"] = id_lookup[sel_label_del]
+        else:
+            st.session_state["delete_vendor_id"] = None
+
         del_form_key = f"delete_vendor_form_{st.session_state['delete_form_version']}"
         with st.form(del_form_key, clear_on_submit=False):
-            st.selectbox(
-                "Choose a vendor to delete",
-                options=[None] + list(id_to_row.keys()),
-                format_func=lambda v: "— Select —" if v is None else _row_label(id_to_row.get(int(v))),
-                key="delete_vendor_id",
-            )
-            st.text_input("Type the provider name EXACTLY to confirm", key="delete_typed")
-
-            # Only enable delete if selection + typed match
-            _del_vid = st.session_state.get("delete_vendor_id")
-            _del_ok = False
-            if _del_vid is not None:
-                _must = (id_to_row[int(_del_vid)].get("business_name") or "").strip()
-                _del_ok = ((st.session_state.get("delete_typed") or "").strip() == _must)
-
-            deleted = st.form_submit_button("Delete Vendor", disabled=not _del_ok)
+            deleted = st.form_submit_button("Delete Vendor")
 
         if deleted:
             del_nonce = _nonce("delete")
@@ -855,8 +855,9 @@ with _tabs[1]:
                 st.error("Select a vendor first.")
             else:
                 try:
-                    row = id_to_row[int(vid)]
-                    prev_updated = row.get("updated_at") or ""
+                    # get prev_updated from current df snapshot
+                    row = df_all.loc[df_all["id"] == int(vid)]
+                    prev_updated = (row.iloc[0]["updated_at"] if not row.empty else "") or ""
                     with engine.begin() as conn:
                         res = conn.execute(sql_text("""
                             DELETE FROM vendors
@@ -868,7 +869,7 @@ with _tabs[1]:
                         st.warning("No delete performed (stale selection). Refresh and try again.")
                     else:
                         st.session_state["delete_last_done"] = del_nonce
-                        st.success(f"Vendor id {vid} deleted.")
+                        st.success("Vendor deleted.")
                         _queue_delete_form_reset()
                         _nonce_rotate("delete")
                         st.rerun()
@@ -884,36 +885,34 @@ with _tabs[2]:
     with colA:
         st.subheader("Add Category")
         new_cat = st.text_input("New category name")
-        st.button(
-            "Add Category",
-            disabled=not (new_cat or "").strip(),
-            on_click=None,
-        )
-        if st.session_state.get("Add Category"):
-            pass  # Streamlit quirk placeholder (button already processed inline above)
-
-        if st.button("Add Category", key="cat_add_btn", disabled=not (new_cat or "").strip()):
-            try:
-                with engine.begin() as conn:
-                    conn.execute(sql_text("INSERT OR IGNORE INTO categories(name) VALUES(:n)"), {"n": new_cat.strip()})
-                st.success("Added (or already existed).")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Add category failed: {e}")
+        if st.button("Add Category"):
+            if not (new_cat or "").strip():
+                st.error("Enter a name.")
+            else:
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(sql_text("INSERT OR IGNORE INTO categories(name) VALUES(:n)"), {"n": new_cat.strip()})
+                    st.success("Added (or already existed).")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Add category failed: {e}")
 
         st.subheader("Rename Category")
         if cats:
             old = st.selectbox("Current", options=cats)
             new = st.text_input("New name", key="cat_rename")
-            if st.button("Rename", disabled=not (new or "").strip()):
-                try:
-                    with engine.begin() as conn:
-                        conn.execute(sql_text("UPDATE categories SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
-                        conn.execute(sql_text("UPDATE vendors SET category=:new WHERE category=:old"), {"new": new.strip(), "old": old})
-                    st.success("Renamed and reassigned.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Rename category failed: {e}")
+            if st.button("Rename"):
+                if not (new or "").strip():
+                    st.error("Enter a new name.")
+                else:
+                    try:
+                        with engine.begin() as conn:
+                            conn.execute(sql_text("UPDATE categories SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
+                            conn.execute(sql_text("UPDATE vendors SET category=:new WHERE category=:old"), {"new": new.strip(), "old": old})
+                        st.success("Renamed and reassigned.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Rename category failed: {e}")
 
     with colB:
         st.subheader("Delete / Reassign")
@@ -952,28 +951,34 @@ with _tabs[3]:
     with colA:
         st.subheader("Add Service")
         new_s = st.text_input("New service name")
-        if st.button("Add Service", disabled=not (new_s or "").strip()):
-            try:
-                with engine.begin() as conn:
-                    conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new_s.strip()})
-                st.success("Added (or already existed).")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Add service failed: {e}")
+        if st.button("Add Service"):
+            if not (new_s or "").strip():
+                st.error("Enter a name.")
+            else:
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new_s.strip()})
+                    st.success("Added (or already existed).")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Add service failed: {e}")
 
         st.subheader("Rename Service")
         if servs:
             old = st.selectbox("Current", options=servs)
             new = st.text_input("New name", key="svc_rename")
-            if st.button("Rename Service", disabled=not (new or "").strip()):
-                try:
-                    with engine.begin() as conn:
-                        conn.execute(sql_text("UPDATE services SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
-                        conn.execute(sql_text("UPDATE vendors SET service=:new WHERE service=:old"), {"new": new.strip(), "old": old})
-                    st.success("Renamed and reassigned.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Rename service failed: {e}")
+            if st.button("Rename Service"):
+                if not (new or "").strip():
+                    st.error("Enter a new name.")
+                else:
+                    try:
+                        with engine.begin() as conn:
+                            conn.execute(sql_text("UPDATE services SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
+                            conn.execute(sql_text("UPDATE vendors SET service=:new WHERE service=:old"), {"new": new.strip(), "old": old})
+                        st.success("Renamed and reassigned.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Rename service failed: {e}")
 
     with colB:
         st.subheader("Delete / Reassign")
