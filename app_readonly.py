@@ -286,7 +286,7 @@ def fetch_vendors(engine: Engine) -> pd.DataFrame:
             u = "https://" + u
         # compact label for display
         href = html.escape(u, quote=True)
-        return f'<a href="{href}" target="_blank" rel="noopener noreferrer">Launch website</a>'
+        return f'<a href="{href}" target="_blank" rel="noopener noreferrer">Website</a>'
 
     if "website" in df.columns:
         df["website"] = df["website"].fillna("").astype(str).map(_mk_anchor)
