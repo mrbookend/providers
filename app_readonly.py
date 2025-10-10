@@ -375,8 +375,9 @@ def main():
 
     # Global search (run against the FULL dataframe so 'keywords' works)
     st.text_input(
+        "Search",
         key="q",
-        placeholder="Search:  e.g., plumb, roofing, 'Inverness', phone digits, etc.",
+        placeholder="e.g., plumb, roofing, 'Inverness', phone digits, etc.",
         help="Case-insensitive, matches partial words across all columns.",
     )
     q = st.session_state.get("q", "")
