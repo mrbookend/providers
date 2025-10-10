@@ -1,7 +1,9 @@
 streamlit==1.38.0
-pandas>=2.0,<3.0
-SQLAlchemy>=2.0,<3.0
-sqlalchemy-libsql>=0.2,<0.3
-xlsxwriter>=3.2,<4.0
-openpyxl>=3.1,<4.0
+pandas==2.2.2
+SQLAlchemy==2.0.34
+sqlalchemy-libsql==0.2.5
+libsql-client==0.3.1
+openpyxl==3.1.5
+xlsxwriter==3.2.0
+
 
