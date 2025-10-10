@@ -49,3 +49,9 @@ Thumbs.db
 .ruff_cache/
 .coverage
 htmlcov/
+# Local databases & secrets (safety)
+vendors.db
+vendors-embedded.db
+*.db-shm
+*.db-wal
+.streamlit/secrets.toml
