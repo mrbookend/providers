@@ -305,9 +305,10 @@ def apply_global_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
         return df
     mask = pd.Series(False, index=df.index)
     for c in df.columns:
-        mask |= df[c].str.lower().str.contains(q, na=False)
+        # Coerce to string safely, lower, then literal substring search (no regex)
+        s = df[c].astype(str).str.lower()
+        mask |= s.str.contains(q, regex=False, na=False)
     return df[mask]
-
 
 # =============================
 # Rendering
