@@ -391,7 +391,7 @@ def main():
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
     df_disp_all = filtered_full[disp_cols]
 
-    # ----- Sort controls (choose column + order) -----
+    # ----- Sort controls + Download buttons on the SAME ROW (right side) -----
     def _label_for(col_key: str) -> str:
         return READONLY_COLUMN_LABELS.get(col_key, col_key.replace("_", " ").title())
 
@@ -403,11 +403,26 @@ def main():
     default_sort_col = "business_name" if "business_name" in sortable_cols else sortable_cols[0]
     default_label = _label_for(default_sort_col)
 
-    sc1, sc2 = st.columns([3, 2])
-    with sc1:
-        chosen_label = st.selectbox("Sort by", options=sort_labels, index=sort_labels.index(default_label))
-    with sc2:
-        order = st.radio("Order", ["Ascending", "Descending"], index=0, horizontal=True)
+    # Layout: big spacer on left → CSV → XLSX → Sort By (narrow) → Order (narrow)
+    c_spacer, c_csv, c_xlsx, c_sort, c_order = st.columns([6, 2, 2, 2, 2], vertical_alignment="center")
+
+    # Sort controls (compact)
+    with c_sort:
+        chosen_label = st.selectbox(
+            "Sort by",
+            options=sort_labels,
+            index=sort_labels.index(default_label),
+            key="sort_by_label",
+            help=None,
+        )
+    with c_order:
+        order = st.selectbox(
+            "Order",
+            options=["Ascending", "Descending"],
+            index=0,
+            key="sort_order",
+            help=None,
+        )
 
     sort_col = sortable_cols[sort_labels.index(chosen_label)]
     ascending = (order == "Ascending")
@@ -425,13 +440,12 @@ def main():
         key=keyfunc
     )
 
-    # ---------------- Top downloads (avoid scrolling) ----------------
+    # Downloads (use sorted view)
     csv_buf = io.StringIO()
     df_disp_sorted.to_csv(csv_buf, index=False)
-    dcol1, dcol2, dcol3 = st.columns([2, 2, 6])
-    with dcol1:
+    with c_csv:
         st.download_button(
-            "Download providers.csv",
+            "Download CSV",
             data=csv_buf.getvalue().encode("utf-8"),
             file_name="providers.csv",
             mime="text/csv",
@@ -448,18 +462,18 @@ def main():
     with pd.ExcelWriter(xlsx_buf, engine="xlsxwriter") as writer:
         excel_df.to_excel(writer, sheet_name="providers", index=False)
     xlsx_buf.seek(0)
-    with dcol2:
+    with c_xlsx:
         st.download_button(
-            "Download providers.xlsx",
+            "Download XLSX",
             data=xlsx_buf.getvalue(),
             file_name="providers.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="secondary",
             use_container_width=True,
         )
-    with dcol3:
-        st.caption(f"{len(df_disp_sorted)} matching provider(s). Scroll the table below to view all. "
-                   f"Viewport rows: {VIEWPORT_ROWS}")
+
+    # Tiny status text tucked under the row (not taking full width)
+    st.caption(f"{len(df_disp_sorted)} matching provider(s). Viewport rows: {VIEWPORT_ROWS}")
 
     # ---------------- Scrollable full table (admin-style viewport) ----------------
     st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
