@@ -166,6 +166,43 @@ def _set_empty(*keys: str) -> None:
 def _reset_select(key: str, sentinel: str = "— Select —") -> None:
     st.session_state[key] = sentinel
 
+# ---------- Category / Service queued reset helpers ----------
+def _init_cat_defaults():
+    st.session_state.setdefault("cat_form_version", 0)
+    st.session_state.setdefault("_pending_cat_reset", False)
+
+def _apply_cat_reset_if_needed():
+    if st.session_state.get("_pending_cat_reset"):
+        # Clear text inputs
+        st.session_state["cat_add"] = ""
+        st.session_state["cat_rename"] = ""
+        # Reset selects by dropping keys so they render at sentinel on next run
+        for k in ("cat_old", "cat_del", "cat_reassign_to"):
+            if k in st.session_state:
+                del st.session_state[k]
+        st.session_state["_pending_cat_reset"] = False
+        st.session_state["cat_form_version"] += 1
+
+def _queue_cat_reset():
+    st.session_state["_pending_cat_reset"] = True
+
+def _init_svc_defaults():
+    st.session_state.setdefault("svc_form_version", 0)
+    st.session_state.setdefault("_pending_svc_reset", False)
+
+def _apply_svc_reset_if_needed():
+    if st.session_state.get("_pending_svc_reset"):
+        st.session_state["svc_add"] = ""
+        st.session_state["svc_rename"] = ""
+        for k in ("svc_old", "svc_del", "svc_reassign_to"):
+            if k in st.session_state:
+                del st.session_state[k]
+        st.session_state["_pending_svc_reset"] = False
+        st.session_state["svc_form_version"] += 1
+
+def _queue_svc_reset():
+    st.session_state["_pending_svc_reset"] = True
+
 
 # -----------------------------
 # Page config & CSS
@@ -733,10 +770,12 @@ with _tabs[1]:
             r = id_to_row.get(int(i), None)
             if r is None:
                 return f"{i}"
+            # Build label without triggering pandas truthiness checks
             cat = (r.get("category") or "")
             svc = (r.get("service") or "")
-            tail = " / ".join([x for x in [cat, svc] if x]).strip(" /")
-            return f"{r['business_name']} — {tail}" if tail else f"{r['business_name']}"
+            tail = " / ".join([x for x in (cat, svc) if x]).strip(" /")
+            name = str(r.get("business_name") or "")
+            return f"{name} — {tail}" if tail else name
 
         st.selectbox(
             "Select provider to edit (type to search)",
@@ -856,29 +895,18 @@ with _tabs[1]:
                     except Exception as e:
                         st.error(f"Update failed: {e}")
 
-        # ---- Delete: selection with typeahead; no typed confirmation ----
         st.markdown("---")
-        # Keep a separate delete selection so it doesn't fight with edit selection
-        # (We keep labels logic from previous approach for delete; it's stable enough.)
-        labels = []
-        id_lookup: Dict[str, int] = {}
-        for _idx, r in df_all.iterrows():
-            cat = (r.get("category") or "")
-            svc = (r.get("service") or "")
-            tail = " / ".join([x for x in [cat, svc] if x]).strip(" /")
-            label = f"{r['business_name']} — {tail}" if tail else f"{r['business_name']}"
-            while label in id_lookup:
-                label = label + " "
-            labels.append(label)
-            id_lookup[label] = int(r["id"])
-
+        # Use separate delete selection (ID-backed similar approach could be added later)
         sel_label_del = st.selectbox(
             "Select provider to delete (type to search)",
-            options=["— Select —"] + labels,
+            options=["— Select —"] + [ _fmt_vendor(i) for i in ids ],
             key="delete_provider_label",
         )
         if sel_label_del != "— Select —":
-            st.session_state["delete_vendor_id"] = id_lookup[sel_label_del]
+            # map back to id cheaply
+            # Find matching id by label (rare operation; list is small)
+            rev = { _fmt_vendor(i): i for i in ids }
+            st.session_state["delete_vendor_id"] = int(rev.get(sel_label_del))
         else:
             st.session_state["delete_vendor_id"] = None
 
@@ -897,7 +925,6 @@ with _tabs[1]:
                 st.error("Select a vendor first.")
             else:
                 try:
-                    # get prev_updated from current df snapshot
                     row = df_all.loc[df_all["id"] == int(vid)]
                     prev_updated = (row.iloc[0]["updated_at"] if not row.empty else "") or ""
                     with engine.begin() as conn:
@@ -921,6 +948,9 @@ with _tabs[1]:
 # ---------- Category Admin
 with _tabs[2]:
     st.caption("Category is required. Manage the reference list and reassign vendors safely.")
+    _init_cat_defaults()
+    _apply_cat_reset_if_needed()
+
     cats = list_names(engine, "categories")
     cat_opts = ["— Select —"] + cats  # sentinel first
 
@@ -936,7 +966,7 @@ with _tabs[2]:
                     with engine.begin() as conn:
                         conn.execute(sql_text("INSERT OR IGNORE INTO categories(name) VALUES(:n)"), {"n": new_cat.strip()})
                     st.success("Added (or already existed).")
-                    _set_empty("cat_add")  # hard-reset text input
+                    _queue_cat_reset()
                     st.rerun()
                 except Exception as e:
                     st.error(f"Add category failed: {e}")
@@ -956,8 +986,7 @@ with _tabs[2]:
                             conn.execute(sql_text("UPDATE categories SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
                             conn.execute(sql_text("UPDATE vendors SET category=:new WHERE category=:old"), {"new": new.strip(), "old": old})
                         st.success("Renamed and reassigned.")
-                        _reset_select("cat_old")   # return to sentinel
-                        _set_empty("cat_rename")   # clear text field
+                        _queue_cat_reset()
                         st.rerun()
                     except Exception as e:
                         st.error(f"Rename category failed: {e}")
@@ -977,7 +1006,7 @@ with _tabs[2]:
                             with engine.begin() as conn:
                                 conn.execute(sql_text("DELETE FROM categories WHERE name=:n"), {"n": tgt})
                             st.success("Deleted.")
-                            _reset_select("cat_del")
+                            _queue_cat_reset()
                             st.rerun()
                         except Exception as e:
                             st.error(f"Delete category failed: {e}")
@@ -993,8 +1022,7 @@ with _tabs[2]:
                                     conn.execute(sql_text("UPDATE vendors SET category=:r WHERE category=:t"), {"r": repl, "t": tgt})
                                     conn.execute(sql_text("DELETE FROM categories WHERE name=:t"), {"t": tgt})
                                 st.success("Reassigned and deleted.")
-                                _reset_select("cat_del")
-                                _reset_select("cat_reassign_to")
+                                _queue_cat_reset()
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Reassign+delete failed: {e}")
@@ -1002,6 +1030,9 @@ with _tabs[2]:
 # ---------- Service Admin
 with _tabs[3]:
     st.caption("Service is optional on vendors. Manage the reference list here.")
+    _init_svc_defaults()
+    _apply_svc_reset_if_needed()
+
     servs = list_names(engine, "services")
     svc_opts = ["— Select —"] + servs  # sentinel first
 
@@ -1017,7 +1048,7 @@ with _tabs[3]:
                     with engine.begin() as conn:
                         conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new_s.strip()})
                     st.success("Added (or already existed).")
-                    _set_empty("svc_add")
+                    _queue_svc_reset()
                     st.rerun()
                 except Exception as e:
                     st.error(f"Add service failed: {e}")
@@ -1037,8 +1068,7 @@ with _tabs[3]:
                             conn.execute(sql_text("UPDATE services SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
                             conn.execute(sql_text("UPDATE vendors SET service=:new WHERE service=:old"), {"new": new.strip(), "old": old})
                         st.success("Renamed and reassigned.")
-                        _reset_select("svc_old")
-                        _set_empty("svc_rename")
+                        _queue_svc_reset()
                         st.rerun()
                     except Exception as e:
                         st.error(f"Rename service failed: {e}")
@@ -1058,7 +1088,7 @@ with _tabs[3]:
                             with engine.begin() as conn:
                                 conn.execute(sql_text("DELETE FROM services WHERE name=:n"), {"n": tgt})
                             st.success("Deleted.")
-                            _reset_select("svc_del")
+                            _queue_svc_reset()
                             st.rerun()
                         except Exception as e:
                             st.error(f"Delete service failed: {e}")
@@ -1074,8 +1104,7 @@ with _tabs[3]:
                                     conn.execute(sql_text("UPDATE vendors SET service=:r WHERE service=:t"), {"r": repl, "t": tgt})
                                     conn.execute(sql_text("DELETE FROM services WHERE name=:t"), {"t": tgt})
                                 st.success("Reassigned and deleted.")
-                                _reset_select("svc_del")
-                                _reset_select("svc_reassign_to")
+                                _queue_svc_reset()
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Reassign+delete service failed: {e}")
@@ -1101,20 +1130,19 @@ with _tabs[4]:
     if "phone" in full_formatted.columns:
         full_formatted["phone"] = full_formatted["phone"].apply(_format_phone_digits)
 
-    ts_all = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     colA, colB = st.columns([1, 1])
     with colA:
         st.download_button(
             "Export all vendors (formatted phones)",
             data=full_formatted.to_csv(index=False).encode("utf-8"),
-            file_name=f"providers_{ts_all}.csv",
+            file_name=f"providers_{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv",
             mime="text/csv",
         )
     with colB:
         st.download_button(
             "Export all vendors (digits-only phones)",
             data=full.to_csv(index=False).encode("utf-8"),
-            file_name=f"providers_raw_{ts_all}.csv",
+            file_name=f"providers_raw_{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv",
             mime="text/csv",
         )
 
