@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 import re
+import hmac
+import uuid
 from datetime import datetime
 from typing import List, Tuple, Dict
 
@@ -37,6 +39,12 @@ def _get_secret(name: str, default: str | None = None) -> str | None:
         pass
     return os.getenv(name, default)
 
+
+def _ct_equals(a: str, b: str) -> bool:
+    """Constant-time string compare for secrets."""
+    return hmac.compare_digest((a or ""), (b or ""))
+
+
 # ---------- Form state helpers (Add / Edit / Delete) ----------
 # Add form keys
 ADD_FORM_KEYS = [
@@ -50,52 +58,77 @@ def _init_add_form_defaults():
             st.session_state[k] = ""
     if "add_form_version" not in st.session_state:
         st.session_state["add_form_version"] = 0
+    st.session_state.setdefault("_pending_add_reset", False)
+    st.session_state.setdefault("add_last_done", None)
+    st.session_state.setdefault("add_nonce", uuid.uuid4().hex)
 
-def _clear_add_form(reset_keep=None):
-    keep = set(reset_keep or [])
-    for k in ADD_FORM_KEYS:
-        if k not in keep:
+def _apply_add_reset_if_needed():
+    """Apply queued reset BEFORE rendering widgets to avoid invalid-option errors."""
+    if st.session_state.get("_pending_add_reset"):
+        for k in ADD_FORM_KEYS:
             st.session_state[k] = ""
-    st.session_state["add_form_version"] += 1
+        st.session_state["_pending_add_reset"] = False
+        st.session_state["add_form_version"] += 1
+
+def _queue_add_form_reset():
+    st.session_state["_pending_add_reset"] = True
 
 # Edit form keys
 EDIT_FORM_KEYS = [
     "edit_vendor_id", "edit_business_name", "edit_category", "edit_service",
     "edit_contact_name", "edit_phone", "edit_address", "edit_website",
-    "edit_notes", "edit_keywords",
+    "edit_notes", "edit_keywords", "edit_row_updated_at",
 ]
 
 def _init_edit_form_defaults():
     for k in EDIT_FORM_KEYS:
         if k not in st.session_state:
-            st.session_state[k] = "" if k != "edit_vendor_id" else None
+            st.session_state[k] = "" if k not in ("edit_vendor_id", "edit_row_updated_at") else None
     if "edit_form_version" not in st.session_state:
         st.session_state["edit_form_version"] = 0
+    st.session_state.setdefault("_pending_edit_reset", False)
+    st.session_state.setdefault("edit_last_done", None)
+    st.session_state.setdefault("edit_nonce", uuid.uuid4().hex)
 
-def _clear_edit_form(reset_keep=None):
-    keep = set(reset_keep or [])
-    for k in EDIT_FORM_KEYS:
-        if k not in keep:
-            st.session_state[k] = "" if k != "edit_vendor_id" else None
-    st.session_state["edit_form_version"] += 1
+def _apply_edit_reset_if_needed():
+    if st.session_state.get("_pending_edit_reset"):
+        for k in EDIT_FORM_KEYS:
+            st.session_state[k] = "" if k not in ("edit_vendor_id", "edit_row_updated_at") else None
+        st.session_state["_pending_edit_reset"] = False
+        st.session_state["edit_form_version"] += 1
+
+def _queue_edit_form_reset():
+    st.session_state["_pending_edit_reset"] = True
 
 # Delete form keys
-DELETE_FORM_KEYS = ["delete_vendor_id", "delete_confirm"]
+DELETE_FORM_KEYS = ["delete_vendor_id", "delete_typed"]
 
 def _init_delete_form_defaults():
     for k in DELETE_FORM_KEYS:
         if k not in st.session_state:
-            st.session_state[k] = False if k == "delete_confirm" else None
+            st.session_state[k] = None if k == "delete_vendor_id" else ""
     if "delete_form_version" not in st.session_state:
         st.session_state["delete_form_version"] = 0
+    st.session_state.setdefault("_pending_delete_reset", False)
+    st.session_state.setdefault("delete_last_done", None)
+    st.session_state.setdefault("delete_nonce", uuid.uuid4().hex)
 
-def _clear_delete_form(reset_keep=None):
-    keep = set(reset_keep or [])
-    for k in DELETE_FORM_KEYS:
-        if k not in keep:
-            st.session_state[k] = False if k == "delete_confirm" else None
-    st.session_state["delete_form_version"] += 1
-# ---------------------------------------------------------------
+def _apply_delete_reset_if_needed():
+    if st.session_state.get("_pending_delete_reset"):
+        for k in DELETE_FORM_KEYS:
+            st.session_state[k] = None if k == "delete_vendor_id" else ""
+        st.session_state["_pending_delete_reset"] = False
+        st.session_state["delete_form_version"] += 1
+
+def _queue_delete_form_reset():
+    st.session_state["_pending_delete_reset"] = True
+
+# Nonce helpers
+def _nonce(name: str) -> str:
+    return st.session_state.get(f"{name}_nonce")
+
+def _nonce_rotate(name: str) -> None:
+    st.session_state[f"{name}_nonce"] = uuid.uuid4().hex
 
 
 # -----------------------------
@@ -141,8 +174,7 @@ else:
         st.subheader("Admin sign-in")
         pw = st.text_input("Password", type="password", key="admin_pw")
         if st.button("Sign in"):
-            # (Optional: replace with constant-time compare & hashed secret later)
-            if (pw or "").strip() == ADMIN_PASSWORD:
+            if _ct_equals((pw or "").strip(), ADMIN_PASSWORD):
                 st.session_state["auth_ok"] = True
                 st.rerun()
             else:
@@ -262,6 +294,11 @@ def ensure_schema(engine: Engine) -> None:
         "CREATE INDEX IF NOT EXISTS idx_vendors_cat ON vendors(category)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_bus ON vendors(business_name)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_kw  ON vendors(keywords)",
+        # helpful functional indexes for case-insensitive operations used by UI
+        "CREATE INDEX IF NOT EXISTS idx_vendors_bus_lower ON vendors(lower(business_name))",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_cat_lower ON vendors(lower(category))",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_svc_lower ON vendors(lower(service))",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_phone ON vendors(phone)",
     ]
     with engine.begin() as conn:
         for s in stmts:
@@ -447,7 +484,7 @@ def _execute_append_only(
             cols = list(without_id_df.columns)  # 'id' removed already
             placeholders = ", ".join(":" + c for c in cols)
             stmt = sql_text(f"INSERT INTO vendors ({', '.join(cols)}) VALUES ({placeholders})")
-            conn.execute(stmt, with_id_df.to_dict(orient="records"))
+            conn.execute(stmt, without_id_df.to_dict(orient="records"))
             inserted += len(without_id_df)
 
     return inserted
@@ -486,7 +523,7 @@ with _tabs[0]:
     left, right = st.columns([1, 3])  # 25% / 75% split for this row only
     with left:
         q = st.text_input(
-            "Search",  # non-empty to avoid Streamlit warnings
+            "Search",
             placeholder="Search providers… (press Enter)",
             label_visibility="collapsed",
             key="q",
@@ -516,7 +553,7 @@ with _tabs[0]:
 
     st.data_editor(
         vdf,
-        use_container_width=True,   # table spans full main area
+        use_container_width=True,
         hide_index=True,
         disabled=True,
         column_config={
@@ -536,14 +573,15 @@ with _tabs[0]:
 
 # ---------- Add/Edit/Delete Vendor
 with _tabs[1]:
-    # ===== Add Vendor (resettable) =====
+    # ===== Add Vendor (resettable + idempotent) =====
     st.subheader("Add Vendor")
+    _init_add_form_defaults()
+    _apply_add_reset_if_needed()  # apply queued reset BEFORE creating widgets
+
     cats = list_names(engine, "categories")
     servs = list_names(engine, "services")
 
-    _init_add_form_defaults()
     add_form_key = f"add_vendor_form_{st.session_state['add_form_version']}"
-
     with st.form(add_form_key, clear_on_submit=False):
         col1, col2 = st.columns(2)
         with col1:
@@ -573,9 +611,16 @@ with _tabs[1]:
             st.text_input("Website (https://…)", key="add_website")
             st.text_area("Notes", height=100, key="add_notes")
             st.text_input("Keywords (comma separated)", key="add_keywords")
-        submitted = st.form_submit_button("Add Vendor")
+
+        add_ready = bool((st.session_state["add_business_name"] or "").strip() and (st.session_state["add_category"] or "").strip())
+        submitted = st.form_submit_button("Add Vendor", disabled=not add_ready)
 
     if submitted:
+        add_nonce = _nonce("add")
+        if st.session_state.get("add_last_done") == add_nonce:
+            st.info("Add already processed.")
+            st.stop()
+
         business_name = (st.session_state["add_business_name"] or "").strip()
         category      = (st.session_state["add_category"] or "").strip()
         service       = (st.session_state["add_service"] or "").strip()
@@ -589,35 +634,37 @@ with _tabs[1]:
         if not business_name or not category:
             st.error("Business Name and Category are required.")
         else:
-            now = datetime.utcnow().isoformat(timespec="seconds")
-            with engine.begin() as conn:
-                conn.execute(
-                    sql_text(
-                        """
-                        INSERT INTO vendors(category, service, business_name, contact_name, phone, address,
-                                            website, notes, keywords, created_at, updated_at, updated_by)
-                        VALUES(:category, NULLIF(:service, ''), :business_name, :contact_name, :phone, :address,
-                               :website, :notes, :keywords, :now, :now, :user)
-                        """
-                    ),
-                    {
-                        "category": category,
-                        "service": service,
-                        "business_name": business_name,
-                        "contact_name": contact_name,
-                        "phone": phone_norm,
-                        "address": address,
-                        "website": website,
-                        "notes": notes,
-                        "keywords": keywords,
-                        "now": now,
-                        "user": os.getenv("USER", "admin"),
-                    },
-                )
-            st.success("Vendor added.")
-            # Tip: keep category/service during batch entry by passing reset_keep=["add_category","add_service"]
-            _clear_add_form(reset_keep=None)
-            st.rerun()
+            try:
+                now = datetime.utcnow().isoformat(timespec="seconds")
+                with engine.begin() as conn:
+                    conn.execute(
+                        sql_text("""
+                            INSERT INTO vendors(category, service, business_name, contact_name, phone, address,
+                                                website, notes, keywords, created_at, updated_at, updated_by)
+                            VALUES(:category, NULLIF(:service, ''), :business_name, :contact_name, :phone, :address,
+                                   :website, :notes, :keywords, :now, :now, :user)
+                        """),
+                        {
+                            "category": category,
+                            "service": service,
+                            "business_name": business_name,
+                            "contact_name": contact_name,
+                            "phone": phone_norm,
+                            "address": address,
+                            "website": website,
+                            "notes": notes,
+                            "keywords": keywords,
+                            "now": now,
+                            "user": os.getenv("USER", "admin"),
+                        },
+                    )
+                st.session_state["add_last_done"] = add_nonce  # mark processed
+                st.success(f"Vendor added: {business_name}")
+                _queue_add_form_reset()
+                _nonce_rotate("add")  # new token for next submission
+                st.rerun()
+            except Exception as e:
+                st.error(f"Add failed: {e}")
 
     st.divider()
     st.subheader("Edit / Delete Vendor")
@@ -627,11 +674,13 @@ with _tabs[1]:
     if df_all.empty:
         st.info("No vendors yet. Use 'Add Vendor' above to create your first record.")
     else:
-        # Build selection options as IDs with a format_func for unique labels
+        # Init + apply resets BEFORE rendering widgets
         _init_edit_form_defaults()
         _init_delete_form_defaults()
+        _apply_edit_reset_if_needed()
+        _apply_delete_reset_if_needed()
 
-        # Prepare lookup for formatting
+        # Build selection options as IDs with a format_func for unique labels
         def _row_label(row):
             return f"[{row['id']}] {row['business_name']} — {(row['category'] or '')} / {(row['service'] or '')}"
 
@@ -661,6 +710,8 @@ with _tabs[1]:
             ]:
                 if not st.session_state.get(k):
                     st.session_state[k] = (r.get(src) or "").strip()
+            if st.session_state.get("edit_row_updated_at") is None:
+                st.session_state["edit_row_updated_at"] = (r.get("updated_at") or "")
 
         # -------- Edit form --------
         edit_form_key = f"edit_vendor_form_{st.session_state['edit_form_version']}"
@@ -707,9 +758,17 @@ with _tabs[1]:
                 st.text_area("Notes", height=100, key="edit_notes")
                 st.text_input("Keywords (comma separated)", key="edit_keywords")
 
-            edited = st.form_submit_button("Save Changes")
+            edit_ready = bool((st.session_state["edit_vendor_id"] is not None)
+                              and (st.session_state["edit_business_name"] or "").strip()
+                              and (st.session_state["edit_category"] or "").strip())
+            edited = st.form_submit_button("Save Changes", disabled=not edit_ready)
 
         if edited:
+            edit_nonce = _nonce("edit")
+            if st.session_state.get("edit_last_done") == edit_nonce:
+                st.info("Edit already processed.")
+                st.stop()
+
             vid = st.session_state.get("edit_vendor_id")
             if vid is None:
                 st.error("Select a vendor first.")
@@ -719,11 +778,11 @@ with _tabs[1]:
                 if not bn or not cat:
                     st.error("Business Name and Category are required.")
                 else:
-                    now = datetime.utcnow().isoformat(timespec="seconds")
-                    with engine.begin() as conn:
-                        conn.execute(
-                            sql_text(
-                                """
+                    try:
+                        prev_updated = st.session_state.get("edit_row_updated_at") or ""
+                        now = datetime.utcnow().isoformat(timespec="seconds")
+                        with engine.begin() as conn:
+                            res = conn.execute(sql_text("""
                                 UPDATE vendors
                                    SET category=:category,
                                        service=NULLIF(:service, ''),
@@ -736,10 +795,8 @@ with _tabs[1]:
                                        keywords=:keywords,
                                        updated_at=:now,
                                        updated_by=:user
-                                 WHERE id=:id
-                                """
-                            ),
-                            {
+                                 WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
+                            """), {
                                 "category": cat,
                                 "service": (st.session_state["edit_service"] or "").strip(),
                                 "business_name": bn,
@@ -749,14 +806,22 @@ with _tabs[1]:
                                 "website": _sanitize_url(st.session_state["edit_website"]),
                                 "notes": (st.session_state["edit_notes"] or "").strip(),
                                 "keywords": (st.session_state["edit_keywords"] or "").strip(),
-                                "now": now,
-                                "user": os.getenv("USER", "admin"),
+                                "now": now, "user": os.getenv("USER", "admin"),
                                 "id": int(vid),
-                            },
-                        )
-                    st.success(f"Vendor id {vid} updated.")
-                    _clear_edit_form()  # or keep some fields with reset_keep=[...]
-                    st.rerun()
+                                "prev_updated": prev_updated,
+                            })
+                            rowcount = res.rowcount or 0
+
+                        if rowcount == 0:
+                            st.warning("No changes applied (stale selection or already updated). Refresh and try again.")
+                        else:
+                            st.session_state["edit_last_done"] = edit_nonce
+                            st.success(f"Vendor id {vid} updated.")
+                            _queue_edit_form_reset()
+                            _nonce_rotate("edit")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Update failed: {e}")
 
         # -------- Delete form --------
         st.markdown("---")
@@ -768,21 +833,47 @@ with _tabs[1]:
                 format_func=lambda v: "— Select —" if v is None else _row_label(id_to_row.get(int(v))),
                 key="delete_vendor_id",
             )
-            st.checkbox("Yes, I understand this cannot be undone.", key="delete_confirm")
-            deleted = st.form_submit_button("Delete Vendor")
+            st.text_input("Type the provider name EXACTLY to confirm", key="delete_typed")
+
+            # Only enable delete if selection + typed match
+            _del_vid = st.session_state.get("delete_vendor_id")
+            _del_ok = False
+            if _del_vid is not None:
+                _must = (id_to_row[int(_del_vid)].get("business_name") or "").strip()
+                _del_ok = ((st.session_state.get("delete_typed") or "").strip() == _must)
+
+            deleted = st.form_submit_button("Delete Vendor", disabled=not _del_ok)
 
         if deleted:
+            del_nonce = _nonce("delete")
+            if st.session_state.get("delete_last_done") == del_nonce:
+                st.info("Delete already processed.")
+                st.stop()
+
             vid = st.session_state.get("delete_vendor_id")
             if vid is None:
                 st.error("Select a vendor first.")
-            elif not st.session_state.get("delete_confirm"):
-                st.error("You must confirm deletion.")
             else:
-                with engine.begin() as conn:
-                    conn.execute(sql_text("DELETE FROM vendors WHERE id=:id"), {"id": int(vid)})
-                st.success(f"Vendor id {vid} deleted.")
-                _clear_delete_form()
-                st.rerun()
+                try:
+                    row = id_to_row[int(vid)]
+                    prev_updated = row.get("updated_at") or ""
+                    with engine.begin() as conn:
+                        res = conn.execute(sql_text("""
+                            DELETE FROM vendors
+                             WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
+                        """), {"id": int(vid), "prev_updated": prev_updated})
+                        rowcount = res.rowcount or 0
+
+                    if rowcount == 0:
+                        st.warning("No delete performed (stale selection). Refresh and try again.")
+                    else:
+                        st.session_state["delete_last_done"] = del_nonce
+                        st.success(f"Vendor id {vid} deleted.")
+                        _queue_delete_form_reset()
+                        _nonce_rotate("delete")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Delete failed: {e}")
 
 # ---------- Category Admin
 with _tabs[2]:
@@ -793,28 +884,36 @@ with _tabs[2]:
     with colA:
         st.subheader("Add Category")
         new_cat = st.text_input("New category name")
-        if st.button("Add Category"):
-            if not new_cat.strip():
-                st.error("Enter a name.")
-            else:
+        st.button(
+            "Add Category",
+            disabled=not (new_cat or "").strip(),
+            on_click=None,
+        )
+        if st.session_state.get("Add Category"):
+            pass  # Streamlit quirk placeholder (button already processed inline above)
+
+        if st.button("Add Category", key="cat_add_btn", disabled=not (new_cat or "").strip()):
+            try:
                 with engine.begin() as conn:
                     conn.execute(sql_text("INSERT OR IGNORE INTO categories(name) VALUES(:n)"), {"n": new_cat.strip()})
                 st.success("Added (or already existed).")
                 st.rerun()
+            except Exception as e:
+                st.error(f"Add category failed: {e}")
 
         st.subheader("Rename Category")
         if cats:
             old = st.selectbox("Current", options=cats)
             new = st.text_input("New name", key="cat_rename")
-            if st.button("Rename"):
-                if not new.strip():
-                    st.error("Enter a new name.")
-                else:
+            if st.button("Rename", disabled=not (new or "").strip()):
+                try:
                     with engine.begin() as conn:
                         conn.execute(sql_text("UPDATE categories SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
                         conn.execute(sql_text("UPDATE vendors SET category=:new WHERE category=:old"), {"new": new.strip(), "old": old})
                     st.success("Renamed and reassigned.")
                     st.rerun()
+                except Exception as e:
+                    st.error(f"Rename category failed: {e}")
 
     with colB:
         st.subheader("Delete / Reassign")
@@ -824,19 +923,25 @@ with _tabs[2]:
             st.write(f"In use by {cnt} vendor(s).")
             if cnt == 0:
                 if st.button("Delete category (no usage)"):
-                    with engine.begin() as conn:
-                        conn.execute(sql_text("DELETE FROM categories WHERE name=:n"), {"n": tgt})
-                    st.success("Deleted.")
-                    st.rerun()
+                    try:
+                        with engine.begin() as conn:
+                            conn.execute(sql_text("DELETE FROM categories WHERE name=:n"), {"n": tgt})
+                        st.success("Deleted.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Delete category failed: {e}")
             else:
                 repl_options = [c for c in cats if c != tgt]
                 repl = st.selectbox("Reassign vendors to…", options=repl_options)
                 if st.button("Reassign vendors then delete"):
-                    with engine.begin() as conn:
-                        conn.execute(sql_text("UPDATE vendors SET category=:r WHERE category=:t"), {"r": repl, "t": tgt})
-                        conn.execute(sql_text("DELETE FROM categories WHERE name=:t"), {"t": tgt})
-                    st.success("Reassigned and deleted.")
-                    st.rerun()
+                    try:
+                        with engine.begin() as conn:
+                            conn.execute(sql_text("UPDATE vendors SET category=:r WHERE category=:t"), {"r": repl, "t": tgt})
+                            conn.execute(sql_text("DELETE FROM categories WHERE name=:t"), {"t": tgt})
+                        st.success("Reassigned and deleted.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Reassign+delete failed: {e}")
 
 # ---------- Service Admin
 with _tabs[3]:
@@ -847,28 +952,28 @@ with _tabs[3]:
     with colA:
         st.subheader("Add Service")
         new_s = st.text_input("New service name")
-        if st.button("Add Service"):
-            if not new_s.strip():
-                st.error("Enter a name.")
-            else:
+        if st.button("Add Service", disabled=not (new_s or "").strip()):
+            try:
                 with engine.begin() as conn:
                     conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new_s.strip()})
                 st.success("Added (or already existed).")
                 st.rerun()
+            except Exception as e:
+                st.error(f"Add service failed: {e}")
 
         st.subheader("Rename Service")
         if servs:
             old = st.selectbox("Current", options=servs)
             new = st.text_input("New name", key="svc_rename")
-            if st.button("Rename Service"):
-                if not new.strip():
-                    st.error("Enter a new name.")
-                else:
+            if st.button("Rename Service", disabled=not (new or "").strip()):
+                try:
                     with engine.begin() as conn:
                         conn.execute(sql_text("UPDATE services SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
                         conn.execute(sql_text("UPDATE vendors SET service=:new WHERE service=:old"), {"new": new.strip(), "old": old})
                     st.success("Renamed and reassigned.")
                     st.rerun()
+                except Exception as e:
+                    st.error(f"Rename service failed: {e}")
 
     with colB:
         st.subheader("Delete / Reassign")
@@ -878,19 +983,25 @@ with _tabs[3]:
             st.write(f"In use by {cnt} vendor(s).")
             if cnt == 0:
                 if st.button("Delete service (no usage)"):
-                    with engine.begin() as conn:
-                        conn.execute(sql_text("DELETE FROM services WHERE name=:n"), {"n": tgt})
-                    st.success("Deleted.")
-                    st.rerun()
+                    try:
+                        with engine.begin() as conn:
+                            conn.execute(sql_text("DELETE FROM services WHERE name=:n"), {"n": tgt})
+                        st.success("Deleted.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Delete service failed: {e}")
             else:
                 repl_options = [s for s in servs if s != tgt]
                 repl = st.selectbox("Reassign vendors to…", options=repl_options)
                 if st.button("Reassign vendors then delete service"):
-                    with engine.begin() as conn:
-                        conn.execute(sql_text("UPDATE vendors SET service=:r WHERE service=:t"), {"r": repl, "t": tgt})
-                        conn.execute(sql_text("DELETE FROM services WHERE name=:t"), {"t": tgt})
-                    st.success("Reassigned and deleted.")
-                    st.rerun()
+                    try:
+                        with engine.begin() as conn:
+                            conn.execute(sql_text("UPDATE vendors SET service=:r WHERE service=:t"), {"r": repl, "t": tgt})
+                            conn.execute(sql_text("DELETE FROM services WHERE name=:t"), {"t": tgt})
+                        st.success("Reassigned and deleted.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Reassign+delete service failed: {e}")
 
 # ---------- Maintenance
 with _tabs[4]:
@@ -1001,129 +1112,137 @@ with _tabs[4]:
         ]
 
         changed_vendors = 0
-        with engine.begin() as conn:
-            # --- vendors table ---
-            rows = conn.execute(sql_text("SELECT * FROM vendors")).fetchall()
-            for r in rows:
-                row = dict(r._mapping) if hasattr(r, "_mapping") else dict(r)
-                pid = int(row["id"])
+        try:
+            with engine.begin() as conn:
+                # --- vendors table ---
+                rows = conn.execute(sql_text("SELECT * FROM vendors")).fetchall()
+                for r in rows:
+                    row = dict(r._mapping) if hasattr(r, "_mapping") else dict(r)
+                    pid = int(row["id"])
 
-                vals = {c: to_title(row.get(c)) for c in TEXT_COLS_TO_TITLE}
-                vals["website"] = _sanitize_url((row.get("website") or "").strip())
-                vals["phone"] = _normalize_phone(row.get("phone") or "")
-                vals["id"] = pid
+                    vals = {c: to_title(row.get(c)) for c in TEXT_COLS_TO_TITLE}
+                    vals["website"] = _sanitize_url((row.get("website") or "").strip())
+                    vals["phone"] = _normalize_phone(row.get("phone") or "")
+                    vals["id"] = pid
 
-                conn.execute(
-                    sql_text(
-                        """
-                        UPDATE vendors
-                           SET category=:category,
-                               service=NULLIF(:service,''),
-                               business_name=:business_name,
-                               contact_name=:contact_name,
-                               phone=:phone,
-                               address=:address,
-                               website=:website,
-                               notes=:notes,
-                               keywords=:keywords
-                         WHERE id=:id
-                        """
-                    ),
-                    vals,
-                )
-                changed_vendors += 1
-
-            # --- categories table: retitle + reconcile duplicates by case ---
-            cat_rows = conn.execute(sql_text("SELECT name FROM categories")).fetchall()
-            for (old_name,) in cat_rows:
-                new_name = to_title(old_name)
-                if new_name != old_name:
-                    conn.execute(sql_text("INSERT OR IGNORE INTO categories(name) VALUES(:n)"), {"n": new_name})
                     conn.execute(
-                        sql_text("UPDATE vendors SET category=:new WHERE category=:old"),
-                        {"new": new_name, "old": old_name},
+                        sql_text(
+                            """
+                            UPDATE vendors
+                               SET category=:category,
+                                   service=NULLIF(:service,''),
+                                   business_name=:business_name,
+                                   contact_name=:contact_name,
+                                   phone=:phone,
+                                   address=:address,
+                                   website=:website,
+                                   notes=:notes,
+                                   keywords=:keywords
+                             WHERE id=:id
+                            """
+                        ),
+                        vals,
                     )
-                    conn.execute(sql_text("DELETE FROM categories WHERE name=:old"), {"old": old_name})
+                    changed_vendors += 1
 
-            # --- services table: retitle + reconcile duplicates by case ---
-            svc_rows = conn.execute(sql_text("SELECT name FROM services")).fetchall()
-            for (old_name,) in svc_rows:
-                new_name = to_title(old_name)
-                if new_name != old_name:
-                    conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new_name})
-                    conn.execute(
-                        sql_text("UPDATE vendors SET service=:new WHERE service=:old"),
-                        {"new": new_name, "old": old_name},
-                    )
-                    conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"old": old_name})
+                # --- categories table: retitle + reconcile duplicates by case ---
+                cat_rows = conn.execute(sql_text("SELECT name FROM categories")).fetchall()
+                for (old_name,) in cat_rows:
+                    new_name = to_title(old_name)
+                    if new_name != old_name:
+                        conn.execute(sql_text("INSERT OR IGNORE INTO categories(name) VALUES(:n)"), {"n": new_name})
+                        conn.execute(
+                            sql_text("UPDATE vendors SET category=:new WHERE category=:old"),
+                            {"new": new_name, "old": old_name},
+                        )
+                        conn.execute(sql_text("DELETE FROM categories WHERE name=:old"), {"old": old_name})
 
-        st.success(f"Vendors normalized: {changed_vendors}. Categories/services retitled and reconciled.")
+                # --- services table: retitle + reconcile duplicates by case ---
+                svc_rows = conn.execute(sql_text("SELECT name FROM services")).fetchall()
+                for (old_name,) in svc_rows:
+                    new_name = to_title(old_name)
+                    if new_name != old_name:
+                        conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new_name})
+                        conn.execute(
+                            sql_text("UPDATE vendors SET service=:new WHERE service=:old"),
+                            {"new": new_name, "old": old_name},
+                        )
+                        conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"old": old_name})
+            st.success(f"Vendors normalized: {changed_vendors}. Categories/services retitled and reconciled.")
+        except Exception as e:
+            st.error(f"Normalization failed: {e}")
 
     # Backfill timestamps
     if st.button("Backfill created_at/updated_at when missing"):
-        now = datetime.utcnow().isoformat(timespec="seconds")
-        with engine.begin() as conn:
-            conn.execute(
-                sql_text(
-                    "UPDATE vendors SET created_at=COALESCE(created_at, :now), updated_at=COALESCE(updated_at, :now)"
-                ),
-                {"now": now},
-            )
-        st.success("Backfill complete.")
+        try:
+            now = datetime.utcnow().isoformat(timespec="seconds")
+            with engine.begin() as conn:
+                conn.execute(
+                    sql_text(
+                        "UPDATE vendors SET created_at=COALESCE(created_at, :now), updated_at=COALESCE(updated_at, :now)"
+                    ),
+                    {"now": now},
+                )
+            st.success("Backfill complete.")
+        except Exception as e:
+            st.error(f"Backfill failed: {e}")
 
     # Trim extra whitespace across common text fields (preserves newlines in notes)
     if st.button("Trim whitespace in text fields (safe)"):
-        changed = 0
-        with engine.begin() as conn:
-            rows = conn.execute(
-                sql_text(
-                    """
-                    SELECT id, category, service, business_name, contact_name, address, website, notes, keywords, phone
-                    FROM vendors
-                    """
-                )
-            ).fetchall()
-
-            def clean_soft(s: str | None) -> str:
-                s = (s or "").strip()
-                # collapse runs of spaces/tabs only; KEEP line breaks
-                s = re.sub(r"[ \t]+", " ", s)
-                return s
-
-            for r in rows:
-                pid = int(r[0])
-                vals = {
-                    "category": clean_soft(r[1]),
-                    "service": clean_soft(r[2]),
-                    "business_name": clean_soft(r[3]),
-                    "contact_name": clean_soft(r[4]),
-                    "address": clean_soft(r[5]),
-                    "website": _sanitize_url(clean_soft(r[6])),
-                    "notes": clean_soft(r[7]),  # preserves newlines
-                    "keywords": clean_soft(r[8]),
-                    "phone": r[9],  # leave phone unchanged here
-                    "id": pid,
-                }
-                conn.execute(
+        try:
+            changed = 0
+            with engine.begin() as conn:
+                rows = conn.execute(
                     sql_text(
                         """
-                        UPDATE vendors
-                           SET category=:category,
-                               service=NULLIF(:service,''),
-                               business_name=:business_name,
-                               contact_name=:contact_name,
-                               phone=:phone,
-                               address=:address,
-                               website=:website,
-                               notes=:notes,
-                               keywords=:keywords
-                         WHERE id=:id
+                        SELECT id, category, service, business_name, contact_name, address, website, notes, keywords, phone
+                        FROM vendors
                         """
-                    ),
-                    vals,
-                )
-                changed += 1
-        st.success(f"Whitespace trimmed on {changed} row(s).")
+                    )
+                ).fetchall()
+
+                def clean_soft(s: str | None) -> str:
+                    s = (s or "").strip()
+                    # collapse runs of spaces/tabs only; KEEP line breaks
+                    s = re.sub(r"[ \t]+", " ", s)
+                    return s
+
+                for r in rows:
+                    pid = int(r[0])
+                    vals = {
+                        "category": clean_soft(r[1]),
+                        "service": clean_soft(r[2]),
+                        "business_name": clean_soft(r[3]),
+                        "contact_name": clean_soft(r[4]),
+                        "address": clean_soft(r[5]),
+                        "website": _sanitize_url(clean_soft(r[6])),
+                        "notes": clean_soft(r[7]),  # preserves newlines
+                        "keywords": clean_soft(r[8]),
+                        "phone": r[9],  # leave phone unchanged here
+                        "id": pid,
+                    }
+                    conn.execute(
+                        sql_text(
+                            """
+                            UPDATE vendors
+                               SET category=:category,
+                                   service=NULLIF(:service,''),
+                                   business_name=:business_name,
+                                   contact_name=:contact_name,
+                                   phone=:phone,
+                                   address=:address,
+                                   website=:website,
+                                   notes=:notes,
+                                   keywords=:keywords
+                             WHERE id=:id
+                            """
+                        ),
+                        vals,
+                    )
+                    changed += 1
+            st.success(f"Whitespace trimmed on {changed} row(s).")
+        except Exception as e:
+            st.error(f"Trim failed: {e}")
 
 # ---------- Debug
 with _tabs[5]:
