@@ -1,16 +1,51 @@
-# Bytecode & caches
+# =========================
+# Python bytecode & caches
+# =========================
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 
-# Virtual envs / local env files
+# =========================
+# Virtual environments & local env files
+# =========================
 .venv/
+venv/
+env/
 .env
+.python-version
 
-# Streamlit local secrets (Cloud uses UI secrets instead)
+# =========================
+# Streamlit
+# =========================
+# Keep config.toml tracked, ignore local secrets only
 .streamlit/secrets.toml
 
-# Turso embedded replica files (ignore all local copies)
+# =========================
+# Local SQLite databases
+# =========================
+# Embedded replica (libsql) — local files
 vendors-embedded.db
 vendors-embedded.db-wal
 vendors-embedded.db-shm
 
+# Plain local sqlite (fallback mode)
+vendors.db
+vendors.db-wal
+vendors.db-shm
+
+# =========================
+# Editor/IDE & OS cruft
+# =========================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# =========================
+# Test/tool caches & coverage
+# =========================
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
