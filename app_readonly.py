@@ -121,10 +121,10 @@ PAGE_MAX_WIDTH_PX = _to_int(_get_secret("page_max_width_px", 2300), 2300)
 SIDEBAR_STATE = _get_secret("sidebar_state", "collapsed")
 SHOW_DIAGS = _as_bool(_get_secret("READONLY_SHOW_DIAGS", False), False)
 
-# NEW: secrets-driven padding (matches admin app behavior)
+# secrets-driven padding (matches admin app behavior)
 PAD_LEFT_CSS = _css_len_from_secret(_get_secret("page_left_padding_px", "12"), 12)
 
-# NEW: secrets-driven viewport rows (10–40 clamp)
+# secrets-driven viewport rows (10–40 clamp)
 def _viewport_rows() -> int:
     n = _to_int(_get_secret("READONLY_VIEWPORT_ROWS", 10), 10)
     if n < 10:
@@ -310,6 +310,7 @@ def apply_global_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
         mask |= s.str.contains(q, regex=False, na=False)
     return df[mask]
 
+
 # =============================
 # Rendering
 # =============================
@@ -342,8 +343,7 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
                 cell_html = val
             else:
                 cell_html = html.escape(str(val) if val is not None else "")
-            sticky_cls = ""  # not used (unpinned)
-            tds.append(f'<td class="{sticky_cls}" style="min-width:{width}px;max-width:{width}px;">{cell_html}</td>')
+            tds.append(f'<td style="min-width:{width}px;max-width:{width}px;">{cell_html}</td>')
         rows_html.append("<tr>" + "".join(tds) + "</tr>")
     tbody = "<tbody>" + "".join(rows_html) + "</tbody>"
     # prov-scroll enables the vertical scroll viewport sized by secrets
@@ -387,12 +387,47 @@ def main():
     q = st.session_state.get("q", "")
     filtered_full = apply_global_search(df_full, q)
 
+    # Columns we show (hide internal columns)
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
     df_disp_all = filtered_full[disp_cols]
 
+    # ----- Sort controls (choose column + order) -----
+    def _label_for(col_key: str) -> str:
+        return READONLY_COLUMN_LABELS.get(col_key, col_key.replace("_", " ").title())
+
+    # Exclude 'website' from sort choices (HTML anchors)
+    sortable_cols = [c for c in disp_cols if c != "website"]
+    sort_labels = [_label_for(c) for c in sortable_cols]
+
+    # Defaults: sort by Business Name (or first displayed) ascending
+    default_sort_col = "business_name" if "business_name" in sortable_cols else sortable_cols[0]
+    default_label = _label_for(default_sort_col)
+
+    sc1, sc2 = st.columns([3, 2])
+    with sc1:
+        chosen_label = st.selectbox("Sort by", options=sort_labels, index=sort_labels.index(default_label))
+    with sc2:
+        order = st.radio("Order", ["Ascending", "Descending"], index=0, horizontal=True)
+
+    sort_col = sortable_cols[sort_labels.index(chosen_label)]
+    ascending = (order == "Ascending")
+
+    # Case-insensitive sort for text columns; stable sort keeps ties predictable
+    if pd.api.types.is_string_dtype(df_disp_all[sort_col]):
+        keyfunc = lambda s: s.str.lower()
+    else:
+        keyfunc = None
+
+    df_disp_sorted = df_disp_all.sort_values(
+        by=sort_col,
+        ascending=ascending,
+        kind="mergesort",
+        key=keyfunc
+    )
+
     # ---------------- Top downloads (avoid scrolling) ----------------
     csv_buf = io.StringIO()
-    df_disp_all.to_csv(csv_buf, index=False)
+    df_disp_sorted.to_csv(csv_buf, index=False)
     dcol1, dcol2, dcol3 = st.columns([2, 2, 6])
     with dcol1:
         st.download_button(
@@ -403,10 +438,12 @@ def main():
             type="secondary",
             use_container_width=True,
         )
-    excel_df = df_disp_all.copy()
+
+    excel_df = df_disp_sorted.copy()
     if "website" in excel_df.columns:
-        # Convert anchor to plain URL for Excel
+        # Convert anchor to plain URL for Excel export
         excel_df["website"] = excel_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
+
     xlsx_buf = io.BytesIO()
     with pd.ExcelWriter(xlsx_buf, engine="xlsxwriter") as writer:
         excel_df.to_excel(writer, sheet_name="providers", index=False)
@@ -421,11 +458,11 @@ def main():
             use_container_width=True,
         )
     with dcol3:
-        st.caption(f"{len(df_disp_all)} matching provider(s). Scroll the table below to view all. "
+        st.caption(f"{len(df_disp_sorted)} matching provider(s). Scroll the table below to view all. "
                    f"Viewport rows: {VIEWPORT_ROWS}")
 
     # ---------------- Scrollable full table (admin-style viewport) ----------------
-    st.markdown(_build_table_html(df_disp_all, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
+    st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
 
     # Debug
     st.divider()
