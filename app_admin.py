@@ -897,6 +897,7 @@ with _tabs[1]:
 with _tabs[2]:
     st.caption("Category is required. Manage the reference list and reassign vendors safely.")
     cats = list_names(engine, "categories")
+    cat_opts = ["— Select —"] + cats  # sentinel first
 
     colA, colB = st.columns(2)
     with colA:
@@ -910,17 +911,20 @@ with _tabs[2]:
                     with engine.begin() as conn:
                         conn.execute(sql_text("INSERT OR IGNORE INTO categories(name) VALUES(:n)"), {"n": new_cat.strip()})
                     st.success("Added (or already existed).")
-                    _clear_keys("cat_add")
+                    _clear_keys("cat_add")  # clears the text field
                     st.rerun()
                 except Exception as e:
                     st.error(f"Add category failed: {e}")
 
         st.subheader("Rename Category")
         if cats:
-            old = st.selectbox("Current", options=cats, key="cat_old")
+            # Current (from) select uses sentinel; returns to blank after _clear_keys
+            old = st.selectbox("Current", options=cat_opts, key="cat_old", index=0)
             new = st.text_input("New name", key="cat_rename")
             if st.button("Rename", key="cat_rename_btn"):
-                if not (new or "").strip():
+                if old == "— Select —":
+                    st.error("Pick a category to rename.")
+                elif not (new or "").strip():
                     st.error("Enter a new name.")
                 else:
                     try:
@@ -928,7 +932,7 @@ with _tabs[2]:
                             conn.execute(sql_text("UPDATE categories SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
                             conn.execute(sql_text("UPDATE vendors SET category=:new WHERE category=:old"), {"new": new.strip(), "old": old})
                         st.success("Renamed and reassigned.")
-                        _clear_keys("cat_old", "cat_rename")
+                        _clear_keys("cat_old", "cat_rename")  # returns to sentinel + clears text
                         st.rerun()
                     except Exception as e:
                         st.error(f"Rename category failed: {e}")
@@ -936,37 +940,44 @@ with _tabs[2]:
     with colB:
         st.subheader("Delete / Reassign")
         if cats:
-            tgt = st.selectbox("Category to delete", options=cats, key="cat_del")
-            cnt = usage_count(engine, "category", tgt)
-            st.write(f"In use by {cnt} vendor(s).")
-            if cnt == 0:
-                if st.button("Delete category (no usage)", key="cat_del_btn"):
-                    try:
-                        with engine.begin() as conn:
-                            conn.execute(sql_text("DELETE FROM categories WHERE name=:n"), {"n": tgt})
-                        st.success("Deleted.")
-                        _clear_keys("cat_del")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Delete category failed: {e}")
+            tgt = st.selectbox("Category to delete", options=cat_opts, key="cat_del", index=0)
+            if tgt == "— Select —":
+                st.write("Select a category.")
             else:
-                repl_options = [c for c in cats if c != tgt]
-                repl = st.selectbox("Reassign vendors to…", options=repl_options, key="cat_reassign_to")
-                if st.button("Reassign vendors then delete", key="cat_reassign_btn"):
-                    try:
-                        with engine.begin() as conn:
-                            conn.execute(sql_text("UPDATE vendors SET category=:r WHERE category=:t"), {"r": repl, "t": tgt})
-                            conn.execute(sql_text("DELETE FROM categories WHERE name=:t"), {"t": tgt})
-                        st.success("Reassigned and deleted.")
-                        _clear_keys("cat_del", "cat_reassign_to")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Reassign+delete failed: {e}")
+                cnt = usage_count(engine, "category", tgt)
+                st.write(f"In use by {cnt} vendor(s).")
+                if cnt == 0:
+                    if st.button("Delete category (no usage)", key="cat_del_btn"):
+                        try:
+                            with engine.begin() as conn:
+                                conn.execute(sql_text("DELETE FROM categories WHERE name=:n"), {"n": tgt})
+                            st.success("Deleted.")
+                            _clear_keys("cat_del")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Delete category failed: {e}")
+                else:
+                    repl_options = ["— Select —"] + [c for c in cats if c != tgt]
+                    repl = st.selectbox("Reassign vendors to…", options=repl_options, key="cat_reassign_to", index=0)
+                    if st.button("Reassign vendors then delete", key="cat_reassign_btn"):
+                        if repl == "— Select —":
+                            st.error("Choose a category to reassign to.")
+                        else:
+                            try:
+                                with engine.begin() as conn:
+                                    conn.execute(sql_text("UPDATE vendors SET category=:r WHERE category=:t"), {"r": repl, "t": tgt})
+                                    conn.execute(sql_text("DELETE FROM categories WHERE name=:t"), {"t": tgt})
+                                st.success("Reassigned and deleted.")
+                                _clear_keys("cat_del", "cat_reassign_to")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Reassign+delete failed: {e}")
 
 # ---------- Service Admin
 with _tabs[3]:
     st.caption("Service is optional on vendors. Manage the reference list here.")
     servs = list_names(engine, "services")
+    svc_opts = ["— Select —"] + servs  # sentinel first
 
     colA, colB = st.columns(2)
     with colA:
@@ -987,10 +998,12 @@ with _tabs[3]:
 
         st.subheader("Rename Service")
         if servs:
-            old = st.selectbox("Current", options=servs, key="svc_old")
+            old = st.selectbox("Current", options=svc_opts, key="svc_old", index=0)
             new = st.text_input("New name", key="svc_rename")
             if st.button("Rename Service", key="svc_rename_btn"):
-                if not (new or "").strip():
+                if old == "— Select —":
+                    st.error("Pick a service to rename.")
+                elif not (new or "").strip():
                     st.error("Enter a new name.")
                 else:
                     try:
@@ -1006,32 +1019,38 @@ with _tabs[3]:
     with colB:
         st.subheader("Delete / Reassign")
         if servs:
-            tgt = st.selectbox("Service to delete", options=servs, key="svc_del")
-            cnt = usage_count(engine, "service", tgt)
-            st.write(f"In use by {cnt} vendor(s).")
-            if cnt == 0:
-                if st.button("Delete service (no usage)", key="svc_del_btn"):
-                    try:
-                        with engine.begin() as conn:
-                            conn.execute(sql_text("DELETE FROM services WHERE name=:n"), {"n": tgt})
-                        st.success("Deleted.")
-                        _clear_keys("svc_del")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Delete service failed: {e}")
+            tgt = st.selectbox("Service to delete", options=svc_opts, key="svc_del", index=0)
+            if tgt == "— Select —":
+                st.write("Select a service.")
             else:
-                repl_options = [s for s in servs if s != tgt]
-                repl = st.selectbox("Reassign vendors to…", options=repl_options, key="svc_reassign_to")
-                if st.button("Reassign vendors then delete service", key="svc_reassign_btn"):
-                    try:
-                        with engine.begin() as conn:
-                            conn.execute(sql_text("UPDATE vendors SET service=:r WHERE service=:t"), {"r": repl, "t": tgt})
-                            conn.execute(sql_text("DELETE FROM services WHERE name=:t"), {"t": tgt})
-                        st.success("Reassigned and deleted.")
-                        _clear_keys("svc_del", "svc_reassign_to")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Reassign+delete service failed: {e}")
+                cnt = usage_count(engine, "service", tgt)
+                st.write(f"In use by {cnt} vendor(s).")
+                if cnt == 0:
+                    if st.button("Delete service (no usage)", key="svc_del_btn"):
+                        try:
+                            with engine.begin() as conn:
+                                conn.execute(sql_text("DELETE FROM services WHERE name=:n"), {"n": tgt})
+                            st.success("Deleted.")
+                            _clear_keys("svc_del")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Delete service failed: {e}")
+                else:
+                    repl_options = ["— Select —"] + [s for s in servs if s != tgt]
+                    repl = st.selectbox("Reassign vendors to…", options=repl_options, key="svc_reassign_to", index=0)
+                    if st.button("Reassign vendors then delete service", key="svc_reassign_btn"):
+                        if repl == "— Select —":
+                            st.error("Choose a service to reassign to.")
+                        else:
+                            try:
+                                with engine.begin() as conn:
+                                    conn.execute(sql_text("UPDATE vendors SET service=:r WHERE service=:t"), {"r": repl, "t": tgt})
+                                    conn.execute(sql_text("DELETE FROM services WHERE name=:t"), {"t": tgt})
+                                st.success("Reassigned and deleted.")
+                                _clear_keys("svc_del", "svc_reassign_to")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Reassign+delete service failed: {e}")
 
 # ---------- Maintenance
 with _tabs[4]:
