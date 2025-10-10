@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import hmac
+import time
 import uuid
 from datetime import datetime
 from typing import List, Tuple, Dict
@@ -38,7 +39,7 @@ def _get_secret(name: str, default: str | None = None) -> str | None:
         pass
     return os.getenv(name, default)
 
-# NEW: deterministic resolution (secrets → env → code default)
+# Deterministic resolution (secrets → env → code default)
 def _resolve_bool(name: str, code_default: bool) -> bool:
     v = _get_secret(name, None)
     return _as_bool(v, default=code_default)
@@ -50,6 +51,56 @@ def _resolve_str(name: str, code_default: str | None) -> str | None:
 def _ct_equals(a: str, b: str) -> bool:
     """Constant-time string compare for secrets."""
     return hmac.compare_digest((a or ""), (b or ""))
+
+
+# -----------------------------
+# Hrana/libSQL transient error retry
+# -----------------------------
+def _is_hrana_stale_stream_error(err: Exception) -> bool:
+    s = str(err).lower()
+    return ("hrana" in s and "404" in s and "stream not found" in s) or ("stream not found" in s)
+
+def _exec_with_retry(engine: Engine, sql: str, params: Dict | None = None, *, tries: int = 2):
+    """
+    Execute a write (INSERT/UPDATE/DELETE) with a one-time retry on Hrana 'stream not found'.
+    Returns the result proxy so you can read .rowcount.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with engine.begin() as conn:
+                return conn.execute(sql_text(sql), params or {})
+        except Exception as e:
+            if attempt < tries and _is_hrana_stale_stream_error(e):
+                try:
+                    engine.dispose()  # drop pooled connections
+                except Exception:
+                    pass
+                time.sleep(0.2)
+                continue
+            raise
+
+def _fetch_with_retry(engine: Engine, sql: str, params: Dict | None = None, *, tries: int = 2) -> pd.DataFrame:
+    """
+    Execute a read (SELECT) with a one-time retry on Hrana 'stream not found'.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with engine.connect() as conn:
+                res = conn.execute(sql_text(sql), params or {})
+                return pd.DataFrame(res.mappings().all())
+        except Exception as e:
+            if attempt < tries and _is_hrana_stale_stream_error(e):
+                try:
+                    engine.dispose()
+                except Exception:
+                    pass
+                time.sleep(0.2)
+                continue
+            raise
 
 
 # ---------- Form state helpers (Add / Edit / Delete) ----------
@@ -237,7 +288,7 @@ st.markdown(
 # -----------------------------
 # Admin sign-in gate (deterministic toggle)
 # -----------------------------
-# Code defaults (lowest precedence) — you can change these if you like:
+# Code defaults (lowest precedence) — change here if you want different code-fallbacks.
 DISABLE_ADMIN_PASSWORD_DEFAULT = True      # True = bypass, False = require password
 ADMIN_PASSWORD_DEFAULT = "admin"
 
@@ -280,7 +331,12 @@ def build_engine() -> Tuple[Engine, Dict]:
 
     if not url:
         # No remote configured → plain local file DB
-        eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+        eng = create_engine(
+            "sqlite:///vendors.db",
+            pool_pre_ping=True,
+            pool_recycle=300,
+            pool_reset_on_return="commit",
+        )
         info.update(
             {
                 "using_remote": False,
@@ -308,6 +364,8 @@ def build_engine() -> Tuple[Engine, Dict]:
                 "sync_url": sync_url,
             },
             pool_pre_ping=True,
+            pool_recycle=300,
+            pool_reset_on_return="commit",
         )
         with eng.connect() as c:
             c.exec_driver_sql("select 1;")
@@ -328,7 +386,12 @@ def build_engine() -> Tuple[Engine, Dict]:
         info["remote_error"] = f"{e}"
         allow_local = _as_bool(os.getenv("FORCE_LOCAL"), False)
         if allow_local:
-            eng = create_engine("sqlite:///vendors.db", pool_pre_ping=True)
+            eng = create_engine(
+                "sqlite:///vendors.db",
+                pool_pre_ping=True,
+                pool_recycle=300,
+                pool_reset_on_return="commit",
+            )
             info.update(
                 {
                     "using_remote": False,
@@ -726,28 +789,28 @@ with _tabs[1]:
         else:
             try:
                 now = datetime.utcnow().isoformat(timespec="seconds")
-                with engine.begin() as conn:
-                    conn.execute(
-                        sql_text("""
-                            INSERT INTO vendors(category, service, business_name, contact_name, phone, address,
-                                                website, notes, keywords, created_at, updated_at, updated_by)
-                            VALUES(:category, NULLIF(:service, ''), :business_name, :contact_name, :phone, :address,
-                                   :website, :notes, :keywords, :now, :now, :user)
-                        """),
-                        {
-                            "category": category,
-                            "service": service,
-                            "business_name": business_name,
-                            "contact_name": contact_name,
-                            "phone": phone_norm,
-                            "address": address,
-                            "website": website,
-                            "notes": notes,
-                            "keywords": keywords,
-                            "now": now,
-                            "user": os.getenv("USER", "admin"),
-                        },
-                    )
+                _exec_with_retry(
+                    engine,
+                    """
+                    INSERT INTO vendors(category, service, business_name, contact_name, phone, address,
+                                        website, notes, keywords, created_at, updated_at, updated_by)
+                    VALUES(:category, NULLIF(:service, ''), :business_name, :contact_name, :phone, :address,
+                           :website, :notes, :keywords, :now, :now, :user)
+                    """,
+                    {
+                        "category": category,
+                        "service": service,
+                        "business_name": business_name,
+                        "contact_name": contact_name,
+                        "phone": phone_norm,
+                        "address": address,
+                        "website": website,
+                        "notes": notes,
+                        "keywords": keywords,
+                        "now": now,
+                        "user": os.getenv("USER", "admin"),
+                    },
+                )
                 st.session_state["add_last_done"] = add_nonce
                 st.success(f"Vendor added: {business_name}")
                 _queue_add_form_reset()
@@ -862,36 +925,35 @@ with _tabs[1]:
                     try:
                         prev_updated = st.session_state.get("edit_row_updated_at") or ""
                         now = datetime.utcnow().isoformat(timespec="seconds")
-                        with engine.begin() as conn:
-                            res = conn.execute(sql_text("""
-                                UPDATE vendors
-                                   SET category=:category,
-                                       service=NULLIF(:service, ''),
-                                       business_name=:business_name,
-                                       contact_name=:contact_name,
-                                       phone=:phone,
-                                       address=:address,
-                                       website=:website,
-                                       notes=:notes,
-                                       keywords=:keywords,
-                                       updated_at=:now,
-                                       updated_by=:user
-                                 WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
-                            """), {
-                                "category": cat,
-                                "service": (st.session_state["edit_service"] or "").strip(),
-                                "business_name": bn,
-                                "contact_name": (st.session_state["edit_contact_name"] or "").strip(),
-                                "phone": phone_norm,
-                                "address": (st.session_state["edit_address"] or "").strip(),
-                                "website": _sanitize_url(st.session_state["edit_website"]),
-                                "notes": (st.session_state["edit_notes"] or "").strip(),
-                                "keywords": (st.session_state["edit_keywords"] or "").strip(),
-                                "now": now, "user": os.getenv("USER", "admin"),
-                                "id": int(vid),
-                                "prev_updated": prev_updated,
-                            })
-                            rowcount = res.rowcount or 0
+                        res = _exec_with_retry(engine, """
+                            UPDATE vendors
+                               SET category=:category,
+                                   service=NULLIF(:service, ''),
+                                   business_name=:business_name,
+                                   contact_name=:contact_name,
+                                   phone=:phone,
+                                   address=:address,
+                                   website=:website,
+                                   notes=:notes,
+                                   keywords=:keywords,
+                                   updated_at=:now,
+                                   updated_by=:user
+                             WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
+                        """, {
+                            "category": cat,
+                            "service": (st.session_state["edit_service"] or "").strip(),
+                            "business_name": bn,
+                            "contact_name": (st.session_state["edit_contact_name"] or "").strip(),
+                            "phone": phone_norm,
+                            "address": (st.session_state["edit_address"] or "").strip(),
+                            "website": _sanitize_url(st.session_state["edit_website"]),
+                            "notes": (st.session_state["edit_notes"] or "").strip(),
+                            "keywords": (st.session_state["edit_keywords"] or "").strip(),
+                            "now": now, "user": os.getenv("USER", "admin"),
+                            "id": int(vid),
+                            "prev_updated": prev_updated,
+                        })
+                        rowcount = res.rowcount or 0
 
                         if rowcount == 0:
                             st.warning("No changes applied (stale selection or already updated). Refresh and try again.")
@@ -935,12 +997,11 @@ with _tabs[1]:
                 try:
                     row = df_all.loc[df_all["id"] == int(vid)]
                     prev_updated = (row.iloc[0]["updated_at"] if not row.empty else "") or ""
-                    with engine.begin() as conn:
-                        res = conn.execute(sql_text("""
-                            DELETE FROM vendors
-                             WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
-                        """), {"id": int(vid), "prev_updated": prev_updated})
-                        rowcount = res.rowcount or 0
+                    res = _exec_with_retry(engine, """
+                        DELETE FROM vendors
+                         WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
+                    """, {"id": int(vid), "prev_updated": prev_updated})
+                    rowcount = res.rowcount or 0
 
                     if rowcount == 0:
                         st.warning("No delete performed (stale selection). Refresh and try again.")
@@ -971,8 +1032,7 @@ with _tabs[2]:
                 st.error("Enter a name.")
             else:
                 try:
-                    with engine.begin() as conn:
-                        conn.execute(sql_text("INSERT OR IGNORE INTO categories(name) VALUES(:n)"), {"n": new_cat.strip()})
+                    _exec_with_retry(engine, "INSERT OR IGNORE INTO categories(name) VALUES(:n)", {"n": new_cat.strip()})
                     st.success("Added (or already existed).")
                     _queue_cat_reset()
                     st.rerun()
@@ -990,9 +1050,8 @@ with _tabs[2]:
                     st.error("Enter a new name.")
                 else:
                     try:
-                        with engine.begin() as conn:
-                            conn.execute(sql_text("UPDATE categories SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
-                            conn.execute(sql_text("UPDATE vendors SET category=:new WHERE category=:old"), {"new": new.strip(), "old": old})
+                        _exec_with_retry(engine, "UPDATE categories SET name=:new WHERE name=:old", {"new": new.strip(), "old": old})
+                        _exec_with_retry(engine, "UPDATE vendors SET category=:new WHERE category=:old", {"new": new.strip(), "old": old})
                         st.success("Renamed and reassigned.")
                         _queue_cat_reset()
                         st.rerun()
@@ -1011,8 +1070,7 @@ with _tabs[2]:
                 if cnt == 0:
                     if st.button("Delete category (no usage)", key="cat_del_btn"):
                         try:
-                            with engine.begin() as conn:
-                                conn.execute(sql_text("DELETE FROM categories WHERE name=:n"), {"n": tgt})
+                            _exec_with_retry(engine, "DELETE FROM categories WHERE name=:n", {"n": tgt})
                             st.success("Deleted.")
                             _queue_cat_reset()
                             st.rerun()
@@ -1026,9 +1084,8 @@ with _tabs[2]:
                             st.error("Choose a category to reassign to.")
                         else:
                             try:
-                                with engine.begin() as conn:
-                                    conn.execute(sql_text("UPDATE vendors SET category=:r WHERE category=:t"), {"r": repl, "t": tgt})
-                                    conn.execute(sql_text("DELETE FROM categories WHERE name=:t"), {"t": tgt})
+                                _exec_with_retry(engine, "UPDATE vendors SET category=:r WHERE category=:t", {"r": repl, "t": tgt})
+                                _exec_with_retry(engine, "DELETE FROM categories WHERE name=:t", {"t": tgt})
                                 st.success("Reassigned and deleted.")
                                 _queue_cat_reset()
                                 st.rerun()
@@ -1053,8 +1110,7 @@ with _tabs[3]:
                 st.error("Enter a name.")
             else:
                 try:
-                    with engine.begin() as conn:
-                        conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new_s.strip()})
+                    _exec_with_retry(engine, "INSERT OR IGNORE INTO services(name) VALUES(:n)", {"n": new_s.strip()})
                     st.success("Added (or already existed).")
                     _queue_svc_reset()
                     st.rerun()
@@ -1072,10 +1128,9 @@ with _tabs[3]:
                     st.error("Enter a new name.")
                 else:
                     try:
-                        with engine.begin() as conn:
-                            conn.execute(sql_text("UPDATE services SET name=:new WHERE name=:old"), {"new": new.strip(), "old": old})
-                            conn.execute(sql_text("UPDATE vendors SET service=:new WHERE service=:old"), {"new": new.strip(), "old": old})
-                        st.success("Renamed and reassigned.")
+                        _exec_with_retry(engine, "UPDATE services SET name=:new WHERE name=:old", {"new": new.strip(), "old": old})
+                        _exec_with_retry(engine, "UPDATE vendors SET service=:new WHERE service=:old", {"new": new.strip(), "old": old})
+                        st.success(f"Renamed service: {old} → {new.strip()}")
                         _queue_svc_reset()
                         st.rerun()
                     except Exception as e:
@@ -1093,8 +1148,7 @@ with _tabs[3]:
                 if cnt == 0:
                     if st.button("Delete service (no usage)", key="svc_del_btn"):
                         try:
-                            with engine.begin() as conn:
-                                conn.execute(sql_text("DELETE FROM services WHERE name=:n"), {"n": tgt})
+                            _exec_with_retry(engine, "DELETE FROM services WHERE name=:n", {"n": tgt})
                             st.success("Deleted.")
                             _queue_svc_reset()
                             st.rerun()
@@ -1108,9 +1162,8 @@ with _tabs[3]:
                             st.error("Choose a service to reassign to.")
                         else:
                             try:
-                                with engine.begin() as conn:
-                                    conn.execute(sql_text("UPDATE vendors SET service=:r WHERE service=:t"), {"r": repl, "t": tgt})
-                                    conn.execute(sql_text("DELETE FROM services WHERE name=:t"), {"t": tgt})
+                                _exec_with_retry(engine, "UPDATE vendors SET service=:r WHERE service=:t", {"r": repl, "t": tgt})
+                                _exec_with_retry(engine, "DELETE FROM services WHERE name=:t", {"t": tgt})
                                 st.success("Reassigned and deleted.")
                                 _queue_svc_reset()
                                 st.rerun()
