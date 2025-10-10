@@ -193,6 +193,9 @@ for k, v in list(COLUMN_WIDTHS_PX_READONLY.items()):
 # Optional sticky first column
 STICKY_FIRST_COL: bool = _as_bool(_get_secret("READONLY_STICKY_FIRST_COL", False), False)
 
+# Columns to hide from the on-screen table (search still uses them)
+HIDE_IN_DISPLAY = {"id", "keywords", "created_at", "updated_at", "updated_by"}
+
 
 # =============================
 # Database engine (Turso first; guarded fallback)
@@ -363,18 +366,14 @@ def main():
     if info.get("strategy") == "local_fallback":
         st.warning("Turso credentials not found. Running on local SQLite fallback (`./vendors.db`).")
 
-    # Load data
+    # Load data (keep full set for searching)
     try:
-        df = fetch_vendors(engine)
+        df_full = fetch_vendors(engine)
     except Exception as e:
         st.error(f"Failed to load vendors: {e}")
         return
 
-    # Hide "id" by default in the display
-    disp_cols = [c for c in df.columns if c != "id"]
-    df = df[disp_cols]
-
-    # Global search
+    # Global search (run against the FULL dataframe so 'keywords' works)
     st.text_input(
         "Search",
         key="q",
@@ -382,17 +381,22 @@ def main():
         help="Case-insensitive, matches partial words across all columns.",
     )
     q = st.session_state.get("q", "")
-    filtered = apply_global_search(df, q)
+    filtered_full = apply_global_search(df_full, q)
+
+    # Now hide columns ONLY for display
+    disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
+    df_disp = filtered_full[disp_cols]
 
     # Render as lightweight HTML so wrapping + pixel widths are honored
-    html_table = _build_table_html(filtered, sticky_first=STICKY_FIRST_COL)
+    html_table = _build_table_html(df_disp, sticky_first=STICKY_FIRST_COL)
     st.markdown(html_table, unsafe_allow_html=True)
 
-    # Downloads (CSV + Excel), placed near the bottom, before Debug
+    # Downloads (CSV + Excel) — exporting what you SEE (hidden cols omitted).
+    # If you prefer exports to include hidden columns, change df_disp -> filtered_full below.
 
     # 1) CSV
     csv_buf = io.StringIO()
-    filtered.to_csv(csv_buf, index=False)  # use original column names (not the labeled versions)
+    df_disp.to_csv(csv_buf, index=False)  # export displayed columns
     st.download_button(
         "Download providers.csv",
         data=csv_buf.getvalue().encode("utf-8"),
@@ -403,7 +407,7 @@ def main():
     )
 
     # 2) Excel (.xlsx) — export href for website column
-    excel_df = filtered.copy()
+    excel_df = df_disp.copy()
     if "website" in excel_df.columns:
         # Extract href from <a href="...">...</a> to plain URL
         excel_df["website"] = excel_df["website"].str.replace(
