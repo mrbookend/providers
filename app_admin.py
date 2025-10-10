@@ -115,7 +115,7 @@ def _apply_edit_reset_if_needed():
                 st.session_state[k] = None
             else:
                 st.session_state[k] = ""
-        # Also drop the selectbox label key so Streamlit shows default index=0
+        # Also drop the legacy selectbox label key if present (from older builds)
         if "edit_provider_label" in st.session_state:
             del st.session_state["edit_provider_label"]
         st.session_state["_pending_edit_reset"] = False
@@ -137,6 +137,9 @@ def _init_delete_form_defaults():
 def _apply_delete_reset_if_needed():
     if st.session_state.get("_pending_delete_reset"):
         st.session_state["delete_vendor_id"] = None
+        # Also clear the delete selectbox UI key so it resets to sentinel
+        if "delete_provider_label" in st.session_state:
+            del st.session_state["delete_provider_label"]
         st.session_state["_pending_delete_reset"] = False
         st.session_state["delete_form_version"] += 1
 
@@ -529,6 +532,15 @@ def _execute_append_only(
 engine, engine_info = build_engine()
 ensure_schema(engine)
 
+# Apply WAL PRAGMAs for local SQLite (not libsql driver)
+try:
+    if not engine_info.get("using_remote", False) and engine_info.get("driver", "") != "libsql":
+        with engine.begin() as _conn:
+            _conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
+            _conn.exec_driver_sql("PRAGMA synchronous=NORMAL;")
+except Exception:
+    pass
+
 _tabs = st.tabs(
     [
         "Browse Vendors",
@@ -584,11 +596,11 @@ with _tabs[0]:
 
     vdf = filtered[view_cols].rename(columns={"phone_fmt": "phone"})
 
-    st.data_editor(
+    # Lighter read-only table
+    st.dataframe(
         vdf,
         use_container_width=True,
         hide_index=True,
-        disabled=True,
         column_config={
             "business_name": st.column_config.TextColumn("Provider"),
             "website": st.column_config.TextColumn("website"),
@@ -597,10 +609,11 @@ with _tabs[0]:
         },
     )
 
+    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     st.download_button(
         "Download filtered view (CSV)",
         data=vdf.to_csv(index=False).encode("utf-8"),
-        file_name="providers.csv",
+        file_name=f"providers_{ts}.csv",
         mime="text/csv",
     )
 
@@ -658,7 +671,10 @@ with _tabs[1]:
         notes         = (st.session_state["add_notes"] or "").strip()
         keywords      = (st.session_state["add_keywords"] or "").strip()
 
-        if not business_name or not category:
+        # Minimal-change validation: phone must be 10 digits or blank
+        if phone_norm and len(phone_norm) != 10:
+            st.error("Phone must be 10 digits or blank.")
+        elif not business_name or not category:
             st.error("Business Name and Category are required.")
         else:
             try:
@@ -707,40 +723,32 @@ with _tabs[1]:
         _apply_edit_reset_if_needed()
         _apply_delete_reset_if_needed()
 
-        # ----- Provider selection with typeahead (no IDs in UI) -----
-        def _label_for(row):
-            cat = (row.get("category") or "")
-            svc = (row.get("service") or "")
-            tail = f"{cat} / {svc}".strip(" /")
-            return f"{row['business_name']} — {tail}" if tail else f"{row['business_name']}"
+        # ----- EDIT: ID-backed selection with format_func (no duplicate-label hack, no index) -----
+        ids = df_all["id"].astype(int).tolist()
+        id_to_row = {int(r["id"]): r for _, r in df_all.iterrows()}
 
-        labels = []
-        id_lookup: Dict[str, int] = {}
-        for _, r in df_all.iterrows():
-            label = _label_for(r)
-            while label in id_lookup:
-                label = label + " "
-            labels.append(label)
-            id_lookup[label] = int(r["id"])
+        def _fmt_vendor(i: int | None) -> str:
+            if i is None:
+                return "— Select —"
+            r = id_to_row.get(int(i), None)
+            if not r:
+                return f"{i}"
+            cat = (r.get("category") or "")
+            svc = (r.get("service") or "")
+            tail = " / ".join([x for x in [cat, svc] if x]).strip(" /")
+            return f"{r['business_name']} — {tail}" if tail else f"{r['business_name']}"
 
-        sel_label_edit = st.selectbox(
+        st.selectbox(
             "Select provider to edit (type to search)",
-            options=["— Select —"] + labels,
-            index=0 if st.session_state.get("edit_vendor_id") is None else (["— Select —"] + labels).index(
-                next((k for k, v in id_lookup.items() if v == st.session_state["edit_vendor_id"]), "— Select —")
-            ),
-            key="edit_provider_label",
+            options=[None] + ids,
+            format_func=_fmt_vendor,
+            key="edit_vendor_id",
         )
 
-        if sel_label_edit != "— Select —":
-            sel_id = id_lookup[sel_label_edit]
-            st.session_state["edit_vendor_id"] = sel_id
-        else:
-            st.session_state["edit_vendor_id"] = None
-
+        # Prefill only when selection changes
         if st.session_state["edit_vendor_id"] is not None:
             if st.session_state["edit_last_loaded_id"] != st.session_state["edit_vendor_id"]:
-                row = df_all.loc[df_all["id"] == st.session_state["edit_vendor_id"]].iloc[0].to_dict()
+                row = id_to_row[int(st.session_state["edit_vendor_id"])]
                 st.session_state.update({
                     "edit_business_name": row.get("business_name") or "",
                     "edit_category": row.get("category") or "",
@@ -755,6 +763,7 @@ with _tabs[1]:
                     "edit_last_loaded_id": st.session_state["edit_vendor_id"],
                 })
 
+        # -------- Edit form --------
         edit_form_key = f"edit_vendor_form_{st.session_state['edit_form_version']}"
         with st.form(edit_form_key, clear_on_submit=False):
             col1, col2 = st.columns(2)
@@ -796,7 +805,10 @@ with _tabs[1]:
             else:
                 bn  = (st.session_state["edit_business_name"] or "").strip()
                 cat = (st.session_state["edit_category"] or "").strip()
-                if not bn or not cat:
+                phone_norm = _normalize_phone(st.session_state["edit_phone"])
+                if phone_norm and len(phone_norm) != 10:
+                    st.error("Phone must be 10 digits or blank.")
+                elif not bn or not cat:
                     st.error("Business Name and Category are required.")
                 else:
                     try:
@@ -822,7 +834,7 @@ with _tabs[1]:
                                 "service": (st.session_state["edit_service"] or "").strip(),
                                 "business_name": bn,
                                 "contact_name": (st.session_state["edit_contact_name"] or "").strip(),
-                                "phone": _normalize_phone(st.session_state["edit_phone"]),
+                                "phone": phone_norm,
                                 "address": (st.session_state["edit_address"] or "").strip(),
                                 "website": _sanitize_url(st.session_state["edit_website"]),
                                 "notes": (st.session_state["edit_notes"] or "").strip(),
@@ -844,7 +856,22 @@ with _tabs[1]:
                     except Exception as e:
                         st.error(f"Update failed: {e}")
 
+        # ---- Delete: selection with typeahead; no typed confirmation ----
         st.markdown("---")
+        # Keep a separate delete selection so it doesn't fight with edit selection
+        # (We keep labels logic from previous approach for delete; it's stable enough.)
+        labels = []
+        id_lookup: Dict[str, int] = {}
+        for _idx, r in df_all.iterrows():
+            cat = (r.get("category") or "")
+            svc = (r.get("service") or "")
+            tail = " / ".join([x for x in [cat, svc] if x]).strip(" /")
+            label = f"{r['business_name']} — {tail}" if tail else f"{r['business_name']}"
+            while label in id_lookup:
+                label = label + " "
+            labels.append(label)
+            id_lookup[label] = int(r["id"])
+
         sel_label_del = st.selectbox(
             "Select provider to delete (type to search)",
             options=["— Select —"] + labels,
@@ -870,6 +897,7 @@ with _tabs[1]:
                 st.error("Select a vendor first.")
             else:
                 try:
+                    # get prev_updated from current df snapshot
                     row = df_all.loc[df_all["id"] == int(vid)]
                     prev_updated = (row.iloc[0]["updated_at"] if not row.empty else "") or ""
                     with engine.begin() as conn:
@@ -1073,19 +1101,20 @@ with _tabs[4]:
     if "phone" in full_formatted.columns:
         full_formatted["phone"] = full_formatted["phone"].apply(_format_phone_digits)
 
+    ts_all = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     colA, colB = st.columns([1, 1])
     with colA:
         st.download_button(
             "Export all vendors (formatted phones)",
             data=full_formatted.to_csv(index=False).encode("utf-8"),
-            file_name="providers.csv",
+            file_name=f"providers_{ts_all}.csv",
             mime="text/csv",
         )
     with colB:
         st.download_button(
             "Export all vendors (digits-only phones)",
             data=full.to_csv(index=False).encode("utf-8"),
-            file_name="providers_raw.csv",
+            file_name=f"providers_raw_{ts_all}.csv",
             mime="text/csv",
         )
 
@@ -1163,6 +1192,7 @@ with _tabs[4]:
         changed_vendors = 0
         try:
             with engine.begin() as conn:
+                # --- vendors table ---
                 rows = conn.execute(sql_text("SELECT * FROM vendors")).fetchall()
                 for r in rows:
                     row = dict(r._mapping) if hasattr(r, "_mapping") else dict(r)
@@ -1193,6 +1223,7 @@ with _tabs[4]:
                     )
                     changed_vendors += 1
 
+                # --- categories table: retitle + reconcile duplicates by case ---
                 cat_rows = conn.execute(sql_text("SELECT name FROM categories")).fetchall()
                 for (old_name,) in cat_rows:
                     new_name = to_title(old_name)
@@ -1204,6 +1235,7 @@ with _tabs[4]:
                         )
                         conn.execute(sql_text("DELETE FROM categories WHERE name=:old"), {"old": old_name})
 
+                # --- services table: retitle + reconcile duplicates by case ---
                 svc_rows = conn.execute(sql_text("SELECT name FROM services")).fetchall()
                 for (old_name,) in svc_rows:
                     new_name = to_title(old_name)
@@ -1218,6 +1250,7 @@ with _tabs[4]:
         except Exception as e:
             st.error(f"Normalization failed: {e}")
 
+    # Backfill timestamps
     if st.button("Backfill created_at/updated_at when missing"):
         try:
             now = datetime.utcnow().isoformat(timespec="seconds")
@@ -1232,6 +1265,7 @@ with _tabs[4]:
         except Exception as e:
             st.error(f"Backfill failed: {e}")
 
+    # Trim extra whitespace across common text fields (preserves newlines in notes)
     if st.button("Trim whitespace in text fields (safe)"):
         try:
             changed = 0
@@ -1247,6 +1281,7 @@ with _tabs[4]:
 
                 def clean_soft(s: str | None) -> str:
                     s = (s or "").strip()
+                    # collapse runs of spaces/tabs only; KEEP line breaks
                     s = re.sub(r"[ \t]+", " ", s)
                     return s
 
@@ -1259,9 +1294,9 @@ with _tabs[4]:
                         "contact_name": clean_soft(r[4]),
                         "address": clean_soft(r[5]),
                         "website": _sanitize_url(clean_soft(r[6])),
-                        "notes": clean_soft(r[7]),
+                        "notes": clean_soft(r[7]),  # preserves newlines
                         "keywords": clean_soft(r[8]),
-                        "phone": r[9],
+                        "phone": r[9],  # leave phone unchanged here
                         "id": pid,
                     }
                     conn.execute(
@@ -1297,11 +1332,13 @@ with _tabs[5]:
         categories_cols = conn.execute(sql_text("PRAGMA table_info(categories)")).fetchall()
         services_cols = conn.execute(sql_text("PRAGMA table_info(services)")).fetchall()
 
+        # --- Index presence (vendors) ---
         idx_rows = conn.execute(sql_text("PRAGMA index_list(vendors)")).fetchall()
         vendors_indexes = [
             {"seq": r[0], "name": r[1], "unique": bool(r[2]), "origin": r[3], "partial": bool(r[4])} for r in idx_rows
         ]
 
+        # --- Null timestamp counts (quick sanity) ---
         created_at_nulls = conn.execute(
             sql_text("SELECT COUNT(*) FROM vendors WHERE created_at IS NULL OR created_at=''")
         ).scalar() or 0
