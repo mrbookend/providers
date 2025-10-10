@@ -1,10 +1,8 @@
+# .streamlit/Config.toml
 [server]
 headless = true
-runOnSave = false
+enableCORS = false
 
-[client]
-toolbarMode = "minimal"
-showErrorDetails = true
+[ui]
+hideTopBar = false
 
-[browser]
-gatherUsageStats = false
