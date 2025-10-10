@@ -394,41 +394,6 @@ def main():
 
     # Debug section as a toggle button at the very bottom
     st.divider()
-    if st.button("Debug (status & secrets keys)", type="secondary"):
-        dbg = {
-            "DB (resolved)": info,
-            "Secrets keys": sorted(list(getattr(st, "secrets", {}).keys())) if hasattr(st, "secrets") else [],
-            "Widths (effective)": COLUMN_WIDTHS_PX_READONLY,
-        }
-            st.write(dbg)
-
-    # Secrets presence diagnostics (temporary)
-    st.caption(f"HELP_MD present: {'HELP_MD' in getattr(st, 'secrets', {})}")
-    st.caption("Turso secrets — URL: %s | TOKEN: %s" % (
-        bool(_get_secret("TURSO_DATABASE_URL","")),
-        bool(_get_secret("TURSO_AUTH_TOKEN","")),
-    ))
-
-    # Also show a tiny probe of the DB
-        try:
-            with engine.begin() as conn:
-                cols_v = pd.read_sql(sql_text("PRAGMA table_info(vendors)"), conn)
-                cols_c = pd.read_sql(sql_text("PRAGMA table_info(categories)"), conn)
-                cols_s = pd.read_sql(sql_text("PRAGMA table_info(services)"), conn)
-                counts = {}
-                for t in ("vendors", "categories", "services"):
-                    c = pd.read_sql(sql_text(f"SELECT COUNT(*) AS n FROM {t}"), conn)["n"].iloc[0]
-                    counts[t] = int(c)
-            probe = {
-                "vendors_columns": list(cols_v["name"]) if "name" in cols_v else [],
-                "categories_columns": list(cols_c["name"]) if "name" in cols_c else [],
-                "services_columns": list(cols_s["name"]) if "name" in cols_s else [],
-                "counts": counts,
-            }
-            st.write(probe)
-        except Exception as e:
-            st.write({"db_probe_error": str(e)})
-
 
 if __name__ == "__main__":
     main()
