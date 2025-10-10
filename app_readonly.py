@@ -127,6 +127,11 @@ st.markdown(
         border-bottom: 2px solid #ddd;
       }}
       .prov-wrap {{ overflow-x: auto; }}
+      /* NEW: vertical scroll viewport (like admin app) */
+      .prov-scroll {{
+        max-height: 520px;
+        overflow-y: auto;
+      }}
       .help-row {{ display: flex; align-items: center; gap: 12px; }}
     </style>
     """,
@@ -242,7 +247,7 @@ def fetch_vendors(engine: Engine) -> pd.DataFrame:
         u = v.strip()
         if not (u.startswith("http://") or u.startswith("https://")):
             u = "https://" + u
-        # always show compact label
+        # compact label
         label = "Launch website"
         href = html.escape(u, quote=True)
         return f'<a href="{href}" target="_blank" rel="noopener noreferrer">{label}</a>'
@@ -285,7 +290,6 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
     for col in df_disp.columns:
         orig = rev[col]
         width = COLUMN_WIDTHS_PX_READONLY.get(orig, 140)
-        # no sticky first col
         headers.append(
             f'<th style="min-width:{width}px;max-width:{width}px;">{html.escape(col)}</th>'
         )
@@ -305,7 +309,8 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
             tds.append(f'<td style="min-width:{width}px;max-width:{width}px;">{cell_html}</td>')
         rows_html.append("<tr>" + "".join(tds) + "</tr>")
     tbody = "<tbody>" + "".join(rows_html) + "</tbody>"
-    return f'<div class="prov-wrap"><table class="prov-table">{thead}{tbody}</table></div>'
+    # NOTE: prov-scroll enables the vertical scroll viewport
+    return f'<div class="prov-wrap prov-scroll"><table class="prov-table">{thead}{tbody}</table></div>'
 
 
 # =============================
@@ -347,7 +352,6 @@ def main():
 
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
     df_disp_all = filtered_full[disp_cols]
-    total = len(df_disp_all)
 
     # ---------------- Top downloads (avoid scrolling) ----------------
     # CSV export matches what you SEE (columns)
@@ -382,11 +386,10 @@ def main():
             use_container_width=True,
         )
     with dcol3:
-        st.caption(f"Showing a preview of 10 out of {total} matching providers below.")
+        st.caption(f"{len(df_disp_all)} matching provider(s). Scroll the table below to view all.")
 
-    # ---------------- Preview only first 10 rows ----------------
-    df_preview = df_disp_all.head(10)
-    st.markdown(_build_table_html(df_preview, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
+    # ---------------- Scrollable full table (like admin app) ----------------
+    st.markdown(_build_table_html(df_disp_all, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
 
     # Debug
     st.divider()
