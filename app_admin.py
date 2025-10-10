@@ -102,11 +102,22 @@ def _init_edit_form_defaults():
     st.session_state.setdefault("edit_nonce", uuid.uuid4().hex)
 
 def _apply_edit_reset_if_needed():
+    """
+    Apply queued reset BEFORE rendering edit widgets.
+    CHANGE: also clear the selection (edit_vendor_id) and the selectbox key so the UI returns to “— Select —”.
+    """
     if st.session_state.get("_pending_edit_reset"):
-        keep = {"edit_vendor_id"}  # keep current selection; blank the fields
+        # Clear all edit fields AND selection
         for k in EDIT_FORM_KEYS:
-            if k not in keep:
-                st.session_state[k] = "" if k not in ("edit_vendor_id", "edit_row_updated_at", "edit_last_loaded_id") else (None if k != "edit_last_loaded_id" else None)
+            if k == "edit_vendor_id":
+                st.session_state[k] = None
+            elif k in ("edit_row_updated_at", "edit_last_loaded_id"):
+                st.session_state[k] = None
+            else:
+                st.session_state[k] = ""
+        # Also drop the selectbox label key so Streamlit shows default index=0
+        if "edit_provider_label" in st.session_state:
+            del st.session_state["edit_provider_label"]
         st.session_state["_pending_edit_reset"] = False
         st.session_state["edit_form_version"] += 1
 
@@ -821,7 +832,7 @@ with _tabs[1]:
                         else:
                             st.session_state["edit_last_done"] = edit_nonce
                             st.success(f"Vendor updated: {bn}")
-                            _queue_edit_form_reset()
+                            _queue_edit_form_reset()   # <— now clears selection AND fields
                             _nonce_rotate("edit")
                             st.rerun()
                     except Exception as e:
