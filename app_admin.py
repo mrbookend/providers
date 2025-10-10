@@ -29,9 +29,8 @@ def _as_bool(v, default: bool = False) -> bool:
         return default
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
-
 def _get_secret(name: str, default: str | None = None) -> str | None:
-    """Prefer Streamlit secrets, fallback to environment."""
+    """Prefer Streamlit secrets, fallback to environment, then default."""
     try:
         if name in st.secrets:
             return st.secrets[name]
@@ -39,6 +38,14 @@ def _get_secret(name: str, default: str | None = None) -> str | None:
         pass
     return os.getenv(name, default)
 
+# NEW: deterministic resolution (secrets → env → code default)
+def _resolve_bool(name: str, code_default: bool) -> bool:
+    v = _get_secret(name, None)
+    return _as_bool(v, default=code_default)
+
+def _resolve_str(name: str, code_default: str | None) -> str | None:
+    v = _get_secret(name, None)
+    return v if v is not None else code_default
 
 def _ct_equals(a: str, b: str) -> bool:
     """Constant-time string compare for secrets."""
@@ -207,11 +214,11 @@ def _queue_svc_reset():
 # -----------------------------
 # Page config & CSS
 # -----------------------------
-PAGE_TITLE = _get_secret("page_title", "Vendors Admin") or "Vendors Admin"
-SIDEBAR_STATE = _get_secret("sidebar_state", "expanded") or "expanded"
+PAGE_TITLE = _resolve_str("page_title", "Vendors Admin") or "Vendors Admin"
+SIDEBAR_STATE = _resolve_str("sidebar_state", "expanded") or "expanded"
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
 
-LEFT_PAD_PX = int(_get_secret("page_left_padding_px", "40") or "40")
+LEFT_PAD_PX = int(_resolve_str("page_left_padding_px", "40") or "40")
 
 st.markdown(
     f"""
@@ -228,21 +235,24 @@ st.markdown(
 
 
 # -----------------------------
-# Admin sign-in gate (single source of truth; spaces only)
+# Admin sign-in gate (deterministic toggle)
 # -----------------------------
-DISABLE_LOGIN = _as_bool(_get_secret("DISABLE_ADMIN_PASSWORD", "0"))
+# Code defaults (lowest precedence) — you can change these if you like:
+DISABLE_ADMIN_PASSWORD_DEFAULT = True      # True = bypass, False = require password
+ADMIN_PASSWORD_DEFAULT = "admin"
+
+DISABLE_LOGIN = _resolve_bool("DISABLE_ADMIN_PASSWORD", DISABLE_ADMIN_PASSWORD_DEFAULT)
+ADMIN_PASSWORD = (_resolve_str("ADMIN_PASSWORD", ADMIN_PASSWORD_DEFAULT) or "").strip()
 
 if DISABLE_LOGIN:
-    pass  # no banner
+    # Bypass gate
+    pass
 else:
-    ADMIN_PASSWORD = (_get_secret("ADMIN_PASSWORD", "") or "").strip()
     if not ADMIN_PASSWORD:
-        st.error("ADMIN_PASSWORD is not set in Secrets. Add it in Settings → Secrets.")
+        st.error("ADMIN_PASSWORD is not set (Secrets/Env).")
         st.stop()
-
     if "auth_ok" not in st.session_state:
         st.session_state["auth_ok"] = False
-
     if not st.session_state["auth_ok"]:
         st.subheader("Admin sign-in")
         pw = st.text_input("Password", type="password", key="admin_pw")
@@ -265,8 +275,8 @@ def build_engine() -> Tuple[Engine, Dict]:
     """Prefer Turso/libsql embedded replica; otherwise local sqlite if FORCE_LOCAL=1."""
     info: Dict = {}
 
-    url = (_get_secret("TURSO_DATABASE_URL", "") or "").strip()
-    token = (_get_secret("TURSO_AUTH_TOKEN", "") or "").strip()
+    url = (_resolve_str("TURSO_DATABASE_URL", "") or "").strip()
+    token = (_resolve_str("TURSO_AUTH_TOKEN", "") or "").strip()
 
     if not url:
         # No remote configured → plain local file DB
@@ -760,7 +770,7 @@ with _tabs[1]:
         _apply_edit_reset_if_needed()
         _apply_delete_reset_if_needed()
 
-        # ----- EDIT: ID-backed selection with format_func (no duplicate-label hack, no index) -----
+        # ----- EDIT: ID-backed selection with format_func -----
         ids = df_all["id"].astype(int).tolist()
         id_to_row = {int(r["id"]): r for _, r in df_all.iterrows()}
 
@@ -770,7 +780,6 @@ with _tabs[1]:
             r = id_to_row.get(int(i), None)
             if r is None:
                 return f"{i}"
-            # Build label without triggering pandas truthiness checks
             cat = (r.get("category") or "")
             svc = (r.get("service") or "")
             tail = " / ".join([x for x in (cat, svc) if x]).strip(" /")
@@ -904,7 +913,6 @@ with _tabs[1]:
         )
         if sel_label_del != "— Select —":
             # map back to id cheaply
-            # Find matching id by label (rare operation; list is small)
             rev = { _fmt_vendor(i): i for i in ids }
             st.session_state["delete_vendor_id"] = int(rev.get(sel_label_del))
         else:
