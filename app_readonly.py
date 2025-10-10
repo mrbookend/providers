@@ -25,13 +25,12 @@ except Exception:
 # Utilities
 # =============================
 def _get_secret(name: str, default: Optional[str | int | dict | bool] = None):
-    """Prefer Streamlit secrets; tolerate local/no-secrets contexts."""
+    """Prefer Streamlit secrets; tolerate env fallback only for simple strings."""
     try:
         if name in st.secrets:
             return st.secrets[name]
     except Exception:
         pass
-    # Fallback to env only for simple strings (never for dicts)
     if isinstance(default, (str, type(None))):
         return os.getenv(name, default)
     return default
@@ -46,11 +45,7 @@ def _as_bool(v: Optional[str | bool], default: bool = False) -> bool:
 
 
 def _to_int(v, default: int) -> int:
-    """Coerce widths to int safely:
-    - ints/floats -> int()
-    - strings like '200px', ' 180 ' -> digits extracted
-    - empty/invalid -> default
-    """
+    """Coerce to int; tolerate '200px', ' 180 ', floats, etc."""
     try:
         if isinstance(v, bool):
             return default
@@ -61,7 +56,7 @@ def _to_int(v, default: int) -> int:
         s = str(v).strip()
         if not s:
             return default
-        m = re.search(r"-?\d+", s)  # first integer, allows negatives but clamp later
+        m = re.search(r"-?\d+", s)
         if not m:
             return default
         n = int(m.group(0))
@@ -71,16 +66,24 @@ def _to_int(v, default: int) -> int:
 
 
 def _get_help_md() -> str:
-    """Safe help MD: prefer secrets HELP_MD, fall back to a sensible default."""
-    md = ""
+    """Prefer top-level HELP_MD; if missing, also look under widths; else fallback."""
+    # 1) top-level
     try:
-        md = (st.secrets.get("HELP_MD", "") or "").strip()
+        top = (st.secrets.get("HELP_MD", "") or "").strip()
+        if top:
+            return top
     except Exception:
-        md = ""
-    if md:
-        return md
-
-    # Built-in fallback if no secret present
+        pass
+    # 2) nested in [COLUMN_WIDTHS_PX_READONLY] (common paste mistake)
+    try:
+        nested = st.secrets.get("COLUMN_WIDTHS_PX_READONLY", {})
+        if isinstance(nested, dict):
+            cand = (nested.get("HELP_MD", "") or "").strip()
+            if cand:
+                return cand
+    except Exception:
+        pass
+    # 3) built-in fallback
     return textwrap.dedent(
         """
         # How to use this list
@@ -107,10 +110,9 @@ st.markdown(
     <style>
       .block-container {{
         max-width: {PAGE_MAX_WIDTH_PX}px;
-        /* halve typical left padding for a tighter left margin */
+        /* tighten left margin ~50% */
         padding-left: 0.75rem;
       }}
-      /* Make markdown and table text wrap naturally */
       .prov-table td, .prov-table th {{
         white-space: normal;
         word-break: break-word;
@@ -125,7 +127,6 @@ st.markdown(
         z-index: 2;
         border-bottom: 2px solid #ddd;
       }}
-      /* Optional sticky first column support */
       .prov-table td.sticky, .prov-table th.sticky {{
         position: sticky;
         left: 0;
@@ -133,16 +134,8 @@ st.markdown(
         z-index: 3;
         box-shadow: 1px 0 0 #eee;
       }}
-      /* Table container allows horizontal scroll if needed */
-      .prov-wrap {{
-        overflow-x: auto;
-      }}
-      /* Help button row alignment */
-      .help-row {{
-        display: flex;
-        align-items: center;
-        gap: 12px;
-      }}
+      .prov-wrap {{ overflow-x: auto; }}
+      .help-row {{ display: flex; align-items: center; gap: 12px; }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -157,7 +150,7 @@ if SHOW_DIAGS:
 
 
 # =============================
-# Column labels & widths (from secrets) — SAFE (no mutation)
+# Column labels & widths (SAFE)
 # =============================
 _readonly_labels_raw = _get_secret("READONLY_COLUMN_LABELS", {}) or {}
 _col_widths_raw = _get_secret("COLUMN_WIDTHS_PX_READONLY", {}) or {}
@@ -177,28 +170,29 @@ _DEFAULT_WIDTHS = {
     "keywords": 90,
 }
 
-# Build user widths safely (coerce each value)
+# Only accept known width keys; ignore accidental extras (e.g., HELP_MD)
 _user_widths: Dict[str, int] = {}
 for k, v in dict(_col_widths_raw).items():
-    _user_widths[str(k)] = _to_int(v, _DEFAULT_WIDTHS.get(str(k), 140))
+    sk = str(k)
+    if sk not in _DEFAULT_WIDTHS:
+        continue
+    _user_widths[sk] = _to_int(v, _DEFAULT_WIDTHS.get(sk, 140))
 
-# Merge defaults (left) with user-specified (right); user values win
 COLUMN_WIDTHS_PX_READONLY: Dict[str, int] = {**_DEFAULT_WIDTHS, **_user_widths}
 
-# Optional hardening clamp (keeps us safe if future changes inject bad values)
+# Clamp invalids
 for k, v in list(COLUMN_WIDTHS_PX_READONLY.items()):
     if not isinstance(v, int) or v <= 0:
         COLUMN_WIDTHS_PX_READONLY[k] = _DEFAULT_WIDTHS.get(k, 120)
 
-# Optional sticky first column
 STICKY_FIRST_COL: bool = _as_bool(_get_secret("READONLY_STICKY_FIRST_COL", False), False)
 
-# Columns to hide from the on-screen table (search still uses them)
+# Hide these in display; still searchable
 HIDE_IN_DISPLAY = {"id", "keywords", "created_at", "updated_at", "updated_by"}
 
 
 # =============================
-# Database engine (Turso first; guarded fallback)
+# Database engine
 # =============================
 def build_engine() -> Tuple[Engine, Dict[str, str]]:
     info = {}
@@ -219,7 +213,7 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
         )
         return engine, info
 
-    # Fallback (useful for local dev). In prod you may disable this path.
+    # Fallback (local dev only)
     local_path = os.path.abspath("./vendors.db")
     local_url = f"sqlite:///{local_path}"
     engine = create_engine(local_url, pool_pre_ping=True)
@@ -239,19 +233,8 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
 # Data access
 # =============================
 VENDOR_COLS = [
-    "id",
-    "category",
-    "service",
-    "business_name",
-    "contact_name",
-    "phone",
-    "address",
-    "website",
-    "notes",
-    "keywords",
-    "created_at",
-    "updated_at",
-    "updated_by",
+    "id", "category", "service", "business_name", "contact_name", "phone",
+    "address", "website", "notes", "keywords", "created_at", "updated_at", "updated_by",
 ]
 
 
@@ -260,7 +243,6 @@ def fetch_vendors(engine: Engine) -> pd.DataFrame:
     with engine.begin() as conn:
         df = pd.read_sql(sql_text(sql), conn)
 
-    # Normalize website to clickable HTML anchor if it looks like a URL
     def _mk_anchor(v: str) -> str:
         if not isinstance(v, str) or not v.strip():
             return ""
@@ -274,21 +256,19 @@ def fetch_vendors(engine: Engine) -> pd.DataFrame:
     if "website" in df.columns:
         df["website"] = df["website"].fillna("").astype(str).map(_mk_anchor)
 
-    # Ensure strings (for consistent search)
     for c in df.columns:
-        if c not in ("id", "created_at", "updated_at"):  # let id remain int if it is
+        if c not in ("id", "created_at", "updated_at"):
             df[c] = df[c].fillna("").astype(str)
     return df
 
 
 # =============================
-# Filtering (global search)
+# Filtering
 # =============================
 def apply_global_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
     q = (query or "").strip().lower()
     if not q:
         return df
-    # Simple case-insensitive contains across all columns (stringified already)
     mask = pd.Series(False, index=df.index)
     for c in df.columns:
         mask |= df[c].str.lower().str.contains(q, na=False)
@@ -299,19 +279,14 @@ def apply_global_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
 # Rendering
 # =============================
 def _rename_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
-    """Apply label mapping; return df and reverse map (for width lookups)."""
     mapping = {k: READONLY_COLUMN_LABELS.get(k, k.replace("_", " ").title()) for k in df.columns}
     df2 = df.rename(columns={k: mapping[k] for k in df.columns})
-    # Reverse map: display -> original
     rev = {v: k for k, v in mapping.items()}
     return df2, rev
 
 
 def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
-    """Render a basic HTML table with widths and wrapping."""
     df_disp, rev = _rename_columns(df)
-
-    # Build header
     headers = []
     for col in df_disp.columns:
         orig = rev[col]
@@ -322,7 +297,6 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
         )
     thead = "<thead><tr>" + "".join(headers) + "</tr></thead>"
 
-    # Build body
     rows_html: List[str] = []
     first_col_name = df_disp.columns[0] if len(df_disp.columns) else None
     for _, row in df_disp.iterrows():
@@ -332,15 +306,13 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
             val = row[col]
             width = COLUMN_WIDTHS_PX_READONLY.get(orig, 140)
             sticky_cls = "sticky" if (sticky_first and col == first_col_name) else ""
-            # For website column we already built an <a>; for others escape HTML
             if orig == "website":
-                cell_html = val  # already safe anchor or empty string
+                cell_html = val
             else:
                 cell_html = html.escape(str(val) if val is not None else "")
             tds.append(f'<td class="{sticky_cls}" style="min-width:{width}px;max-width:{width}px;">{cell_html}</td>')
         rows_html.append("<tr>" + "".join(tds) + "</tr>")
     tbody = "<tbody>" + "".join(rows_html) + "</tbody>"
-
     return f'<div class="prov-wrap"><table class="prov-table">{thead}{tbody}</table></div>'
 
 
@@ -348,56 +320,47 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
 # Main UI
 # =============================
 def main():
-    # Top row: Help button only (no big title banner)
     with st.container():
         cols = st.columns([1, 8, 1])
         with cols[0]:
             open_help = st.button("Help / Tips", type="primary", use_container_width=True)
         with cols[1]:
             st.caption("Use the global search below to match any word or partial word across all columns.")
-        # cols[2] left empty for spacing/alignment
+        # cols[2] intentionally empty
 
     if open_help:
         with st.expander("Provider Help / Tips", expanded=True):
             st.markdown(_get_help_md())
 
-    # Build DB engine
     engine, info = build_engine()
     if info.get("strategy") == "local_fallback":
         st.warning("Turso credentials not found. Running on local SQLite fallback (`./vendors.db`).")
 
-    # Load data (keep full set for searching)
     try:
         df_full = fetch_vendors(engine)
     except Exception as e:
         st.error(f"Failed to load vendors: {e}")
         return
 
-    # Global search (run against the FULL dataframe so 'keywords' works)
+    # Search runs on the full frame (so 'keywords' works), but display hides selected cols
     st.text_input(
         "",
         key="q",
-        label_visibility="collapsed",  # hides the label line above the box
+        label_visibility="collapsed",
         placeholder="Search e.g., plumb, roofing, 'Inverness', phone digits, etc.",
         help="Case-insensitive, matches partial words across all columns.",
     )
     q = st.session_state.get("q", "")
     filtered_full = apply_global_search(df_full, q)
 
-    # Now hide columns ONLY for display
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
     df_disp = filtered_full[disp_cols]
 
-    # Render as lightweight HTML so wrapping + pixel widths are honored
-    html_table = _build_table_html(df_disp, sticky_first=STICKY_FIRST_COL)
-    st.markdown(html_table, unsafe_allow_html=True)
+    st.markdown(_build_table_html(df_disp, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
 
-    # Downloads (CSV + Excel) — exporting what you SEE (hidden cols omitted).
-    # If you prefer exports to include hidden columns, change df_disp -> filtered_full below.
-
-    # 1) CSV
+    # Downloads (export what you SEE; switch to filtered_full if you want all columns)
     csv_buf = io.StringIO()
-    df_disp.to_csv(csv_buf, index=False)  # export displayed columns
+    df_disp.to_csv(csv_buf, index=False)
     st.download_button(
         "Download providers.csv",
         data=csv_buf.getvalue().encode("utf-8"),
@@ -407,19 +370,14 @@ def main():
         use_container_width=False,
     )
 
-    # 2) Excel (.xlsx) — export href for website column
     excel_df = df_disp.copy()
     if "website" in excel_df.columns:
-        # Extract href from <a href="...">...</a> to plain URL
-        excel_df["website"] = excel_df["website"].str.replace(
-            r'.*href="([^"]+)".*', r"\1", regex=True
-        )
+        excel_df["website"] = excel_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
 
     xlsx_buf = io.BytesIO()
     with pd.ExcelWriter(xlsx_buf, engine="xlsxwriter") as writer:
         excel_df.to_excel(writer, sheet_name="providers", index=False)
     xlsx_buf.seek(0)
-
     st.download_button(
         "Download providers.xlsx",
         data=xlsx_buf.getvalue(),
@@ -429,7 +387,7 @@ def main():
         use_container_width=False,
     )
 
-    # Debug section as a toggle button at the very bottom
+    # Debug
     st.divider()
     if st.button("Debug (status & secrets keys)", type="secondary"):
         dbg = {
@@ -438,15 +396,15 @@ def main():
             "Widths (effective)": COLUMN_WIDTHS_PX_READONLY,
         }
         st.write(dbg)
+        st.caption(f"HELP_MD present (top-level): {'HELP_MD' in getattr(st, 'secrets', {})}")
+        # Also show whether nested HELP_MD exists
+        try:
+            nested = st.secrets.get("COLUMN_WIDTHS_PX_READONLY", {})
+            has_nested_help = isinstance(nested, dict) and bool((nested.get("HELP_MD", "") or "").strip())
+        except Exception:
+            has_nested_help = False
+        st.caption(f"HELP_MD present (nested in widths): {has_nested_help}")
 
-        # Secrets presence diagnostics (temporary)
-        st.caption(f"HELP_MD present: {'HELP_MD' in getattr(st, 'secrets', {})}")
-        st.caption(
-            "Turso secrets — URL: %s | TOKEN: %s"
-            % (bool(_get_secret("TURSO_DATABASE_URL", "")), bool(_get_secret("TURSO_AUTH_TOKEN", "")))
-        )
-
-        # DB probe (kept inside the Debug block)
         try:
             with engine.begin() as conn:
                 cols_v = pd.read_sql(sql_text("PRAGMA table_info(vendors)"), conn)
@@ -456,7 +414,6 @@ def main():
                 for t in ("vendors", "categories", "services"):
                     c = pd.read_sql(sql_text(f"SELECT COUNT(*) AS n FROM {t}"), conn)["n"].iloc[0]
                     counts[t] = int(c)
-
             probe = {
                 "vendors_columns": list(cols_v["name"]) if "name" in cols_v else [],
                 "categories_columns": list(cols_c["name"]) if "name" in cols_c else [],
