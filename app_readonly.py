@@ -20,6 +20,7 @@ try:
 except Exception:
     pass
 
+
 # =============================
 # Utilities
 # =============================
@@ -53,15 +54,14 @@ def _to_int(v, default: int) -> int:
     try:
         if isinstance(v, bool):
             return default
-        if isinstance(v, (int,)):
-            return int(v)
+        if isinstance(v, int):
+            return v
         if isinstance(v, float):
             return int(v)
         s = str(v).strip()
         if not s:
             return default
-        # extract first integer in the string (e.g., "200px" -> 200)
-        m = re.search(r"-?\d+", s)
+        m = re.search(r"-?\d+", s)  # first integer, allows negatives but clamp later
         if not m:
             return default
         n = int(m.group(0))
@@ -86,7 +86,7 @@ def _get_help_md() -> str:
         # How to use this list
         - Use the global search box below to match any word or partial word across all columns.
         - Click any column header to sort ascending/descending (client-side).
-        - Use **Download** at the bottom to export the current table to `providers.csv`.
+        - Use **Download** at the bottom to export the current table to CSV or Excel.
         - Notes and Address wrap to show more text. Phone is normalized when available.
         """
     ).strip()
@@ -98,6 +98,7 @@ def _get_help_md() -> str:
 PAGE_TITLE = _get_secret("page_title", "HCR Providers — Read-Only")
 PAGE_MAX_WIDTH_PX = _to_int(_get_secret("page_max_width_px", 2300), 2300)
 SIDEBAR_STATE = _get_secret("sidebar_state", "collapsed")
+SHOW_DIAGS = _as_bool(_get_secret("READONLY_SHOW_DIAGS", False), False)
 
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
 
@@ -144,7 +145,14 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-st.caption(f"HELP_MD present: {'HELP_MD' in getattr(st, 'secrets', {})}")
+
+if SHOW_DIAGS:
+    st.caption(f"HELP_MD present: {'HELP_MD' in getattr(st, 'secrets', {})}")
+    st.caption(
+        "Turso secrets — URL: %s | TOKEN: %s"
+        % (bool(_get_secret("TURSO_DATABASE_URL", "")), bool(_get_secret("TURSO_AUTH_TOKEN", "")))
+    )
+
 
 # =============================
 # Column labels & widths (from secrets)
@@ -380,7 +388,9 @@ def main():
     html_table = _build_table_html(filtered, sticky_first=STICKY_FIRST_COL)
     st.markdown(html_table, unsafe_allow_html=True)
 
-    # Download CSV (place near the bottom, before debug)
+    # Downloads (CSV + Excel), placed near the bottom, before Debug
+
+    # 1) CSV
     csv_buf = io.StringIO()
     filtered.to_csv(csv_buf, index=False)  # use original column names (not the labeled versions)
     st.download_button(
@@ -392,8 +402,66 @@ def main():
         use_container_width=False,
     )
 
+    # 2) Excel (.xlsx) — export href for website column
+    excel_df = filtered.copy()
+    if "website" in excel_df.columns:
+        # Extract href from <a href="...">...</a> to plain URL
+        excel_df["website"] = excel_df["website"].str.replace(
+            r'.*href="([^"]+)".*', r"\1", regex=True
+        )
+
+    xlsx_buf = io.BytesIO()
+    with pd.ExcelWriter(xlsx_buf, engine="xlsxwriter") as writer:
+        excel_df.to_excel(writer, sheet_name="providers", index=False)
+    xlsx_buf.seek(0)
+
+    st.download_button(
+        "Download providers.xlsx",
+        data=xlsx_buf.getvalue(),
+        file_name="providers.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="secondary",
+        use_container_width=False,
+    )
+
     # Debug section as a toggle button at the very bottom
     st.divider()
+    if st.button("Debug (status & secrets keys)", type="secondary"):
+        dbg = {
+            "DB (resolved)": info,
+            "Secrets keys": sorted(list(getattr(st, "secrets", {}).keys())) if hasattr(st, "secrets") else [],
+            "Widths (effective)": COLUMN_WIDTHS_PX_READONLY,
+        }
+        st.write(dbg)
+
+        # Secrets presence diagnostics (temporary)
+        st.caption(f"HELP_MD present: {'HELP_MD' in getattr(st, 'secrets', {})}")
+        st.caption(
+            "Turso secrets — URL: %s | TOKEN: %s"
+            % (bool(_get_secret("TURSO_DATABASE_URL", "")), bool(_get_secret("TURSO_AUTH_TOKEN", "")))
+        )
+
+        # DB probe (kept inside the Debug block)
+        try:
+            with engine.begin() as conn:
+                cols_v = pd.read_sql(sql_text("PRAGMA table_info(vendors)"), conn)
+                cols_c = pd.read_sql(sql_text("PRAGMA table_info(categories)"), conn)
+                cols_s = pd.read_sql(sql_text("PRAGMA table_info(services)"), conn)
+                counts = {}
+                for t in ("vendors", "categories", "services"):
+                    c = pd.read_sql(sql_text(f"SELECT COUNT(*) AS n FROM {t}"), conn)["n"].iloc[0]
+                    counts[t] = int(c)
+
+            probe = {
+                "vendors_columns": list(cols_v["name"]) if "name" in cols_v else [],
+                "categories_columns": list(cols_c["name"]) if "name" in cols_c else [],
+                "services_columns": list(cols_s["name"]) if "name" in cols_s else [],
+                "counts": counts,
+            }
+            st.write(probe)
+        except Exception as e:
+            st.write({"db_probe_error": str(e)})
+
 
 if __name__ == "__main__":
     main()
