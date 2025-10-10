@@ -88,3 +88,7 @@ This repo uses a simple, low-drama workflow that keeps `main` clean and the Stre
 - **Why approvals = 0?** Solo maintainer—GitHub won’t count your own approval.
 - **What about status checks?** Leave off unless you’ve set up CI; otherwise PRs will be blocked.
 - **Where do secrets live?** Only in Streamlit Cloud → App Secrets (never in the repo).
+## Quick Smoke Test (Pre-Deploy)
+Run a 1-minute database check before pushing to Streamlit Cloud:
+```bash
+python scripts/smoke.py
