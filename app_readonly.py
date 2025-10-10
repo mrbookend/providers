@@ -120,6 +120,7 @@ PAGE_TITLE = _get_secret("page_title", "HCR Providers — Read-Only")
 PAGE_MAX_WIDTH_PX = _to_int(_get_secret("page_max_width_px", 2300), 2300)
 SIDEBAR_STATE = _get_secret("sidebar_state", "collapsed")
 SHOW_DIAGS = _as_bool(_get_secret("READONLY_SHOW_DIAGS", False), False)
+SHOW_STATUS = _as_bool(_get_secret("READONLY_SHOW_STATUS", False), False)
 
 # secrets-driven padding (matches admin app behavior)
 PAD_LEFT_CSS = _css_len_from_secret(_get_secret("page_left_padding_px", "12"), 12)
@@ -354,18 +355,6 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
 # Main UI
 # =============================
 def main():
-    with st.container():
-        cols = st.columns([1, 8, 1])
-        with cols[0]:
-            open_help = st.button("Help / Tips", type="primary", use_container_width=True)
-        with cols[1]:
-            st.caption("Use the global search below to match any word or partial word across all columns.")
-        # cols[2] intentionally empty
-
-    if open_help:
-        with st.expander("Provider Help / Tips", expanded=True):
-            st.markdown(_get_help_md())
-
     engine, info = build_engine()
     if info.get("strategy") == "local_fallback":
         st.warning("Turso credentials not found. Running on local SQLite fallback (`./vendors.db`).")
@@ -382,7 +371,7 @@ def main():
         key="q",
         label_visibility="collapsed",
         placeholder="Search e.g., plumb, roofing, 'Inverness', phone digits, etc.",
-        help="Case-insensitive, matches partial words across all columns.",
+        help="Case-insensitive, matches partial words across all columns. Tip text is also in Help / Tips.",
     )
     q = st.session_state.get("q", "")
     filtered_full = apply_global_search(df_full, q)
@@ -391,11 +380,11 @@ def main():
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
     df_disp_all = filtered_full[disp_cols]
 
-    # ----- Sort controls + Download buttons on the SAME ROW (right side) -----
+    # ----- Controls Row: Help (left) + Downloads/Sort (right) -----
+    # Exclude 'website' from sort choices (HTML anchors)
     def _label_for(col_key: str) -> str:
         return READONLY_COLUMN_LABELS.get(col_key, col_key.replace("_", " ").title())
 
-    # Exclude 'website' from sort choices (HTML anchors)
     sortable_cols = [c for c in disp_cols if c != "website"]
     sort_labels = [_label_for(c) for c in sortable_cols]
 
@@ -403,17 +392,18 @@ def main():
     default_sort_col = "business_name" if "business_name" in sortable_cols else sortable_cols[0]
     default_label = _label_for(default_sort_col)
 
-    # Layout: big spacer on left → CSV → XLSX → Sort By (narrow) → Order (narrow)
-    c_spacer, c_csv, c_xlsx, c_sort, c_order = st.columns([6, 2, 2, 2, 2], vertical_alignment="center")
+    # Layout: Help | spacer | CSV | XLSX | Sort | Order
+    c_help, c_spacer, c_csv, c_xlsx, c_sort, c_order = st.columns([2, 6, 2, 2, 2, 2], vertical_alignment="center")
 
-    # Sort controls (compact)
+    with c_help:
+        open_help = st.button("Help / Tips", type="primary", use_container_width=True)
+
     with c_sort:
         chosen_label = st.selectbox(
             "Sort by",
             options=sort_labels,
             index=sort_labels.index(default_label),
             key="sort_by_label",
-            help=None,
         )
     with c_order:
         order = st.selectbox(
@@ -421,7 +411,6 @@ def main():
             options=["Ascending", "Descending"],
             index=0,
             key="sort_order",
-            help=None,
         )
 
     sort_col = sortable_cols[sort_labels.index(chosen_label)]
@@ -472,8 +461,14 @@ def main():
             use_container_width=True,
         )
 
-    # Tiny status text tucked under the row (not taking full width)
-    st.caption(f"{len(df_disp_sorted)} matching provider(s). Viewport rows: {VIEWPORT_ROWS}")
+    # Optional status line (toggle via Secrets)
+    if SHOW_STATUS:
+        st.caption(f"{len(df_disp_sorted)} matching provider(s). Viewport rows: {VIEWPORT_ROWS}")
+
+    # Show Help / Tips content if clicked
+    if open_help:
+        with st.expander("Provider Help / Tips", expanded=True):
+            st.markdown(_get_help_md())
 
     # ---------------- Scrollable full table (admin-style viewport) ----------------
     st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
