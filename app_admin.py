@@ -447,7 +447,7 @@ def _execute_append_only(
             cols = list(without_id_df.columns)  # 'id' removed already
             placeholders = ", ".join(":" + c for c in cols)
             stmt = sql_text(f"INSERT INTO vendors ({', '.join(cols)}) VALUES ({placeholders})")
-            conn.execute(stmt, without_id_df.to_dict(orient="records"))
+            conn.execute(stmt, with_id_df.to_dict(orient="records"))
             inserted += len(without_id_df)
 
     return inserted
@@ -548,9 +548,24 @@ with _tabs[1]:
         col1, col2 = st.columns(2)
         with col1:
             st.text_input("Provider *", key="add_business_name")
-            st.selectbox("Category *", options=cats, index=0 if cats else None,
-                         placeholder="Select category", key="add_category")
-            st.selectbox("Service (optional)", options=[""] + servs, index=0, key="add_service")
+
+            # Category: include "" placeholder to match default session state
+            _add_cat_options = [""] + (cats or [])
+            _add_cat_value = (st.session_state.get("add_category") or "")
+            if _add_cat_value not in _add_cat_options:
+                _add_cat_value = ""
+            _add_cat_index = _add_cat_options.index(_add_cat_value)
+            st.selectbox(
+                "Category *",
+                options=_add_cat_options,
+                index=_add_cat_index,
+                key="add_category",
+                placeholder="Select category",
+            )
+
+            # Service: keep "" first
+            st.selectbox("Service (optional)", options=[""] + (servs or []), index=0, key="add_service")
+
             st.text_input("Contact Name", key="add_contact_name")
             st.text_input("Phone (10 digits or blank)", key="add_phone")
         with col2:
@@ -656,19 +671,34 @@ with _tabs[1]:
                 # refresh choices each render
                 cats = list_names(engine, "categories")
                 servs = list_names(engine, "services")
+
+                # CATEGORY: include "" so a blank/default doesn't crash
+                _edit_cat_options = [""] + (cats or [])
+                _edit_cat_value = (st.session_state.get("edit_category") or "")
+                if _edit_cat_value not in _edit_cat_options:
+                    _edit_cat_value = ""
+                _edit_cat_index = _edit_cat_options.index(_edit_cat_value)
                 st.selectbox(
                     "Category *",
-                    options=cats,
-                    index=(cats.index(st.session_state["edit_category"]) if st.session_state["edit_category"] in cats else 0 if cats else None),
+                    options=_edit_cat_options,
+                    index=_edit_cat_index,
                     key="edit_category",
+                    placeholder="Select category",
                 )
-                svc_opts = [""] + servs
+
+                # SERVICE: keep "" first
+                svc_opts = [""] + (servs or [])
+                _edit_svc_value = (st.session_state.get("edit_service") or "")
+                if _edit_svc_value not in svc_opts:
+                    _edit_svc_value = ""
+                _edit_svc_index = svc_opts.index(_edit_svc_value)
                 st.selectbox(
                     "Service (optional)",
                     options=svc_opts,
-                    index=(svc_opts.index(st.session_state["edit_service"]) if st.session_state["edit_service"] in svc_opts else 0),
+                    index=_edit_svc_index,
                     key="edit_service",
                 )
+
                 st.text_input("Contact Name", key="edit_contact_name")
                 st.text_input("Phone (10 digits or blank)", key="edit_phone")
             with col2:
