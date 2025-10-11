@@ -407,7 +407,12 @@ def build_engine() -> Tuple[Engine, Dict]:
         raise
 
 
-def ensure_schema(engine: Engine) -> None:
+def ensure_schema(engine: Engine, show_debug: bool = False) -> None:
+    """
+    Execute schema DDL safely, one statement at a time, using driver-level execution.
+    Set show_debug=True (or SCHEMA_DEBUG=true in secrets/env) to print each statement.
+    """
+    # Base DDL (note: keep each CREATE ... as its own statement for clarity)
     stmts = [
         """
         CREATE TABLE IF NOT EXISTS vendors (
@@ -441,207 +446,45 @@ def ensure_schema(engine: Engine) -> None:
         "CREATE INDEX IF NOT EXISTS idx_vendors_cat ON vendors(category)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_bus ON vendors(business_name)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_kw  ON vendors(keywords)",
-        # helpful functional indexes for case-insensitive operations used by UI
         "CREATE INDEX IF NOT EXISTS idx_vendors_bus_lower ON vendors(lower(business_name))",
         "CREATE INDEX IF NOT EXISTS idx_vendors_cat_lower ON vendors(lower(category))",
         "CREATE INDEX IF NOT EXISTS idx_vendors_svc_lower ON vendors(lower(service))",
         "CREATE INDEX IF NOT EXISTS idx_vendors_phone ON vendors(phone)",
     ]
+
+    def _split_sql(s: str) -> list[str]:
+        # Conservative split on ';', remove empties; keep order
+        parts = [p.strip() for p in s.replace("\r", "").split(";")]
+        return [p for p in parts if p]
+
+    # Flatten in case future edits accidentally introduce multi-statement blocks
+    flattened: list[str] = []
+    for s in stmts:
+        flattened.extend(_split_sql(s))
+
+    from sqlalchemy import exc as sa_exc
+
     with engine.begin() as conn:
-        for s in stmts:
-            conn.execute(sql_text(s))
-
-
-def _normalize_phone(val: str | None) -> str:
-    if not val:
-        return ""
-    digits = re.sub(r"\D", "", str(val))
-    if len(digits) == 11 and digits.startswith("1"):
-        digits = digits[1:]
-    return digits if len(digits) == 10 else digits
-
-
-def _format_phone(val: str | None) -> str:
-    s = re.sub(r"\D", "", str(val or ""))
-    if len(s) == 10:
-        return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
-    return (val or "").strip()
-
-
-def _sanitize_url(url: str | None) -> str:
-    if not url:
-        return ""
-    url = url.strip()
-    if url and not re.match(r"^https?://", url, re.I):
-        url = "https://" + url
-    return url
-
-
-def load_df(engine: Engine) -> pd.DataFrame:
-    with engine.begin() as conn:
-        df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
-
-    for col in [
-        "contact_name",
-        "phone",
-        "address",
-        "website",
-        "notes",
-        "keywords",
-        "service",
-        "created_at",
-        "updated_at",
-        "updated_by",
-    ]:
-        if col not in df.columns:
-            df[col] = ""
-
-    # Display-friendly phone; storage remains digits
-    df["phone_fmt"] = df["phone"].apply(_format_phone)
-
-    return df
-
-
-def list_names(engine: Engine, table: str) -> list[str]:
-    with engine.begin() as conn:
-        rows = conn.execute(sql_text(f"SELECT name FROM {table} ORDER BY lower(name)")).fetchall()
-    return [r[0] for r in rows]
-
-
-def usage_count(engine: Engine, col: str, name: str) -> int:
-    with engine.begin() as conn:
-        cnt = conn.execute(sql_text(f"SELECT COUNT(*) FROM vendors WHERE {col} = :n"), {"n": name}).scalar()
-    return int(cnt or 0)
-
-
-# -----------------------------
-# CSV Restore helpers (append-only, ID-checked)
-# -----------------------------
-def _get_table_columns(engine: Engine, table: str) -> list[str]:
-    with engine.connect() as conn:
-        res = conn.execute(sql_text(f"SELECT * FROM {table} LIMIT 0"))
-        return list(res.keys())
-
-
-def _fetch_existing_ids(engine: Engine, table: str = "vendors") -> set[int]:
-    with engine.connect() as conn:
-        rows = conn.execute(sql_text(f"SELECT id FROM {table}")).all()
-    return {int(r[0]) for r in rows if r[0] is not None}
-
-
-def _prepare_csv_for_append(
-    engine: Engine,
-    csv_df: pd.DataFrame,
-    *,
-    normalize_phone: bool,
-    trim_strings: bool,
-    treat_missing_id_as_autoincrement: bool,
-) -> tuple[pd.DataFrame, pd.DataFrame, list[int], list[str]]:
-    """
-    Returns: (with_id_df, without_id_df, rejected_existing_ids, insertable_columns)
-    DataFrames are already filtered to allowed columns and safe to insert.
-    """
-    df = csv_df.copy()
-
-    # Trim strings
-    if trim_strings:
-        for c in df.columns:
-            if pd.api.types.is_object_dtype(df[c]):
-                df[c] = df[c].astype(str).str.strip()
-
-    # Normalize phone to digits
-    if normalize_phone and "phone" in df.columns:
-        df["phone"] = df["phone"].astype(str).str.replace(r"\D+", "", regex=True)
-
-    db_cols = _get_table_columns(engine, "vendors")
-    insertable_cols = [c for c in df.columns if c in db_cols]
-
-    # Required columns present?
-    missing_req = [c for c in REQUIRED_VENDOR_COLUMNS if c not in df.columns]
-    if missing_req:
-        raise ValueError(f"Missing required column(s) in CSV: {missing_req}")
-
-    # Handle id column
-    has_id = "id" in df.columns
-    existing_ids = _fetch_existing_ids(engine)
-
-    if has_id:
-        df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
-        # Reject rows colliding with existing ids
-        mask_conflict = df["id"].notna() & df["id"].astype("Int64").astype("int", errors="ignore").isin(existing_ids)
-        rejected_existing_ids = df.loc[mask_conflict, "id"].dropna().astype(int).tolist()
-        df_ok = df.loc[~mask_conflict].copy()
-
-        # Split by having id vs. not
-        with_id_df = df_ok[df_ok["id"].notna()].copy()
-        without_id_df = df_ok[df_ok["id"].isna()].copy() if treat_missing_id_as_autoincrement else pd.DataFrame(columns=df.columns)
-    else:
-        rejected_existing_ids = []
-        with_id_df = pd.DataFrame(columns=df.columns)
-        without_id_df = df.copy()
-
-    # Limit to insertable columns and coerce NaN->None for DB
-    def _prep_cols(d: pd.DataFrame, drop_id: bool) -> pd.DataFrame:
-        cols = [c for c in insertable_cols if (c != "id" if drop_id else True)]
-        if not cols:
-            return pd.DataFrame(columns=[])
-        dd = d[cols].copy()
-        for c in cols:
-            dd[c] = dd[c].where(pd.notnull(dd[c]), None)
-        return dd
-
-    with_id_df = _prep_cols(with_id_df, drop_id=False)
-    without_id_df = _prep_cols(without_id_df, drop_id=True)
-
-    # Duplicate ids inside the CSV itself?
-    if "id" in csv_df.columns:
-        dup_ids = (
-            csv_df["id"]
-            .pipe(pd.to_numeric, errors="coerce")
-            .dropna()
-            .astype(int)
-            .duplicated(keep=False)
-        )
-        if dup_ids.any():
-            dups = sorted(csv_df.loc[dup_ids, "id"].dropna().astype(int).unique().tolist())
-            raise ValueError(f"Duplicate id(s) inside CSV: {dups}")
-
-    return with_id_df, without_id_df, rejected_existing_ids, insertable_cols
-
-
-def _execute_append_only(
-    engine: Engine,
-    with_id_df: pd.DataFrame,
-    without_id_df: pd.DataFrame,
-    insertable_cols: list[str],
-) -> int:
-    """Executes INSERTs in a single transaction. Returns total inserted rows."""
-    inserted = 0
-    with engine.begin() as conn:
-        # with explicit id
-        if not with_id_df.empty:
-            cols = list(with_id_df.columns)  # includes 'id' by construction
-            placeholders = ", ".join(":" + c for c in cols)
-            stmt = sql_text(f"INSERT INTO vendors ({', '.join(cols)}) VALUES ({placeholders})")
-            conn.execute(stmt, with_id_df.to_dict(orient="records"))
-            inserted += len(with_id_df)
-
-        # without id (autoincrement)
-        if not without_id_df.empty:
-            cols = list(without_id_df.columns)  # 'id' removed already
-            placeholders = ", ".join(":" + c for c in cols)
-            stmt = sql_text(f"INSERT INTO vendors ({', '.join(cols)}) VALUES ({placeholders})")
-            conn.execute(stmt, without_id_df.to_dict(orient="records"))
-            inserted += len(without_id_df)
-
-    return inserted
-
+        for stmt in flattened:
+            if show_debug:
+                st.write(":wrench: **DDL** →", f"`{stmt}`")
+            try:
+                conn.exec_driver_sql(stmt)
+            except sa_exc.OperationalError as e:
+                msg = str(e).lower()
+                # Skip benign duplicates across different SQLite/libsql builds
+                if ("already exists" in msg) or ("duplicate" in msg):
+                    if show_debug:
+                        st.write(":information_source: skipped benign error:", str(e))
+                    continue
+                raise
 
 # -----------------------------
 # UI
 # -----------------------------
 engine, engine_info = build_engine()
-ensure_schema(engine)
+# Optional DDL debug controlled by secret/env: SCHEMA_DEBUG=true
+ensure_schema(engine, show_debug=_resolve_bool("SCHEMA_DEBUG", False))
 
 # Apply WAL PRAGMAs for local SQLite (not libsql driver)
 try:
@@ -1170,6 +1013,185 @@ with _tabs[3]:
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Reassign+delete service failed: {e}")
+
+# -----------------------------
+# Data access helpers (after ensure_schema)
+# -----------------------------
+def _normalize_phone(val: str | None) -> str:
+    if not val:
+        return ""
+    digits = re.sub(r"\D", "", str(val))
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits if len(digits) == 10 else digits
+
+def _format_phone(val: str | None) -> str:
+    s = re.sub(r"\D", "", str(val or ""))
+    if len(s) == 10:
+        return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
+    return (val or "").strip()
+
+def _sanitize_url(url: str | None) -> str:
+    if not url:
+        return ""
+    url = url.strip()
+    if url and not re.match(r"^https?://", url, re.I):
+        url = "https://" + url
+    return url
+
+def load_df(engine: Engine) -> pd.DataFrame:
+    with engine.begin() as conn:
+        df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
+
+    for col in [
+        "contact_name",
+        "phone",
+        "address",
+        "website",
+        "notes",
+        "keywords",
+        "service",
+        "created_at",
+        "updated_at",
+        "updated_by",
+    ]:
+        if col not in df.columns:
+            df[col] = ""
+
+    # Display-friendly phone; storage remains digits
+    df["phone_fmt"] = df["phone"].apply(_format_phone)
+
+    return df
+
+def list_names(engine: Engine, table: str) -> list[str]:
+    with engine.begin() as conn:
+        rows = conn.execute(sql_text(f"SELECT name FROM {table} ORDER BY lower(name)")).fetchall()
+    return [r[0] for r in rows]
+
+def usage_count(engine: Engine, col: str, name: str) -> int:
+    with engine.begin() as conn:
+        cnt = conn.execute(sql_text(f"SELECT COUNT(*) FROM vendors WHERE {col} = :n"), {"n": name}).scalar()
+    return int(cnt or 0)
+
+# -----------------------------
+# Maintenance tab (export/import/cleanup)
+# -----------------------------
+# CSV Restore helpers (append-only, ID-checked)
+def _get_table_columns(engine: Engine, table: str) -> list[str]:
+    with engine.connect() as conn:
+        res = conn.execute(sql_text(f"SELECT * FROM {table} LIMIT 0"))
+        return list(res.keys())
+
+def _fetch_existing_ids(engine: Engine, table: str = "vendors") -> set[int]:
+    with engine.connect() as conn:
+        rows = conn.execute(sql_text(f"SELECT id FROM {table}")).all()
+    return {int(r[0]) for r in rows if r[0] is not None}
+
+def _prepare_csv_for_append(
+    engine: Engine,
+    csv_df: pd.DataFrame,
+    *,
+    normalize_phone: bool,
+    trim_strings: bool,
+    treat_missing_id_as_autoincrement: bool,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[int], list[str]]:
+    """
+    Returns: (with_id_df, without_id_df, rejected_existing_ids, insertable_cols)
+    DataFrames are already filtered to allowed columns and safe to insert.
+    """
+    df = csv_df.copy()
+
+    # Trim strings
+    if trim_strings:
+        for c in df.columns:
+            if pd.api.types.is_object_dtype(df[c]):
+                df[c] = df[c].astype(str).str.strip()
+
+    # Normalize phone to digits
+    if normalize_phone and "phone" in df.columns:
+        df["phone"] = df["phone"].astype(str).str.replace(r"\D+", "", regex=True)
+
+    db_cols = _get_table_columns(engine, "vendors")
+    insertable_cols = [c for c in df.columns if c in db_cols]
+
+    # Required columns present?
+    missing_req = [c for c in REQUIRED_VENDOR_COLUMNS if c not in df.columns]
+    if missing_req:
+        raise ValueError(f"Missing required column(s) in CSV: {missing_req}")
+
+    # Handle id column
+    has_id = "id" in df.columns
+    existing_ids = _fetch_existing_ids(engine)
+
+    if has_id:
+        df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
+        # Reject rows colliding with existing ids
+        mask_conflict = df["id"].notna() & df["id"].astype("Int64").astype("int", errors="ignore").isin(existing_ids)
+        rejected_existing_ids = df.loc[mask_conflict, "id"].dropna().astype(int).tolist()
+        df_ok = df.loc[~mask_conflict].copy()
+
+        # Split by having id vs. not
+        with_id_df = df_ok[df_ok["id"].notna()].copy()
+        without_id_df = df_ok[df_ok["id"].isna()].copy() if treat_missing_id_as_autoincrement else pd.DataFrame(columns=df.columns)
+    else:
+        rejected_existing_ids = []
+        with_id_df = pd.DataFrame(columns=df.columns)
+        without_id_df = df.copy()
+
+    # Limit to insertable columns and coerce NaN->None for DB
+    def _prep_cols(d: pd.DataFrame, drop_id: bool) -> pd.DataFrame:
+        cols = [c for c in insertable_cols if (c != "id" if drop_id else True)]
+        if not cols:
+            return pd.DataFrame(columns=[])
+        dd = d[cols].copy()
+        for c in cols:
+            dd[c] = dd[c].where(pd.notnull(dd[c]), None)
+        return dd
+
+    with_id_df = _prep_cols(with_id_df, drop_id=False)
+    without_id_df = _prep_cols(without_id_df, drop_id=True)
+
+    # Duplicate ids inside the CSV itself?
+    if "id" in csv_df.columns:
+        dup_ids = (
+            csv_df["id"]
+            .pipe(pd.to_numeric, errors="coerce")
+            .dropna()
+            .astype(int)
+            .duplicated(keep=False)
+        )
+        if dup_ids.any():
+            dups = sorted(csv_df.loc[dup_ids, "id"].dropna().astype(int).unique().tolist())
+            raise ValueError(f"Duplicate id(s) inside CSV: {dups}")
+
+    return with_id_df, without_id_df, rejected_existing_ids, insertable_cols
+
+def _execute_append_only(
+    engine: Engine,
+    with_id_df: pd.DataFrame,
+    without_id_df: pd.DataFrame,
+    insertable_cols: list[str],
+) -> int:
+    """Executes INSERTs in a single transaction. Returns total inserted rows."""
+    inserted = 0
+    with engine.begin() as conn:
+        # with explicit id
+        if not with_id_df.empty:
+            cols = list(with_id_df.columns)  # includes 'id' by construction
+            placeholders = ", ".join(":" + c for c in cols)
+            stmt = sql_text(f"INSERT INTO vendors ({', '.join(cols)}) VALUES ({placeholders})")
+            conn.execute(stmt, with_id_df.to_dict(orient="records"))
+            inserted += len(with_id_df)
+
+        # without id (autoincrement)
+        if not without_id_df.empty:
+            cols = list(without_id_df.columns)  # 'id' removed already
+            placeholders = ", ".join(":" + c for c in cols)
+            stmt = sql_text(f"INSERT INTO vendors ({', '.join(cols)}) VALUES ({placeholders})")
+            conn.execute(stmt, without_id_df.to_dict(orient="records"))
+            inserted += len(without_id_df)
+
+    return inserted
 
 # ---------- Maintenance
 with _tabs[4]:
