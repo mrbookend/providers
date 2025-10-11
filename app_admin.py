@@ -328,6 +328,7 @@ def build_engine() -> Tuple[Engine, Dict]:
 
     url = (_resolve_str("TURSO_DATABASE_URL", "") or "").strip()
     token = (_resolve_str("TURSO_AUTH_TOKEN", "") or "").strip()
+    embedded_path = os.path.abspath(_resolve_str("EMBEDDED_DB_PATH", "vendors-embedded.db") or "vendors-embedded.db")
 
     if not url:
         # No remote configured → plain local file DB
@@ -355,10 +356,10 @@ def build_engine() -> Tuple[Engine, Dict]:
             host = raw.split("://", 1)[1].split("?", 1)[0]  # drop any ?secure=true
             sync_url = f"libsql://{host}"
         else:
-            sync_url = raw  # already libsql://...
+            sync_url = raw.split("?", 1)[0]  # already libsql://...
 
         eng = create_engine(
-            "sqlite+libsql:///vendors-embedded.db",
+            f"sqlite+libsql:///{embedded_path}",
             connect_args={
                 "auth_token": token,
                 "sync_url": sync_url,
@@ -374,7 +375,7 @@ def build_engine() -> Tuple[Engine, Dict]:
             {
                 "using_remote": True,
                 "strategy": "embedded_replica",
-                "sqlalchemy_url": "sqlite+libsql:///vendors-embedded.db",
+                "sqlalchemy_url": f"sqlite+libsql:///{embedded_path}",
                 "dialect": eng.dialect.name,
                 "driver": getattr(eng.dialect, "driver", ""),
                 "sync_url": sync_url,
@@ -706,14 +707,14 @@ with _tabs[0]:
 
     vdf = filtered[view_cols].rename(columns={"phone_fmt": "phone"})
 
-    # Lighter read-only table
+    # Read-only table with clickable website links
     st.dataframe(
         vdf,
         use_container_width=True,
         hide_index=True,
         column_config={
             "business_name": st.column_config.TextColumn("Provider"),
-            "website": st.column_config.TextColumn("website"),
+            "website": st.column_config.LinkColumn("website"),
             "notes": st.column_config.TextColumn(width=420),
             "keywords": st.column_config.TextColumn(width=300),
         },
@@ -1339,14 +1340,18 @@ with _tabs[4]:
         except Exception as e:
             st.error(f"Normalization failed: {e}")
 
-    # Backfill timestamps
+    # Backfill timestamps (fix NULL and empty-string)
     if st.button("Backfill created_at/updated_at when missing"):
         try:
             now = datetime.utcnow().isoformat(timespec="seconds")
             with engine.begin() as conn:
                 conn.execute(
                     sql_text(
-                        "UPDATE vendors SET created_at=COALESCE(created_at, :now), updated_at=COALESCE(updated_at, :now)"
+                        """
+                        UPDATE vendors
+                           SET created_at = CASE WHEN created_at IS NULL OR created_at = '' THEN :now ELSE created_at END,
+                               updated_at = CASE WHEN updated_at IS NULL OR updated_at = '' THEN :now ELSE updated_at END
+                        """
                     ),
                     {"now": now},
                 )
