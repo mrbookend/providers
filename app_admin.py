@@ -103,219 +103,6 @@ def _fetch_with_retry(engine: Engine, sql: str, params: Dict | None = None, *, t
             raise
 
 
-# ---------- Form state helpers (Add / Edit / Delete) ----------
-# Add form keys
-ADD_FORM_KEYS = [
-    "add_business_name", "add_category", "add_service", "add_contact_name",
-    "add_phone", "add_address", "add_website", "add_notes", "add_keywords",
-]
-
-def _init_add_form_defaults():
-    for k in ADD_FORM_KEYS:
-        if k not in st.session_state:
-            st.session_state[k] = ""
-    st.session_state.setdefault("add_form_version", 0)
-    st.session_state.setdefault("_pending_add_reset", False)
-    st.session_state.setdefault("add_last_done", None)
-    st.session_state.setdefault("add_nonce", uuid.uuid4().hex)
-
-def _apply_add_reset_if_needed():
-    """Apply queued reset BEFORE rendering widgets to avoid invalid-option errors."""
-    if st.session_state.get("_pending_add_reset"):
-        for k in ADD_FORM_KEYS:
-            st.session_state[k] = ""
-        st.session_state["_pending_add_reset"] = False
-        st.session_state["add_form_version"] += 1
-
-def _queue_add_form_reset():
-    st.session_state["_pending_add_reset"] = True
-
-# Edit form keys
-EDIT_FORM_KEYS = [
-    "edit_vendor_id", "edit_business_name", "edit_category", "edit_service",
-    "edit_contact_name", "edit_phone", "edit_address", "edit_website",
-    "edit_notes", "edit_keywords", "edit_row_updated_at", "edit_last_loaded_id",
-]
-
-def _init_edit_form_defaults():
-    defaults = {
-        "edit_vendor_id": None,
-        "edit_business_name": "",
-        "edit_category": "",
-        "edit_service": "",
-        "edit_contact_name": "",
-        "edit_phone": "",
-        "edit_address": "",
-        "edit_website": "",
-        "edit_notes": "",
-        "edit_keywords": "",
-        "edit_row_updated_at": None,
-        "edit_last_loaded_id": None,
-    }
-    for k, v in defaults.items():
-        st.session_state.setdefault(k, v)
-    st.session_state.setdefault("edit_form_version", 0)
-    st.session_state.setdefault("_pending_edit_reset", False)
-    st.session_state.setdefault("edit_last_done", None)
-    st.session_state.setdefault("edit_nonce", uuid.uuid4().hex)
-
-def _apply_edit_reset_if_needed():
-    """
-    Apply queued reset BEFORE rendering edit widgets.
-    Also clear the selection (edit_vendor_id) and the selectbox key so the UI returns to “— Select —”.
-    """
-    if st.session_state.get("_pending_edit_reset"):
-        # Clear all edit fields AND selection
-        for k in EDIT_FORM_KEYS:
-            if k == "edit_vendor_id":
-                st.session_state[k] = None
-            elif k in ("edit_row_updated_at", "edit_last_loaded_id"):
-                st.session_state[k] = None
-            else:
-                st.session_state[k] = ""
-        # Also drop the legacy selectbox label key if present (from older builds)
-        if "edit_provider_label" in st.session_state:
-            del st.session_state["edit_provider_label"]
-        st.session_state["_pending_edit_reset"] = False
-        st.session_state["edit_form_version"] += 1
-
-def _queue_edit_form_reset():
-    st.session_state["_pending_edit_reset"] = True
-
-# Delete form keys
-DELETE_FORM_KEYS = ["delete_vendor_id"]
-
-def _init_delete_form_defaults():
-    st.session_state.setdefault("delete_vendor_id", None)
-    st.session_state.setdefault("delete_form_version", 0)
-    st.session_state.setdefault("_pending_delete_reset", False)
-    st.session_state.setdefault("delete_last_done", None)
-    st.session_state.setdefault("delete_nonce", uuid.uuid4().hex)
-
-def _apply_delete_reset_if_needed():
-    if st.session_state.get("_pending_delete_reset"):
-        st.session_state["delete_vendor_id"] = None
-        # Also clear the delete selectbox UI key so it resets to sentinel
-        if "delete_provider_label" in st.session_state:
-            del st.session_state["delete_provider_label"]
-        st.session_state["_pending_delete_reset"] = False
-        st.session_state["delete_form_version"] += 1
-
-def _queue_delete_form_reset():
-    st.session_state["_pending_delete_reset"] = True
-
-# Nonce helpers
-def _nonce(name: str) -> str:
-    return st.session_state.get(f"{name}_nonce")
-
-def _nonce_rotate(name: str) -> None:
-    st.session_state[f"{name}_nonce"] = uuid.uuid4().hex
-
-# General-purpose key helpers (used in Category/Service admins)
-def _clear_keys(*keys: str) -> None:
-    for k in keys:
-        if k in st.session_state:
-            del st.session_state[k]
-
-def _set_empty(*keys: str) -> None:
-    for k in keys:
-        st.session_state[k] = ""
-
-def _reset_select(key: str, sentinel: str = "— Select —") -> None:
-    st.session_state[key] = sentinel
-
-# ---------- Category / Service queued reset helpers ----------
-def _init_cat_defaults():
-    st.session_state.setdefault("cat_form_version", 0)
-    st.session_state.setdefault("_pending_cat_reset", False)
-
-def _apply_cat_reset_if_needed():
-    if st.session_state.get("_pending_cat_reset"):
-        # Clear text inputs
-        st.session_state["cat_add"] = ""
-        st.session_state["cat_rename"] = ""
-        # Reset selects by dropping keys so they render at sentinel on next run
-        for k in ("cat_old", "cat_del", "cat_reassign_to"):
-            if k in st.session_state:
-                del st.session_state[k]
-        st.session_state["_pending_cat_reset"] = False
-        st.session_state["cat_form_version"] += 1
-
-def _queue_cat_reset():
-    st.session_state["_pending_cat_reset"] = True
-
-def _init_svc_defaults():
-    st.session_state.setdefault("svc_form_version", 0)
-    st.session_state.setdefault("_pending_svc_reset", False)
-
-def _apply_svc_reset_if_needed():
-    if st.session_state.get("_pending_svc_reset"):
-        st.session_state["svc_add"] = ""
-        st.session_state["svc_rename"] = ""
-        for k in ("svc_old", "svc_del", "svc_reassign_to"):
-            if k in st.session_state:
-                del st.session_state[k]
-        st.session_state["_pending_svc_reset"] = False
-        st.session_state["svc_form_version"] += 1
-
-def _queue_svc_reset():
-    st.session_state["_pending_svc_reset"] = True
-
-
-# -----------------------------
-# Page config & CSS
-# -----------------------------
-PAGE_TITLE = _resolve_str("page_title", "Vendors Admin") or "Vendors Admin"
-SIDEBAR_STATE = _resolve_str("sidebar_state", "expanded") or "expanded"
-st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
-
-LEFT_PAD_PX = int(_resolve_str("page_left_padding_px", "40") or "40")
-
-st.markdown(
-    f"""
-    <style>
-      [data-testid="stAppViewContainer"] .main .block-container {{
-        padding-left: {LEFT_PAD_PX}px !important;
-        padding-right: 0 !important;
-      }}
-      div[data-testid="stDataFrame"] table {{ white-space: nowrap; }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# -----------------------------
-# Admin sign-in gate (deterministic toggle)
-# -----------------------------
-# Code defaults (lowest precedence) — change here if you want different code-fallbacks.
-DISABLE_ADMIN_PASSWORD_DEFAULT = True      # True = bypass, False = require password
-ADMIN_PASSWORD_DEFAULT = "admin"
-
-DISABLE_LOGIN = _resolve_bool("DISABLE_ADMIN_PASSWORD", DISABLE_ADMIN_PASSWORD_DEFAULT)
-ADMIN_PASSWORD = (_resolve_str("ADMIN_PASSWORD", ADMIN_PASSWORD_DEFAULT) or "").strip()
-
-if DISABLE_LOGIN:
-    # Bypass gate
-    pass
-else:
-    if not ADMIN_PASSWORD:
-        st.error("ADMIN_PASSWORD is not set (Secrets/Env).")
-        st.stop()
-    if "auth_ok" not in st.session_state:
-        st.session_state["auth_ok"] = False
-    if not st.session_state["auth_ok"]:
-        st.subheader("Admin sign-in")
-        pw = st.text_input("Password", type="password", key="admin_pw")
-        if st.button("Sign in"):
-            if _ct_equals((pw or "").strip(), ADMIN_PASSWORD):
-                st.session_state["auth_ok"] = True
-                st.rerun()
-            else:
-                st.error("Incorrect password.")
-        st.stop()
-
-
 # -----------------------------
 # DB helpers
 # -----------------------------
@@ -479,8 +266,123 @@ def ensure_schema(engine: Engine, show_debug: bool = False) -> None:
                     continue
                 raise
 
+
 # -----------------------------
-# UI
+# Data access helpers (DECLARED BEFORE UI)
+# -----------------------------
+def _normalize_phone(val: str | None) -> str:
+    if not val:
+        return ""
+    digits = re.sub(r"\D", "", str(val))
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits if len(digits) == 10 else digits
+
+def _format_phone(val: str | None) -> str:
+    s = re.sub(r"\D", "", str(val or ""))
+    if len(s) == 10:
+        return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
+    return (val or "").strip()
+
+def _sanitize_url(url: str | None) -> str:
+    if not url:
+        return ""
+    url = url.strip()
+    if url and not re.match(r"^https?://", url, re.I):
+        url = "https://" + url
+    return url
+
+def load_df(engine: Engine) -> pd.DataFrame:
+    with engine.begin() as conn:
+        df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
+
+    for col in [
+        "contact_name",
+        "phone",
+        "address",
+        "website",
+        "notes",
+        "keywords",
+        "service",
+        "created_at",
+        "updated_at",
+        "updated_by",
+    ]:
+        if col not in df.columns:
+            df[col] = ""
+
+    # Display-friendly phone; storage remains digits
+    df["phone_fmt"] = df["phone"].apply(_format_phone)
+
+    return df
+
+def list_names(engine: Engine, table: str) -> list[str]:
+    with engine.begin() as conn:
+        rows = conn.execute(sql_text(f"SELECT name FROM {table} ORDER BY lower(name)")).fetchall()
+    return [r[0] for r in rows]
+
+def usage_count(engine: Engine, col: str, name: str) -> int:
+    with engine.begin() as conn:
+        cnt = conn.execute(sql_text(f"SELECT COUNT(*) FROM vendors WHERE {col} = :n"), {"n": name}).scalar()
+    return int(cnt or 0)
+
+
+# -----------------------------
+# Page config & CSS
+# -----------------------------
+PAGE_TITLE = _resolve_str("page_title", "Vendors Admin") or "Vendors Admin"
+SIDEBAR_STATE = _resolve_str("sidebar_state", "expanded") or "expanded"
+st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
+
+LEFT_PAD_PX = int(_resolve_str("page_left_padding_px", "40") or "40")
+
+st.markdown(
+    f"""
+    <style>
+      [data-testid="stAppViewContainer"] .main .block-container {{
+        padding-left: {LEFT_PAD_PX}px !important;
+        padding-right: 0 !important;
+      }}
+      div[data-testid="stDataFrame"] table {{ white-space: nowrap; }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# -----------------------------
+# Admin sign-in gate (deterministic toggle)
+# -----------------------------
+# Code defaults (lowest precedence) — change here if you want different code-fallbacks.
+DISABLE_ADMIN_PASSWORD_DEFAULT = True      # True = bypass, False = require password
+ADMIN_PASSWORD_DEFAULT = "admin"
+
+DISABLE_LOGIN = _resolve_bool("DISABLE_ADMIN_PASSWORD", DISABLE_ADMIN_PASSWORD_DEFAULT)
+ADMIN_PASSWORD = (_resolve_str("ADMIN_PASSWORD", ADMIN_PASSWORD_DEFAULT) or "").strip()
+
+if DISABLE_LOGIN:
+    # Bypass gate
+    pass
+else:
+    if not ADMIN_PASSWORD:
+        st.error("ADMIN_PASSWORD is not set (Secrets/Env).")
+        st.stop()
+    if "auth_ok" not in st.session_state:
+        st.session_state["auth_ok"] = False
+    if not st.session_state["auth_ok"]:
+        st.subheader("Admin sign-in")
+        pw = st.text_input("Password", type="password", key="admin_pw")
+        if st.button("Sign in"):
+            if _ct_equals((pw or "").strip(), ADMIN_PASSWORD):
+                st.session_state["auth_ok"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+        st.stop()
+
+
+# -----------------------------
+# UI (engine + schema init occurs before UI uses helpers)
 # -----------------------------
 engine, engine_info = build_engine()
 # Optional DDL debug controlled by secret/env: SCHEMA_DEBUG=true
@@ -575,8 +477,30 @@ with _tabs[0]:
 with _tabs[1]:
     # ===== Add Vendor =====
     st.subheader("Add Vendor")
+    # Form state helpers
+    ADD_FORM_KEYS = [
+        "add_business_name", "add_category", "add_service", "add_contact_name",
+        "add_phone", "add_address", "add_website", "add_notes", "add_keywords",
+    ]
+    def _init_add_form_defaults():
+        for k in ADD_FORM_KEYS:
+            if k not in st.session_state:
+                st.session_state[k] = ""
+        st.session_state.setdefault("add_form_version", 0)
+        st.session_state.setdefault("_pending_add_reset", False)
+        st.session_state.setdefault("add_last_done", None)
+        st.session_state.setdefault("add_nonce", uuid.uuid4().hex)
+    def _apply_add_reset_if_needed():
+        if st.session_state.get("_pending_add_reset"):
+            for k in ADD_FORM_KEYS:
+                st.session_state[k] = ""
+            st.session_state["_pending_add_reset"] = False
+            st.session_state["add_form_version"] += 1
+    def _queue_add_form_reset():
+        st.session_state["_pending_add_reset"] = True
+    # init/apply
     _init_add_form_defaults()
-    _apply_add_reset_if_needed()  # apply queued reset BEFORE creating widgets
+    _apply_add_reset_if_needed()
 
     cats = list_names(engine, "categories")
     servs = list_names(engine, "services")
@@ -587,13 +511,13 @@ with _tabs[1]:
         with col1:
             st.text_input("Provider *", key="add_business_name")
 
-            # Category select—options include "" placeholder; we DON'T pass index when using session state
+            # Category select
             _add_cat_options = [""] + (cats or [])
             if (st.session_state.get("add_category") or "") not in _add_cat_options:
                 st.session_state["add_category"] = ""
             st.selectbox("Category *", options=_add_cat_options, key="add_category", placeholder="Select category")
 
-            # Service select—same pattern
+            # Service select
             _add_svc_options = [""] + (servs or [])
             if (st.session_state.get("add_service") or "") not in _add_svc_options:
                 st.session_state["add_service"] = ""
@@ -608,6 +532,11 @@ with _tabs[1]:
             st.text_input("Keywords (comma separated)", key="add_keywords")
 
         submitted = st.form_submit_button("Add Vendor")
+
+    def _nonce(name: str) -> str:
+        return st.session_state.get(f"{name}_nonce")
+    def _nonce_rotate(name: str) -> None:
+        st.session_state[f"{name}_nonce"] = uuid.uuid4().hex
 
     if submitted:
         add_nonce = _nonce("add")
@@ -625,7 +554,7 @@ with _tabs[1]:
         notes         = (st.session_state["add_notes"] or "").strip()
         keywords      = (st.session_state["add_keywords"] or "").strip()
 
-        # Minimal-change validation: phone must be 10 digits or blank
+        # Minimal-change validation
         if phone_norm and len(phone_norm) != 10:
             st.error("Phone must be 10 digits or blank.")
         elif not business_name or not category:
@@ -666,12 +595,71 @@ with _tabs[1]:
     st.divider()
     st.subheader("Edit / Delete Vendor")
 
+    # ----- Edit/Delete form state helpers -----
+    EDIT_FORM_KEYS = [
+        "edit_vendor_id", "edit_business_name", "edit_category", "edit_service",
+        "edit_contact_name", "edit_phone", "edit_address", "edit_website",
+        "edit_notes", "edit_keywords", "edit_row_updated_at", "edit_last_loaded_id",
+    ]
+    def _init_edit_form_defaults():
+        defaults = {
+            "edit_vendor_id": None,
+            "edit_business_name": "",
+            "edit_category": "",
+            "edit_service": "",
+            "edit_contact_name": "",
+            "edit_phone": "",
+            "edit_address": "",
+            "edit_website": "",
+            "edit_notes": "",
+            "edit_keywords": "",
+            "edit_row_updated_at": None,
+            "edit_last_loaded_id": None,
+        }
+        for k, v in defaults.items():
+            st.session_state.setdefault(k, v)
+        st.session_state.setdefault("edit_form_version", 0)
+        st.session_state.setdefault("_pending_edit_reset", False)
+        st.session_state.setdefault("edit_last_done", None)
+        st.session_state.setdefault("edit_nonce", uuid.uuid4().hex)
+    def _apply_edit_reset_if_needed():
+        if st.session_state.get("_pending_edit_reset"):
+            for k in EDIT_FORM_KEYS:
+                if k == "edit_vendor_id":
+                    st.session_state[k] = None
+                elif k in ("edit_row_updated_at", "edit_last_loaded_id"):
+                    st.session_state[k] = None
+                else:
+                    st.session_state[k] = ""
+            if "edit_provider_label" in st.session_state:
+                del st.session_state["edit_provider_label"]
+            st.session_state["_pending_edit_reset"] = False
+            st.session_state["edit_form_version"] += 1
+    def _queue_edit_form_reset():
+        st.session_state["_pending_edit_reset"] = True
+
+    DELETE_FORM_KEYS = ["delete_vendor_id"]
+    def _init_delete_form_defaults():
+        st.session_state.setdefault("delete_vendor_id", None)
+        st.session_state.setdefault("delete_form_version", 0)
+        st.session_state.setdefault("_pending_delete_reset", False)
+        st.session_state.setdefault("delete_last_done", None)
+        st.session_state.setdefault("delete_nonce", uuid.uuid4().hex)
+    def _apply_delete_reset_if_needed():
+        if st.session_state.get("_pending_delete_reset"):
+            st.session_state["delete_vendor_id"] = None
+            if "delete_provider_label" in st.session_state:
+                del st.session_state["delete_provider_label"]
+            st.session_state["_pending_delete_reset"] = False
+            st.session_state["delete_form_version"] += 1
+    def _queue_delete_form_reset():
+        st.session_state["_pending_delete_reset"] = True
+
     df_all = load_df(engine)
 
     if df_all.empty:
         st.info("No vendors yet. Use 'Add Vendor' above to create your first record.")
     else:
-        # Init + apply resets BEFORE rendering widgets
         _init_edit_form_defaults()
         _init_delete_form_defaults()
         _apply_edit_reset_if_needed()
@@ -861,6 +849,23 @@ with _tabs[1]:
 # ---------- Category Admin
 with _tabs[2]:
     st.caption("Category is required. Manage the reference list and reassign vendors safely.")
+
+    # Category state helpers
+    def _init_cat_defaults():
+        st.session_state.setdefault("cat_form_version", 0)
+        st.session_state.setdefault("_pending_cat_reset", False)
+    def _apply_cat_reset_if_needed():
+        if st.session_state.get("_pending_cat_reset"):
+            st.session_state["cat_add"] = ""
+            st.session_state["cat_rename"] = ""
+            for k in ("cat_old", "cat_del", "cat_reassign_to"):
+                if k in st.session_state:
+                    del st.session_state[k]
+            st.session_state["_pending_cat_reset"] = False
+            st.session_state["cat_form_version"] += 1
+    def _queue_cat_reset():
+        st.session_state["_pending_cat_reset"] = True
+
     _init_cat_defaults()
     _apply_cat_reset_if_needed()
 
@@ -939,6 +944,23 @@ with _tabs[2]:
 # ---------- Service Admin
 with _tabs[3]:
     st.caption("Service is optional on vendors. Manage the reference list here.")
+
+    # Service state helpers
+    def _init_svc_defaults():
+        st.session_state.setdefault("svc_form_version", 0)
+        st.session_state.setdefault("_pending_svc_reset", False)
+    def _apply_svc_reset_if_needed():
+        if st.session_state.get("_pending_svc_reset"):
+            st.session_state["svc_add"] = ""
+            st.session_state["svc_rename"] = ""
+            for k in ("svc_old", "svc_del", "svc_reassign_to"):
+                if k in st.session_state:
+                    del st.session_state[k]
+            st.session_state["_pending_svc_reset"] = False
+            st.session_state["svc_form_version"] += 1
+    def _queue_svc_reset():
+        st.session_state["_pending_svc_reset"] = True
+
     _init_svc_defaults()
     _apply_svc_reset_if_needed()
 
@@ -1013,185 +1035,6 @@ with _tabs[3]:
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Reassign+delete service failed: {e}")
-
-# -----------------------------
-# Data access helpers (after ensure_schema)
-# -----------------------------
-def _normalize_phone(val: str | None) -> str:
-    if not val:
-        return ""
-    digits = re.sub(r"\D", "", str(val))
-    if len(digits) == 11 and digits.startswith("1"):
-        digits = digits[1:]
-    return digits if len(digits) == 10 else digits
-
-def _format_phone(val: str | None) -> str:
-    s = re.sub(r"\D", "", str(val or ""))
-    if len(s) == 10:
-        return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
-    return (val or "").strip()
-
-def _sanitize_url(url: str | None) -> str:
-    if not url:
-        return ""
-    url = url.strip()
-    if url and not re.match(r"^https?://", url, re.I):
-        url = "https://" + url
-    return url
-
-def load_df(engine: Engine) -> pd.DataFrame:
-    with engine.begin() as conn:
-        df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
-
-    for col in [
-        "contact_name",
-        "phone",
-        "address",
-        "website",
-        "notes",
-        "keywords",
-        "service",
-        "created_at",
-        "updated_at",
-        "updated_by",
-    ]:
-        if col not in df.columns:
-            df[col] = ""
-
-    # Display-friendly phone; storage remains digits
-    df["phone_fmt"] = df["phone"].apply(_format_phone)
-
-    return df
-
-def list_names(engine: Engine, table: str) -> list[str]:
-    with engine.begin() as conn:
-        rows = conn.execute(sql_text(f"SELECT name FROM {table} ORDER BY lower(name)")).fetchall()
-    return [r[0] for r in rows]
-
-def usage_count(engine: Engine, col: str, name: str) -> int:
-    with engine.begin() as conn:
-        cnt = conn.execute(sql_text(f"SELECT COUNT(*) FROM vendors WHERE {col} = :n"), {"n": name}).scalar()
-    return int(cnt or 0)
-
-# -----------------------------
-# Maintenance tab (export/import/cleanup)
-# -----------------------------
-# CSV Restore helpers (append-only, ID-checked)
-def _get_table_columns(engine: Engine, table: str) -> list[str]:
-    with engine.connect() as conn:
-        res = conn.execute(sql_text(f"SELECT * FROM {table} LIMIT 0"))
-        return list(res.keys())
-
-def _fetch_existing_ids(engine: Engine, table: str = "vendors") -> set[int]:
-    with engine.connect() as conn:
-        rows = conn.execute(sql_text(f"SELECT id FROM {table}")).all()
-    return {int(r[0]) for r in rows if r[0] is not None}
-
-def _prepare_csv_for_append(
-    engine: Engine,
-    csv_df: pd.DataFrame,
-    *,
-    normalize_phone: bool,
-    trim_strings: bool,
-    treat_missing_id_as_autoincrement: bool,
-) -> tuple[pd.DataFrame, pd.DataFrame, list[int], list[str]]:
-    """
-    Returns: (with_id_df, without_id_df, rejected_existing_ids, insertable_cols)
-    DataFrames are already filtered to allowed columns and safe to insert.
-    """
-    df = csv_df.copy()
-
-    # Trim strings
-    if trim_strings:
-        for c in df.columns:
-            if pd.api.types.is_object_dtype(df[c]):
-                df[c] = df[c].astype(str).str.strip()
-
-    # Normalize phone to digits
-    if normalize_phone and "phone" in df.columns:
-        df["phone"] = df["phone"].astype(str).str.replace(r"\D+", "", regex=True)
-
-    db_cols = _get_table_columns(engine, "vendors")
-    insertable_cols = [c for c in df.columns if c in db_cols]
-
-    # Required columns present?
-    missing_req = [c for c in REQUIRED_VENDOR_COLUMNS if c not in df.columns]
-    if missing_req:
-        raise ValueError(f"Missing required column(s) in CSV: {missing_req}")
-
-    # Handle id column
-    has_id = "id" in df.columns
-    existing_ids = _fetch_existing_ids(engine)
-
-    if has_id:
-        df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
-        # Reject rows colliding with existing ids
-        mask_conflict = df["id"].notna() & df["id"].astype("Int64").astype("int", errors="ignore").isin(existing_ids)
-        rejected_existing_ids = df.loc[mask_conflict, "id"].dropna().astype(int).tolist()
-        df_ok = df.loc[~mask_conflict].copy()
-
-        # Split by having id vs. not
-        with_id_df = df_ok[df_ok["id"].notna()].copy()
-        without_id_df = df_ok[df_ok["id"].isna()].copy() if treat_missing_id_as_autoincrement else pd.DataFrame(columns=df.columns)
-    else:
-        rejected_existing_ids = []
-        with_id_df = pd.DataFrame(columns=df.columns)
-        without_id_df = df.copy()
-
-    # Limit to insertable columns and coerce NaN->None for DB
-    def _prep_cols(d: pd.DataFrame, drop_id: bool) -> pd.DataFrame:
-        cols = [c for c in insertable_cols if (c != "id" if drop_id else True)]
-        if not cols:
-            return pd.DataFrame(columns=[])
-        dd = d[cols].copy()
-        for c in cols:
-            dd[c] = dd[c].where(pd.notnull(dd[c]), None)
-        return dd
-
-    with_id_df = _prep_cols(with_id_df, drop_id=False)
-    without_id_df = _prep_cols(without_id_df, drop_id=True)
-
-    # Duplicate ids inside the CSV itself?
-    if "id" in csv_df.columns:
-        dup_ids = (
-            csv_df["id"]
-            .pipe(pd.to_numeric, errors="coerce")
-            .dropna()
-            .astype(int)
-            .duplicated(keep=False)
-        )
-        if dup_ids.any():
-            dups = sorted(csv_df.loc[dup_ids, "id"].dropna().astype(int).unique().tolist())
-            raise ValueError(f"Duplicate id(s) inside CSV: {dups}")
-
-    return with_id_df, without_id_df, rejected_existing_ids, insertable_cols
-
-def _execute_append_only(
-    engine: Engine,
-    with_id_df: pd.DataFrame,
-    without_id_df: pd.DataFrame,
-    insertable_cols: list[str],
-) -> int:
-    """Executes INSERTs in a single transaction. Returns total inserted rows."""
-    inserted = 0
-    with engine.begin() as conn:
-        # with explicit id
-        if not with_id_df.empty:
-            cols = list(with_id_df.columns)  # includes 'id' by construction
-            placeholders = ", ".join(":" + c for c in cols)
-            stmt = sql_text(f"INSERT INTO vendors ({', '.join(cols)}) VALUES ({placeholders})")
-            conn.execute(stmt, with_id_df.to_dict(orient="records"))
-            inserted += len(with_id_df)
-
-        # without id (autoincrement)
-        if not without_id_df.empty:
-            cols = list(without_id_df.columns)  # 'id' removed already
-            placeholders = ", ".join(":" + c for c in cols)
-            stmt = sql_text(f"INSERT INTO vendors ({', '.join(cols)}) VALUES ({placeholders})")
-            conn.execute(stmt, without_id_df.to_dict(orient="records"))
-            inserted += len(without_id_df)
-
-    return inserted
 
 # ---------- Maintenance
 with _tabs[4]:
