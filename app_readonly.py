@@ -104,11 +104,16 @@ def _get_help_md() -> str:
     # 3) built-in fallback
     return textwrap.dedent(
         """
-        # How to use this list
-        - Use the global search box below to match any word or partial word across all columns.
-        - Click any column header to sort ascending/descending (client-side).
-        - Use **Download** to export the current table to CSV or Excel.
-        - Notes and Address wrap to show more text. Phone is normalized when available.
+        <style>
+          .help-body p, .help-body li { font-size: 1rem; line-height: 1.45; }
+          .help-body h1 { font-size: 1.4rem; margin: 0 0 6px; }
+          .help-body h2 { font-size: 1.2rem; margin: 12px 0 6px; }
+          .help-body h3 { font-size: 1.05rem; margin: 10px 0 6px; }
+        </style>
+        <div class="help-body">
+          <h1>How to Use This List</h1>
+          <p>Type in the search box, choose Sort, and download CSV/XLSX of your current view.</p>
+        </div>
         """
     ).strip()
 
@@ -140,6 +145,9 @@ HEADER_PX = 44
 SCROLL_MAX_HEIGHT = HEADER_PX + ROW_PX * VIEWPORT_ROWS  # pixels
 
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
+
+# ---- Help/Tips expander state (for Close button) ----
+st.session_state.setdefault("help_open", False)
 
 st.markdown(
     f"""
@@ -419,6 +427,8 @@ def main():
 
     with c_help:
         open_help = st.button("Help / Tips", type="primary", use_container_width=True)
+    if open_help:
+        st.session_state["help_open"] = True
 
     # Safe defaults when no sortable cols (highly unlikely, but defensive)
     if len(sortable_cols) == 0:
@@ -502,10 +512,14 @@ def main():
     if SHOW_STATUS:
         st.caption(f"{len(df_disp_sorted)} matching provider(s). Viewport rows: {VIEWPORT_ROWS}")
 
-    # Show Help / Tips content if clicked
-    if open_help:
-        with st.expander("Provider Help / Tips", expanded=True):
-            st.markdown(_get_help_md())
+    # -------- Help / Tips expander (controlled by session_state + Close button) --------
+    def _close_help():
+        st.session_state["help_open"] = False
+
+    with st.expander("Provider Help / Tips", expanded=st.session_state.get("help_open", False)):
+        st.markdown(_get_help_md(), unsafe_allow_html=True)
+        st.divider()
+        st.button("Close", type="secondary", on_click=_close_help)
 
     # ---------------- Scrollable full table (admin-style viewport) ----------------
     if df_disp_sorted.empty:
