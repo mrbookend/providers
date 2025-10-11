@@ -127,7 +127,7 @@ PAD_LEFT_CSS = _css_len_from_secret(_get_secret("page_left_padding_px", "12"), 1
 
 # secrets-driven viewport rows (10–40 clamp)
 def _viewport_rows() -> int:
-    n = _to_int(_get_secret("READONLY_VIEWPORT_ROWS", 10), 10)
+    n = _to_int(_get_secret("READONLY_VIEWPORT_ROWS", 15), 15)
     if n < 10:
         return 10
     if n > 40:
@@ -408,57 +408,62 @@ def main():
     df_disp_all = filtered_full[disp_cols]
 
     # ----- Controls Row: Help (left) + Downloads/Sort (right) -----
-    # Exclude 'website' from sort choices (HTML anchors)
     def _label_for(col_key: str) -> str:
         return READONLY_COLUMN_LABELS.get(col_key, col_key.replace("_", " ").title())
 
+    # Exclude 'website' from sort choices (HTML anchors)
     sortable_cols = [c for c in disp_cols if c != "website"]
     sort_labels = [_label_for(c) for c in sortable_cols]
 
-    # Defaults: sort by Business Name (or first displayed) ascending
-    default_sort_col = "business_name" if "business_name" in sortable_cols else sortable_cols[0]
-    default_label = _label_for(default_sort_col)
-
-    # Layout: Help | spacer | CSV | XLSX | Sort | Order
-    c_help, c_spacer, c_csv, c_xlsx, c_sort, c_order = st.columns([2, 6, 2, 2, 2, 2], vertical_alignment="center")
+    c_help, c_spacer, c_csv, c_xlsx, c_sort, c_order = st.columns([2, 6, 2, 2, 2, 2])
 
     with c_help:
         open_help = st.button("Help / Tips", type="primary", use_container_width=True)
 
-    with c_sort:
-        chosen_label = st.selectbox(
-            "Sort by",
-            options=sort_labels,
-            index=sort_labels.index(default_label),
-            key="sort_by_label",
-        )
-    with c_order:
-        order = st.selectbox(
-            "Order",
-            options=["Ascending", "Descending"],
-            index=0,
-            key="sort_order",
-        )
+    # Safe defaults when no sortable cols (highly unlikely, but defensive)
+    if len(sortable_cols) == 0:
+        chosen_label = "Business Name"
+        order = "Ascending"
+        sort_col = None
+        ascending = True
+    else:
+        default_sort_col = "business_name" if "business_name" in sortable_cols else sortable_cols[0]
+        default_label = _label_for(default_sort_col)
 
-    sort_col = sortable_cols[sort_labels.index(chosen_label)]
-    ascending = (order == "Ascending")
+        with c_sort:
+            chosen_label = st.selectbox(
+                "Sort by",
+                options=sort_labels,
+                index=max(0, sort_labels.index(default_label)) if default_label in sort_labels else 0,
+                key="sort_by_label",
+            )
+        with c_order:
+            order = st.selectbox(
+                "Order",
+                options=["Ascending", "Descending"],
+                index=0,
+                key="sort_order",
+            )
+
+        sort_col = sortable_cols[sort_labels.index(chosen_label)] if chosen_label in sort_labels else sortable_cols[0]
+        ascending = (order == "Ascending")
 
     # Case-insensitive sort for text columns; stable sort keeps ties predictable
-    if pd.api.types.is_string_dtype(df_disp_all[sort_col]):
-        keyfunc = lambda s: s.str.lower()
+    if sort_col is not None and sort_col in df_disp_all.columns and not df_disp_all.empty:
+        keyfunc = (lambda s: s.str.lower()) if pd.api.types.is_string_dtype(df_disp_all[sort_col]) else None
+        df_disp_sorted = df_disp_all.sort_values(
+            by=sort_col,
+            ascending=ascending,
+            kind="mergesort",
+            key=keyfunc
+        )
     else:
-        keyfunc = None
+        df_disp_sorted = df_disp_all.copy()
 
-    df_disp_sorted = df_disp_all.sort_values(
-        by=sort_col,
-        ascending=ascending,
-        kind="mergesort",
-        key=keyfunc
-    )
-
-    # Downloads (use sorted view)
+    # Downloads (use sorted view) — guard empty frames
     csv_buf = io.StringIO()
-    df_disp_sorted.to_csv(csv_buf, index=False)
+    if not df_disp_sorted.empty:
+        df_disp_sorted.to_csv(csv_buf, index=False)
     with c_csv:
         st.download_button(
             "Download CSV",
@@ -467,25 +472,30 @@ def main():
             mime="text/csv",
             type="secondary",
             use_container_width=True,
+            disabled=df_disp_sorted.empty,
         )
 
     excel_df = df_disp_sorted.copy()
-    if "website" in excel_df.columns:
+    if "website" in excel_df.columns and not excel_df.empty:
         # Convert anchor to plain URL for Excel export
         excel_df["website"] = excel_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
 
     xlsx_buf = io.BytesIO()
-    with pd.ExcelWriter(xlsx_buf, engine="xlsxwriter") as writer:
-        excel_df.to_excel(writer, sheet_name="providers", index=False)
-    xlsx_buf.seek(0)
+    if not excel_df.empty:
+        with pd.ExcelWriter(xlsx_buf, engine="xlsxwriter") as writer:
+            excel_df.to_excel(writer, sheet_name="providers", index=False)
+        xlsx_data = xlsx_buf.getvalue()
+    else:
+        xlsx_data = b""
     with c_xlsx:
         st.download_button(
             "Download XLSX",
-            data=xlsx_buf.getvalue(),
+            data=xlsx_data,
             file_name="providers.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="secondary",
             use_container_width=True,
+            disabled=excel_df.empty,
         )
 
     # Optional status line (toggle via Secrets)
@@ -498,7 +508,10 @@ def main():
             st.markdown(_get_help_md())
 
     # ---------------- Scrollable full table (admin-style viewport) ----------------
-    st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
+    if df_disp_sorted.empty:
+        st.info("No matching providers.")
+    else:
+        st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
 
     # Debug
     st.divider()
