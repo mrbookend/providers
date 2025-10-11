@@ -22,6 +22,33 @@ except Exception:
 
 
 # =============================
+# Help dialog compatibility shim
+# =============================
+def _safe_rerun():
+    # Support older/newer Streamlit
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
+
+HAS_DIALOG = hasattr(st, "dialog")
+
+if HAS_DIALOG:
+    # Native dialog path (Streamlit >= 1.31)
+    @st.dialog("Provider Help / Tips", width="large")
+    def _help_dialog():
+        # NOTE: _get_help_md is defined below; looked up at call-time
+        st.markdown(_get_help_md(), unsafe_allow_html=True)
+        st.divider()
+        if st.button("Close Help/Tips", type="secondary"):
+            _safe_rerun()
+else:
+    # Fallback path (older Streamlit): toggle a flag; content is rendered later via expander
+    def _help_dialog():
+        st.session_state["_help_open"] = True
+
+
+# =============================
 # Utilities
 # =============================
 def _get_secret(name: str, default: Optional[str | int | dict | bool] = None):
@@ -412,14 +439,6 @@ def main():
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
     df_disp_all = filtered_full[disp_cols]
 
-    # ----- Help dialog (single source of truth) -----
-    @st.dialog("Provider Help / Tips", width="large")
-    def _show_help_dialog():
-        st.markdown(_get_help_md(), unsafe_allow_html=True)
-        st.divider()
-        if st.button("Close Help/Tips", type="secondary"):
-            st.rerun()
-
     # ----- Controls Row: Help (left) + Downloads/Sort (right) -----
     def _label_for(col_key: str) -> str:
         return READONLY_COLUMN_LABELS.get(col_key, col_key.replace("_", " ").title())
@@ -432,7 +451,16 @@ def main():
 
     with c_help:
         if st.button("Help / Tips", type="primary", use_container_width=True):
-            _show_help_dialog()
+            _help_dialog()
+
+    # Fallback Help renderer (only used when st.dialog isn't available)
+    if not HAS_DIALOG and st.session_state.get("_help_open", False):
+        with st.expander("Provider Help / Tips", expanded=True):
+            st.markdown(_get_help_md(), unsafe_allow_html=True)
+            st.divider()
+            if st.button("Close Help/Tips", type="secondary", key="close_help_fallback"):
+                st.session_state["_help_open"] = False
+                _safe_rerun()
 
     # Safe defaults when no sortable cols (highly unlikely, but defensive)
     if len(sortable_cols) == 0:
