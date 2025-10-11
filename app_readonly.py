@@ -502,10 +502,15 @@ def main():
     else:
         df_disp_sorted = df_disp_all.copy()
 
-    # Downloads (use sorted view) — guard empty frames
+        # Downloads (use sorted view) — guard empty frames
+    # CSV: normalize 'website' to plain URL (match XLSX behavior)
+    csv_df = df_disp_sorted.copy()
+    if "website" in csv_df.columns and not csv_df.empty:
+        csv_df["website"] = csv_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
+
     csv_buf = io.StringIO()
-    if not df_disp_sorted.empty:
-        df_disp_sorted.to_csv(csv_buf, index=False)
+    if not csv_df.empty:
+        csv_df.to_csv(csv_buf, index=False)
     with c_csv:
         st.download_button(
             "Download CSV",
@@ -514,10 +519,12 @@ def main():
             mime="text/csv",
             type="secondary",
             use_container_width=True,
-            disabled=df_disp_sorted.empty,
+            disabled=csv_df.empty,
         )
 
+    # XLSX: also normalize 'website' to plain URL
     excel_df = df_disp_sorted.copy()
+
     if "website" in excel_df.columns and not excel_df.empty:
         # Convert anchor to plain URL for Excel export
         excel_df["website"] = excel_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
