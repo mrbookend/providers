@@ -146,9 +146,6 @@ SCROLL_MAX_HEIGHT = HEADER_PX + ROW_PX * VIEWPORT_ROWS  # pixels
 
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
 
-# ---- Help/Tips expander state (for Close button) ----
-st.session_state.setdefault("help_open", False)
-
 st.markdown(
     f"""
     <style>
@@ -415,6 +412,14 @@ def main():
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
     df_disp_all = filtered_full[disp_cols]
 
+    # ----- Help dialog (single source of truth) -----
+    @st.dialog("Provider Help / Tips", width="large")
+    def _show_help_dialog():
+        st.markdown(_get_help_md(), unsafe_allow_html=True)
+        st.divider()
+        if st.button("Close Help/Tips", type="secondary"):
+            st.rerun()
+
     # ----- Controls Row: Help (left) + Downloads/Sort (right) -----
     def _label_for(col_key: str) -> str:
         return READONLY_COLUMN_LABELS.get(col_key, col_key.replace("_", " ").title())
@@ -426,9 +431,8 @@ def main():
     c_help, c_spacer, c_csv, c_xlsx, c_sort, c_order = st.columns([2, 6, 2, 2, 2, 2])
 
     with c_help:
-        open_help = st.button("Help / Tips", type="primary", use_container_width=True)
-    if open_help:
-        st.session_state["help_open"] = True
+        if st.button("Help / Tips", type="primary", use_container_width=True):
+            _show_help_dialog()
 
     # Safe defaults when no sortable cols (highly unlikely, but defensive)
     if len(sortable_cols) == 0:
@@ -511,15 +515,6 @@ def main():
     # Optional status line (toggle via Secrets)
     if SHOW_STATUS:
         st.caption(f"{len(df_disp_sorted)} matching provider(s). Viewport rows: {VIEWPORT_ROWS}")
-
-    # -------- Help / Tips expander (controlled by session_state + Close button) --------
-    def _close_help():
-        st.session_state["help_open"] = False
-
-    with st.expander("Provider Help / Tips", expanded=st.session_state.get("help_open", False)):
-        st.markdown(_get_help_md(), unsafe_allow_html=True)
-        st.divider()
-        st.button("Close", type="secondary", on_click=_close_help)
 
     # ---------------- Scrollable full table (admin-style viewport) ----------------
     if df_disp_sorted.empty:
