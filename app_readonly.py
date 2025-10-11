@@ -230,20 +230,47 @@ HIDE_IN_DISPLAY = {"id", "keywords", "created_at", "updated_at", "updated_by"}
 # Database engine
 # =============================
 def build_engine() -> Tuple[Engine, Dict[str, str]]:
-    info = {}
-    url = _get_secret("TURSO_DATABASE_URL", "") or ""
-    token = _get_secret("TURSO_AUTH_TOKEN", "") or ""
+    info: Dict[str, str] = {}
 
-    if url and token:
-        connect_args = {"auth_token": token}
-        engine = create_engine(url, connect_args=connect_args, pool_pre_ping=True)
+    raw_url = _get_secret("TURSO_DATABASE_URL", "") or ""
+    token   = _get_secret("TURSO_AUTH_TOKEN", "") or ""
+    embedded_path = os.path.abspath(_get_secret("EMBEDDED_DB_PATH", "vendors-embedded.db"))
+
+    if raw_url and token:
+        # sync_url must be libsql://... (strip sqlite+libsql:// and query if present)
+        if raw_url.startswith("sqlite+libsql://"):
+            host = raw_url.split("://", 1)[1].split("?", 1)[0]
+            sync_url = f"libsql://{host}"
+        elif raw_url.startswith("libsql://"):
+            sync_url = raw_url.split("?", 1)[0]
+        else:
+            host = raw_url.split("://", 1)[-1].split("?", 1)[0]
+            sync_url = f"libsql://{host}"
+
+        sqlalchemy_url = f"sqlite+libsql:///{embedded_path}"
+
+        engine = create_engine(
+            sqlalchemy_url,
+            connect_args={
+                "auth_token": token,
+                "sync_url": sync_url,
+            },
+            pool_pre_ping=True,
+            pool_recycle=300,
+            pool_reset_on_return="commit",
+        )
+        # probe
+        with engine.connect() as c:
+            c.exec_driver_sql("select 1;")
+
         info.update(
             {
                 "using_remote": "true",
-                "strategy": "remote_only",
-                "sqlalchemy_url": url.split("?")[0],
+                "strategy": "embedded_replica",
+                "sqlalchemy_url": sqlalchemy_url,
                 "dialect": "sqlite",
                 "driver": getattr(engine.dialect, "driver", ""),
+                "sync_url": sync_url,
             }
         )
         return engine, info
