@@ -7,7 +7,7 @@ import hmac
 import time
 import uuid
 from datetime import datetime
-from typing import List, Tuple, Dict, Iterable
+from typing import List, Tuple, Dict, Iterable, Any
 
 import pandas as pd
 import streamlit as st
@@ -384,6 +384,160 @@ def _recompute_missing_computed_keywords(engine: Engine) -> Dict[str, int]:
                 )
                 updated += 1
     return {"checked": checked, "updated": updated}
+
+
+# -----------------------------
+# Quick Probes (read-only health checks)
+# -----------------------------
+def _run_quick_probes(engine: Engine) -> dict[str, Any]:
+    results: dict[str, Any] = {}
+
+    with engine.connect() as conn:
+        # ---- Core counts / schema status
+        results["counts"] = {
+            "vendors": conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar_one(),
+            "categories": conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar_one(),
+            "services": conn.execute(sql_text("SELECT COUNT(*) FROM services")).scalar_one(),
+        }
+
+        # ---- Integrity checks (SQLite/libsql supported)
+        try:
+            results["integrity_check"] = conn.execute(sql_text("PRAGMA integrity_check;")).scalar_one()
+        except Exception as e:
+            results["integrity_check"] = f"unavailable: {e}"
+
+        # ---- Index list (names only, for quick eyeball)
+        try:
+            idx_rows = conn.execute(sql_text("PRAGMA index_list('vendors');")).fetchall()
+            results["vendors_indexes"] = [
+                {"seq": r[0], "name": r[1], "unique": bool(r[2])} for r in idx_rows
+            ]
+        except Exception as e:
+            results["vendors_indexes"] = f"unavailable: {e}"
+
+        # ---- Timestamps: any unexpected NULLS?
+        ts = conn.execute(sql_text("""
+            SELECT
+              SUM(CASE WHEN created_at IS NULL OR created_at='' THEN 1 ELSE 0 END) AS created_at_nulls,
+              SUM(CASE WHEN updated_at IS NULL OR updated_at='' THEN 1 ELSE 0 END) AS updated_at_nulls
+            FROM vendors
+        """)).one()
+        results["timestamp_nulls"] = {"created_at": ts[0] or 0, "updated_at": ts[1] or 0}
+
+        # ---- Computed keywords coverage
+        ckw = conn.execute(sql_text("""
+            SELECT
+              SUM(CASE WHEN computed_keywords IS NULL OR TRIM(computed_keywords) = '' THEN 1 ELSE 0 END) AS missing,
+              COUNT(*) AS total
+            FROM vendors
+        """)).one()
+        results["computed_keywords"] = {"missing": ckw[0] or 0, "total": ckw[1] or 0}
+
+        # ---- Potential duplicates (same business/category/service ignoring case)
+        dupes = conn.execute(sql_text("""
+            SELECT LOWER(TRIM(business_name)) AS b, LOWER(TRIM(category)) AS c,
+                   LOWER(TRIM(COALESCE(service,''))) AS s, COUNT(*) AS n
+            FROM vendors
+            GROUP BY b, c, s
+            HAVING COUNT(*) > 1
+            ORDER BY n DESC, b, c, s
+            LIMIT 100
+        """)).fetchall()
+        results["possible_duplicates_count"] = len(dupes)
+        results["_dupes_rows"] = [dict(zip(("b","c","s","n"), r)) for r in dupes]
+
+        # ---- Phone anomalies (non-empty but not exactly 10 digits after stripping)
+        bad_phones = conn.execute(sql_text("""
+            SELECT id, business_name, phone
+            FROM vendors
+            WHERE phone IS NOT NULL AND TRIM(phone) <> ''
+              AND LENGTH(REPLACE(REPLACE(REPLACE(REPLACE(phone,'-',''),'(',''),')',''),' ',''))
+                    <> 10
+            LIMIT 200
+        """)).fetchall()
+        results["bad_phones_count"] = len(bad_phones)
+        results["_bad_phones_rows"] = [dict(zip(("id","business_name","phone"), r)) for r in bad_phones]
+
+        # ---- Website anomalies (non-empty and not starting with http:// or https://)
+        bad_sites = conn.execute(sql_text("""
+            SELECT id, business_name, website
+            FROM vendors
+            WHERE website IS NOT NULL AND TRIM(website) <> ''
+              AND LOWER(website) NOT LIKE 'http://%%'
+              AND LOWER(website) NOT LIKE 'https://%%'
+            LIMIT 200
+        """)).fetchall()
+        results["bad_websites_count"] = len(bad_sites)
+        results["_bad_websites_rows"] = [dict(zip(("id","business_name","website"), r)) for r in bad_sites]
+
+        # ---- Orphan references (vendors that use category/service not present in libs)
+        orphan_cat = conn.execute(sql_text("""
+            SELECT v.id, v.business_name, v.category
+            FROM vendors v
+            LEFT JOIN categories c ON LOWER(TRIM(v.category)) = LOWER(TRIM(c.name))
+            WHERE v.category IS NOT NULL AND TRIM(v.category) <> ''
+              AND c.id IS NULL
+            LIMIT 200
+        """)).fetchall()
+        results["orphan_categories_count"] = len(orphan_cat)
+        results["_orphan_categories_rows"] = [dict(zip(("id","business_name","category"), r)) for r in orphan_cat]
+
+        orphan_svc = conn.execute(sql_text("""
+            SELECT v.id, v.business_name, v.service
+            FROM vendors v
+            LEFT JOIN services s ON LOWER(TRIM(v.service)) = LOWER(TRIM(s.name))
+            WHERE v.service IS NOT NULL AND TRIM(v.service) <> ''
+              AND s.id IS NULL
+            LIMIT 200
+        """)).fetchall()
+        results["orphan_services_count"] = len(orphan_svc)
+        results["_orphan_services_rows"] = [dict(zip(("id","business_name","service"), r)) for r in orphan_svc]
+
+        # ---- Unused library entries (present in lib, not used in vendors)
+        unused_cat = conn.execute(sql_text("""
+            SELECT c.name
+            FROM categories c
+            LEFT JOIN vendors v ON LOWER(TRIM(v.category)) = LOWER(TRIM(c.name))
+            WHERE v.id IS NULL
+            ORDER BY c.name
+            LIMIT 200
+        """)).fetchall()
+        results["unused_categories_count"] = len(unused_cat)
+        results["_unused_categories_rows"] = [dict(zip(("name",), r)) for r in unused_cat]
+
+        unused_svc = conn.execute(sql_text("""
+            SELECT s.name
+            FROM services s
+            LEFT JOIN vendors v ON LOWER(TRIM(v.service)) = LOWER(TRIM(s.name))
+            WHERE v.id IS NULL
+            ORDER BY s.name
+            LIMIT 200
+        """)).fetchall()
+        results["unused_services_count"] = len(unused_svc)
+        results["_unused_services_rows"] = [dict(zip(("name",), r)) for r in unused_svc]
+
+    return results
+
+
+def _render_quick_probes_ui(engine: Engine) -> None:
+    with st.expander("Quick Probes (read-only health checks)"):
+        if st.button("Run quick probes", type="primary"):
+            data = _run_quick_probes(engine)
+            st.json({k: v for k, v in data.items() if not k.startswith("_")})
+            # Optional detail tables
+            for key, label in [
+                ("_dupes_rows", "Possible duplicates"),
+                ("_bad_phones_rows", "Bad phone formats"),
+                ("_bad_websites_rows", "Bad website formats"),
+                ("_orphan_categories_rows", "Orphan categories (not in library)"),
+                ("_orphan_services_rows", "Orphan services (not in library)"),
+                ("_unused_categories_rows", "Unused categories"),
+                ("_unused_services_rows", "Unused services"),
+            ]:
+                rows = data.get(key, [])
+                if isinstance(rows, list) and rows:
+                    st.write(f"**{label}** ({len(rows)})")
+                    st.dataframe(pd.DataFrame(rows), hide_index=True)
 
 
 # -----------------------------
@@ -1446,9 +1600,13 @@ with _tabs[4]:
                                 if stats.get("updated", 0):
                                     st.info(f"Computed keywords backfill after import: {stats}")
                                 st.rerun()
-
             except Exception as e:
                 st.error(f"CSV restore failed: {e}")
+
+    # --- Read-only Quick Probes panel (toggle via ADMIN_SHOW_PROBES in secrets) ---
+    if _resolve_bool("ADMIN_SHOW_PROBES", True):
+        st.divider()
+        _render_quick_probes_ui(engine)
 
 # ---------- Debug
 with _tabs[5]:
