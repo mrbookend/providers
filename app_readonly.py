@@ -24,7 +24,6 @@ except Exception:
 # =============================
 # Utilities
 # =============================
-# --- Phone display helper (Utilities) ---
 def format_phone_display(value):
     """Return (xxx) xxx-xxxx for 10-digit inputs; otherwise original value."""
     if value is None:
@@ -34,7 +33,7 @@ def format_phone_display(value):
     if len(digits) == 10:
         return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
     return s
-# --- end phone display helper ---
+
 
 def _get_secret(name: str, default: Optional[str | int | dict | bool] = None):
     """Prefer Streamlit secrets; tolerate env fallback only for simple strings."""
@@ -95,6 +94,15 @@ def _css_len_from_secret(v: str | int | None, fallback_px: int) -> str:
     return f"{fallback_px}px"
 
 
+def _sanitize_url(url: str | None) -> str:
+    if not url:
+        return ""
+    u = str(url).strip()
+    if not re.match(r"^https?://", u, flags=re.I):
+        u = "https://" + u
+    return u
+
+
 def _get_help_md() -> str:
     """Prefer top-level HELP_MD; if missing, also look under widths; else fallback."""
     # 1) top-level
@@ -139,8 +147,10 @@ SIDEBAR_STATE = _get_secret("sidebar_state", "collapsed")
 SHOW_DIAGS = _as_bool(_get_secret("READONLY_SHOW_DIAGS", False), False)
 SHOW_STATUS = _as_bool(_get_secret("READONLY_SHOW_STATUS", False), False)
 
-# secrets-driven padding (matches admin app behavior)
+# secrets-driven padding (left + top)
 PAD_LEFT_CSS = _css_len_from_secret(_get_secret("page_left_padding_px", "12"), 12)
+TOP_PAD_PX = _to_int(_get_secret("page_top_padding_px", "10"), 10)
+COMPACT = _as_bool(_get_secret("READONLY_COMPACT", True), True)
 
 # secrets-driven viewport rows (10–40 clamp)
 def _viewport_rows() -> int:
@@ -161,10 +171,14 @@ st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=S
 st.markdown(
     f"""
     <style>
-      .block-container {{
+      /* Tighten page top padding + left padding */
+      [data-testid="stAppViewContainer"] .main .block-container {{
         max-width: {PAGE_MAX_WIDTH_PX}px;
+        padding-top: {TOP_PAD_PX}px !important;
         padding-left: {PAD_LEFT_CSS};
       }}
+
+      /* Table styling */
       .prov-table td, .prov-table th {{
         white-space: normal;
         word-break: break-word;
@@ -180,11 +194,20 @@ st.markdown(
         border-bottom: 2px solid #ddd;
       }}
       .prov-wrap {{ overflow-x: auto; }}
-      /* vertical scroll viewport (mouse-wheel scroll to end) */
       .prov-scroll {{
         max-height: {SCROLL_MAX_HEIGHT}px;
         overflow-y: auto;
       }}
+
+      /* Compact mode: shrink gaps & control heights */
+      {"[data-testid='stVerticalBlock'], [data-testid='stHorizontalBlock'] {gap: 6px !important;}" if COMPACT else ""}
+      {"[data-testid='stTextInput'] label {margin-bottom: 2px !important;}" if COMPACT else ""}
+      {"[data-testid='stTextInput'] input {min-height: 34px !important; padding-top: 6px !important; padding-bottom: 6px !important;}" if COMPACT else ""}
+      {"[data-testid='stSelectbox'] label {margin-bottom: 2px !important;}" if COMPACT else ""}
+      {"[data-testid='stSelectbox'] [data-baseweb='select'] {min-height: 34px !important;}" if COMPACT else ""}
+      {"[data-testid='stDownloadButton'] button, [data-testid='baseButton-secondary'] button, [data-testid='baseButton-primary'] button {padding-top: 4px !important; padding-bottom: 4px !important; min-height: 32px !important;}" if COMPACT else ""}
+      {"[data-testid='stExpander'] details summary {padding-top: 4px !important; padding-bottom: 4px !important;}" if COMPACT else ""}
+      {"[data-testid='stExpander'] .content {padding-top: 4px !important;}" if COMPACT else ""}
     </style>
     """,
     unsafe_allow_html=True,
@@ -218,6 +241,7 @@ _DEFAULT_WIDTHS = {
     "website": 160,
     "notes": 220,
     "keywords": 90,
+    # computed_keywords is hidden; width not needed
 }
 
 # Only accept known width keys; ignore accidental extras (e.g., HELP_MD)
@@ -239,7 +263,7 @@ for k, v in list(COLUMN_WIDTHS_PX_READONLY.items()):
 STICKY_FIRST_COL: bool = False
 
 # Hide these in display; still searchable
-HIDE_IN_DISPLAY = {"id", "keywords", "created_at", "updated_at", "updated_by"}
+HIDE_IN_DISPLAY = {"id", "keywords", "computed_keywords", "created_at", "updated_at", "updated_by"}
 
 
 # =============================
@@ -311,8 +335,10 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
 # Data access
 # =============================
 VENDOR_COLS = [
+    # include computed_keywords so global search can match it; keep hidden via HIDE_IN_DISPLAY
     "id", "category", "service", "business_name", "contact_name", "phone",
-    "address", "website", "notes", "keywords", "created_at", "updated_at", "updated_by",
+    "address", "website", "notes", "keywords", "computed_keywords",
+    "created_at", "updated_at", "updated_by",
 ]
 
 
@@ -325,8 +351,8 @@ def fetch_vendors(engine: Engine) -> pd.DataFrame:
     def _mk_anchor(href: str) -> str:
         if not href:
             return ""
-        href = href.strip()
-        return f'<a href="{href}" target="_blank" rel="noopener noreferrer">Website</a>'
+        href = _sanitize_url(href.strip())
+        return f'<a href="{html.escape(href, quote=True)}" target="_blank" rel="noopener noreferrer">Website</a>'
 
     # Website → HTML anchor
     if "website" in df.columns:
@@ -412,26 +438,23 @@ def main():
         st.error(f"Failed to load vendors: {e}")
         return
 
-    # Search runs on the full frame (so 'keywords' works), but display hides selected cols
+    # Search runs on the full frame (so 'keywords' and 'computed_keywords' work),
+    # but display hides selected cols via HIDE_IN_DISPLAY.
     st.text_input(
         "",
         key="q",
         label_visibility="collapsed",
         placeholder="Search e.g., plumb, roofing, 'Inverness', phone digits, etc.",
-        help="Case-insensitive, matches partial words across all columns.",
+        help="Case-insensitive, matches partial words across all columns (including hidden computed_keywords).",
     )
     q = st.session_state.get("q", "")
     filtered_full = apply_global_search(df_full, q)
-
-    # Top-of-page Help/Tips (expander)
-    with st.expander("Help / Tips (click to expand)", expanded=False):
-        st.markdown(_get_help_md(), unsafe_allow_html=True)
 
     # Columns we show (hide internal columns)
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
     df_disp_all = filtered_full[disp_cols]
 
-    # ----- Controls Row: Downloads + Sort -----
+    # ----- Controls Row: Downloads + Sort (kept dense via CSS) -----
     def _label_for(col_key: str) -> str:
         return READONLY_COLUMN_LABELS.get(col_key, col_key.replace("_", " ").title())
 
@@ -481,6 +504,10 @@ def main():
     else:
         df_disp_sorted = df_disp_all.copy()
 
+    # Help/Tips expander (placed LOWER to shorten header height)
+    with st.expander("Help / Tips (click to expand)", expanded=False):
+        st.markdown(_get_help_md(), unsafe_allow_html=True)
+
     # Downloads (use sorted view) — guard empty frames
     # CSV: normalize 'website' to plain URL (match XLSX behavior)
     csv_df = df_disp_sorted.copy()
@@ -504,7 +531,6 @@ def main():
     # XLSX: also normalize 'website' to plain URL
     excel_df = df_disp_sorted.copy()
     if "website" in excel_df.columns and not excel_df.empty:
-        # Convert anchor to plain URL for Excel export
         excel_df["website"] = excel_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
 
     xlsx_buf = io.BytesIO()
