@@ -79,18 +79,15 @@ def _to_int(v, default: int) -> int:
 def _css_len_from_secret(v: str | int | None, fallback_px: int) -> str:
     """
     Accepts e.g. "0", "20", "18px", "1rem", "0.5em".
-    Returns a safe CSS length string; defaults to '{fallback_px}px' on bad input.
+    Returns a safe CSS length; defaults to '{fallback_px}px' on bad input.
     """
     if v is None:
         return f"{fallback_px}px"
     s = str(v).strip()
     if not s:
         return f"{fallback_px}px"
-    # numeric with optional unit
     if re.fullmatch(r"\d+(\.\d+)?(px|rem|em)?", s):
-        if s.endswith(("px", "rem", "em")):
-            return s
-        return f"{s}px"
+        return s if s.endswith(("px", "rem", "em")) else f"{s}px"
     return f"{fallback_px}px"
 
 
@@ -121,14 +118,14 @@ def _get_help_md() -> str:
                 return cand
     except Exception:
         pass
-    # 3) built-in fallback
+    # 3) built-in fallback (safe, small)
     return textwrap.dedent(
         """
         <style>
           .help-body p, .help-body li { font-size: 1rem; line-height: 1.45; }
-          .help-body h1 { font-size: 1.4rem; margin: 0 0 6px; }
-          .help-body h2 { font-size: 1.2rem; margin: 12px 0 6px; }
-          .help-body h3 { font-size: 1.05rem; margin: 10px 0 6px; }
+          .help-body h1 { font-size: 1.25rem; margin: 0 0 6px; }
+          .help-body h2 { font-size: 1.1rem;  margin: 10px 0 6px; }
+          .help-body h3 { font-size: 1.0rem;  margin: 8px 0 4px; }
         </style>
         <div class="help-body">
           <h1>How to Use This List</h1>
@@ -155,11 +152,7 @@ COMPACT = _as_bool(_get_secret("READONLY_COMPACT", True), True)
 # secrets-driven viewport rows (10–40 clamp)
 def _viewport_rows() -> int:
     n = _to_int(_get_secret("READONLY_VIEWPORT_ROWS", 15), 15)
-    if n < 10:
-        return 10
-    if n > 40:
-        return 40
-    return n
+    return 10 if n < 10 else (40 if n > 40 else n)
 
 VIEWPORT_ROWS = _viewport_rows()
 ROW_PX = 32  # approximate row height
@@ -206,10 +199,17 @@ st.markdown(
       {"[data-testid='stSelectbox'] label {margin-bottom: 2px !important;}" if COMPACT else ""}
       {"[data-testid='stSelectbox'] [data-baseweb='select'] {min-height: 34px !important;}" if COMPACT else ""}
       {"[data-testid='stDownloadButton'] button, [data-testid='baseButton-secondary'] button, [data-testid='baseButton-primary'] button {padding-top: 4px !important; padding-bottom: 4px !important; min-height: 32px !important;}" if COMPACT else ""}
-      {"[data-testid='stExpander'] details summary {padding-top: 4px !important; padding-bottom: 4px !important;}" if COMPACT else ""}
-      {"[data-testid='stExpander'] .content {padding-top: 4px !important;}" if COMPACT else ""}
 
-      /* Optional: subtle search input affordance */
+      /* Two-line labels inside download buttons */
+      [data-testid="stDownloadButton"] button {{
+        white-space: normal !important;
+        line-height: 1.15 !important;
+        padding-top: 6px !important;
+        padding-bottom: 6px !important;
+        min-height: 34px !important;
+      }}
+
+      /* Subtle search input affordance */
       [data-testid="stTextInput"] input {{
         border: 1px solid #d0d0d0 !important;
       }}
@@ -254,7 +254,6 @@ _DEFAULT_WIDTHS = {
     # computed_keywords is hidden; width not needed
 }
 
-# Only accept known width keys; ignore accidental extras (e.g., HELP_MD)
 _user_widths: Dict[str, int] = {}
 for k, v in dict(_col_widths_raw).items():
     sk = str(k)
@@ -263,16 +262,13 @@ for k, v in dict(_col_widths_raw).items():
     _user_widths[sk] = _to_int(v, _DEFAULT_WIDTHS.get(sk, 140))
 
 COLUMN_WIDTHS_PX_READONLY: Dict[str, int] = {**_DEFAULT_WIDTHS, **_user_widths}
-
-# Clamp invalids
 for k, v in list(COLUMN_WIDTHS_PX_READONLY.items()):
     if not isinstance(v, int) or v <= 0:
         COLUMN_WIDTHS_PX_READONLY[k] = _DEFAULT_WIDTHS.get(k, 120)
 
-# Do NOT pin first column (per request)
-STICKY_FIRST_COL: bool = False
+STICKY_FIRST_COL: bool = False  # no pinned column
 
-# Hide these in display; still searchable
+# Hide from display; still searchable
 HIDE_IN_DISPLAY = {"id", "keywords", "computed_keywords", "created_at", "updated_at", "updated_by"}
 
 
@@ -287,7 +283,7 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
     embedded_path = os.path.abspath(_get_secret("EMBEDDED_DB_PATH", "vendors-embedded.db"))
 
     if raw_url and token:
-        # sync_url must be libsql://... (strip sqlite+libsql:// and query if present)
+        # Normalize sync_url
         if raw_url.startswith("sqlite+libsql://"):
             host = raw_url.split("://", 1)[1].split("?", 1)[0]
             sync_url = f"libsql://{host}"
@@ -301,15 +297,11 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
 
         engine = create_engine(
             sqlalchemy_url,
-            connect_args={
-                "auth_token": token,
-                "sync_url": sync_url,
-            },
+            connect_args={"auth_token": token, "sync_url": sync_url},
             pool_pre_ping=True,
             pool_recycle=300,
             pool_reset_on_return="commit",
         )
-        # probe
         with engine.connect() as c:
             c.exec_driver_sql("select 1;")
 
@@ -364,15 +356,12 @@ def fetch_vendors(engine: Engine) -> pd.DataFrame:
         href = _sanitize_url(href.strip())
         return f'<a href="{html.escape(href, quote=True)}" target="_blank" rel="noopener noreferrer">Website</a>'
 
-    # Website → HTML anchor
     if "website" in df.columns:
         df["website"] = df["website"].fillna("").astype(str).map(_mk_anchor)
 
-    # Phone display formatting (visual only)
     if "phone" in df.columns:
         df["phone"] = df["phone"].map(format_phone_display)
 
-    # Normalize remaining columns to strings (keep ids/timestamps untouched)
     for c in df.columns:
         if c not in ("id", "created_at", "updated_at"):
             df[c] = df[c].fillna("").astype(str)
@@ -389,7 +378,6 @@ def apply_global_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
         return df
     mask = pd.Series(False, index=df.index)
     for c in df.columns:
-        # Coerce to string safely, lower, then literal substring search (no regex)
         s = df[c].astype(str).str.lower()
         mask |= s.str.contains(q, regex=False, na=False)
     return df[mask]
@@ -430,7 +418,6 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
             tds.append(f'<td style="min-width:{width}px;max-width:{width}px;">{cell_html}</td>')
         rows_html.append("<tr>" + "".join(tds) + "</tr>")
     tbody = "<tbody>" + "".join(rows_html) + "</tbody>"
-    # prov-scroll enables the vertical scroll viewport sized by secrets
     return f'<div class="prov-wrap prov-scroll"><table class="prov-table">{thead}{tbody}</table></div>'
 
 
@@ -448,19 +435,21 @@ def main():
         st.error(f"Failed to load vendors: {e}")
         return
 
-    # ---------- One-row controls: Search | CSV | XLSX | Sort by | Order ----------
-    c_search, c_csv, c_xlsx, c_sort, c_order = st.columns([5, 2, 2, 2, 2])
+    # ---------- Controls row: Search(40%) | CSV(15%) | XLSX(15%) | Sort by(15%) | Order(15%) ----------
+    # Column ratios sum to 20: 8/20=40%, 3/20=15% each for the rest
+    c_search, c_csv, c_xlsx, c_sort, c_order = st.columns([8, 3, 3, 3, 3])
 
     with c_search:
         st.text_input(
             "Search",
             key="q",
-            label_visibility="collapsed",  # saves vertical space in the row
-            placeholder='plumb → matches "plumber", "plumbing", etc.',
+            label_visibility="collapsed",
+            placeholder='plumb → plumber, plumbing',
             help="Case-insensitive substring match across all columns (including hidden computed_keywords).",
             autocomplete="off",
         )
 
+    # Filter first (search applies to full DF incl. computed_keywords)
     q = (st.session_state.get("q") or "")
     filtered_full = apply_global_search(df_full, q)
 
@@ -468,10 +457,10 @@ def main():
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
     df_disp_all = filtered_full[disp_cols]
 
+    # Sort controls
     def _label_for(col_key: str) -> str:
         return READONLY_COLUMN_LABELS.get(col_key, col_key.replace("_", " ").title())
 
-    # Exclude 'website' from sort choices (HTML anchors)
     sortable_cols = [c for c in disp_cols if c != "website"]
     sort_labels = [_label_for(c) for c in sortable_cols]
 
@@ -484,9 +473,10 @@ def main():
                 options=sort_labels,
                 index=max(0, sort_labels.index(default_label)) if default_label in sort_labels else 0,
                 key="sort_by_label",
+                label_visibility="collapsed",
             )
         else:
-            chosen_label = st.selectbox("Sort by", options=["(none)"], index=0, key="sort_by_label")
+            chosen_label = st.selectbox("Sort by", options=["(none)"], index=0, key="sort_by_label", label_visibility="collapsed")
 
     with c_order:
         order = st.selectbox(
@@ -494,14 +484,15 @@ def main():
             options=["Ascending", "Descending"],
             index=0,
             key="sort_order",
+            label_visibility="collapsed",
         )
 
+    # Compute sorted view now so downloads reflect the sorted view
     sort_col = None
     if sortable_cols and chosen_label in sort_labels:
         sort_col = sortable_cols[sort_labels.index(chosen_label)]
     ascending = (order == "Ascending")
 
-    # Case-insensitive sort for text columns; stable sort keeps ties predictable
     if sort_col is not None and sort_col in df_disp_all.columns and not df_disp_all.empty:
         keyfunc = (lambda s: s.str.lower()) if pd.api.types.is_string_dtype(df_disp_all[sort_col]) else None
         df_disp_sorted = df_disp_all.sort_values(
@@ -513,8 +504,8 @@ def main():
     else:
         df_disp_sorted = df_disp_all.copy()
 
-    # Downloads (use sorted view) — guard empty frames
-    # CSV: normalize 'website' to plain URL (match XLSX behavior)
+    # ---- Download buttons (sorted view) ----
+    # CSV: convert website anchor to plain URL
     csv_df = df_disp_sorted.copy()
     if "website" in csv_df.columns and not csv_df.empty:
         csv_df["website"] = csv_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
@@ -523,7 +514,7 @@ def main():
         csv_df.to_csv(csv_buf, index=False)
     with c_csv:
         st.download_button(
-            "Download CSV",
+            "Download\nCSV",
             data=csv_buf.getvalue().encode("utf-8"),
             file_name="providers.csv",
             mime="text/csv",
@@ -532,7 +523,7 @@ def main():
             disabled=csv_df.empty,
         )
 
-    # XLSX: also normalize 'website' to plain URL
+    # XLSX: also normalize website to plain URL
     excel_df = df_disp_sorted.copy()
     if "website" in excel_df.columns and not excel_df.empty:
         excel_df["website"] = excel_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
@@ -545,7 +536,7 @@ def main():
         xlsx_data = b""
     with c_xlsx:
         st.download_button(
-            "Download XLSX",
+            "Download\nXLSX",
             data=xlsx_data,
             file_name="providers.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -554,7 +545,7 @@ def main():
             disabled=excel_df.empty,
         )
 
-    # Help/Tips expander (placed LOWER to shorten header height)
+    # Help/Tips expander (below controls)
     with st.expander("Help / Tips (click to expand)", expanded=False):
         st.markdown(_get_help_md(), unsafe_allow_html=True)
 
@@ -562,7 +553,7 @@ def main():
     if SHOW_STATUS:
         st.caption(f"{len(df_disp_sorted)} matching provider(s). Viewport rows: {VIEWPORT_ROWS}")
 
-    # ---------------- Scrollable full table (admin-style viewport) ----------------
+    # ---------------- Scrollable full table ----------------
     if df_disp_sorted.empty:
         st.info("No matching providers.")
     else:
