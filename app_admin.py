@@ -43,7 +43,6 @@ def _get_secret(name: str, default: str | None = None) -> str | None:
     return os.getenv(name, default)
 
 
-# Deterministic resolution (secrets → env → code default)
 def _resolve_bool(name: str, code_default: bool) -> bool:
     v = _get_secret(name, None)
     return _as_bool(v, default=code_default)
@@ -55,7 +54,6 @@ def _resolve_str(name: str, code_default: str | None) -> str | None:
 
 
 def _ct_equals(a: str, b: str) -> bool:
-    """Constant-time string compare for secrets."""
     return hmac.compare_digest((a or ""), (b or ""))
 
 
@@ -68,10 +66,6 @@ def _is_hrana_stale_stream_error(err: Exception) -> bool:
 
 
 def _exec_with_retry(engine: Engine, sql: str, params: Dict | None = None, *, tries: int = 2):
-    """
-    Execute a write (INSERT/UPDATE/DELETE) with a one-time retry on Hrana 'stream not found'.
-    Returns the result proxy so you can read .rowcount.
-    """
     attempt = 0
     while True:
         attempt += 1
@@ -81,7 +75,7 @@ def _exec_with_retry(engine: Engine, sql: str, params: Dict | None = None, *, tr
         except Exception as e:
             if attempt < tries and _is_hrana_stale_stream_error(e):
                 try:
-                    engine.dispose()  # drop pooled connections
+                    engine.dispose()
                 except Exception:
                     pass
                 time.sleep(0.2)
@@ -90,9 +84,6 @@ def _exec_with_retry(engine: Engine, sql: str, params: Dict | None = None, *, tr
 
 
 def _fetch_with_retry(engine: Engine, sql: str, params: Dict | None = None, *, tries: int = 2) -> pd.DataFrame:
-    """
-    Execute a read (SELECT) with a one-time retry on Hrana 'stream not found'.
-    """
     attempt = 0
     while True:
         attempt += 1
@@ -118,7 +109,6 @@ REQUIRED_VENDOR_COLUMNS: List[str] = ["business_name", "category"]  # service op
 
 
 def build_engine() -> Tuple[Engine, Dict]:
-    """Prefer Turso/libsql embedded replica; otherwise local sqlite if FORCE_LOCAL=1."""
     info: Dict = {}
 
     url = (_resolve_str("TURSO_DATABASE_URL", "") or "").strip()
@@ -126,7 +116,6 @@ def build_engine() -> Tuple[Engine, Dict]:
     embedded_path = os.path.abspath(_resolve_str("EMBEDDED_DB_PATH", "vendors-embedded.db") or "vendors-embedded.db")
 
     if not url:
-        # No remote configured → plain local file DB
         eng = create_engine(
             "sqlite:///vendors.db",
             pool_pre_ping=True,
@@ -143,22 +132,17 @@ def build_engine() -> Tuple[Engine, Dict]:
         )
         return eng, info
 
-    # Embedded replica: local file that syncs to your remote Turso DB
     try:
-        # Normalize sync_url: embedded REQUIRES libsql:// (no sqlite+libsql, no ?secure=true)
         raw = url
         if raw.startswith("sqlite+libsql://"):
-            host = raw.split("://", 1)[1].split("?", 1)[0]  # drop any ?secure=true
+            host = raw.split("://", 1)[1].split("?", 1)[0]
             sync_url = f"libsql://{host}"
         else:
-            sync_url = raw.split("?", 1)[0]  # already libsql://...
+            sync_url = raw.split("?", 1)[0]
 
         eng = create_engine(
             f"sqlite+libsql:///{embedded_path}",
-            connect_args={
-                "auth_token": token,
-                "sync_url": sync_url,
-            },
+            connect_args={"auth_token": token, "sync_url": sync_url},
             pool_pre_ping=True,
             pool_recycle=300,
             pool_reset_on_return="commit",
@@ -204,12 +188,28 @@ def build_engine() -> Tuple[Engine, Dict]:
 
 def ensure_schema(engine: Engine, show_debug: bool = False) -> None:
     """
-    Execute schema DDL safely, one statement at a time, using driver-level execution.
-    Set show_debug=True (or SCHEMA_DEBUG=true in secrets/env) to print each statement.
+    Defensive schema init:
+      1) Create tables if missing
+      2) Add 'computed_keywords' column only if not present
+      3) Create indexes (IF NOT EXISTS)
     """
-    # Base DDL (keep each CREATE/ALTER as its own statement)
-    stmts = [
-        """
+    from sqlalchemy import exc as sa_exc
+
+    def _run(conn: Engine, stmt: str):
+        if show_debug:
+            st.write(":wrench: **DDL** →", f"`{stmt}`")
+        try:
+            conn.exec_driver_sql(stmt)
+        except sa_exc.OperationalError as e:
+            msg = str(e).lower()
+            # Ignore benign dup errors across sqlite/libsql variants
+            if ("already exists" in msg) or ("duplicate" in msg):
+                return
+            raise
+
+    with engine.begin() as conn:
+        # 1) Tables
+        _run(conn, """
         CREATE TABLE IF NOT EXISTS vendors (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           category TEXT NOT NULL,
@@ -224,67 +224,42 @@ def ensure_schema(engine: Engine, show_debug: bool = False) -> None:
           created_at TEXT,
           updated_at TEXT,
           updated_by TEXT
-        )
-        """,
-        """
+        )""")
+        _run(conn, """
         CREATE TABLE IF NOT EXISTS categories (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT UNIQUE
-        )
-        """,
-        """
+        )""")
+        _run(conn, """
         CREATE TABLE IF NOT EXISTS services (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT UNIQUE
-        )
-        """,
-        # Add computed_keywords if missing
-        "ALTER TABLE vendors ADD COLUMN computed_keywords TEXT",
-        # Indexes
-        "CREATE INDEX IF NOT EXISTS idx_vendors_cat ON vendors(category)",
-        "CREATE INDEX IF NOT EXISTS idx_vendors_bus ON vendors(business_name)",
-        "CREATE INDEX IF NOT EXISTS idx_vendors_kw  ON vendors(keywords)",
-        "CREATE INDEX IF NOT EXISTS idx_vendors_bus_lower ON vendors(lower(business_name))",
-        "CREATE INDEX IF NOT EXISTS idx_vendors_cat_lower ON vendors(lower(category))",
-        "CREATE INDEX IF NOT EXISTS idx_vendors_svc_lower ON vendors(lower(service))",
-        "CREATE INDEX IF NOT EXISTS idx_vendors_phone ON vendors(phone)",
-        "CREATE INDEX IF NOT EXISTS idx_vendors_ckw ON vendors(computed_keywords)",
-    ]
+        )""")
 
-    def _split_sql(s: str) -> list[str]:
-        parts = [p.strip() for p in s.replace("\r", "").split(";")]
-        return [p for p in parts if p]
-
-    flattened: list[str] = []
-    for s in stmts:
-        flattened.extend(_split_sql(s))
-
-    from sqlalchemy import exc as sa_exc
-
-    with engine.begin() as conn:
-        for stmt in flattened:
+        # 2) Conditionally add computed_keywords (check PRAGMA first)
+        cols = conn.exec_driver_sql("PRAGMA table_info(vendors)").fetchall()
+        colnames = {c[1] for c in cols}
+        if "computed_keywords" not in colnames:
             try:
-                if show_debug:
-                    st.write(":wrench: **DDL** →", f"`{stmt}`")
-                conn.exec_driver_sql(stmt)
-            except sa_exc.OperationalError as e:
-                msg = str(e).lower()
-                # benign when column already exists / libsql variance
-                if "duplicate" in msg or "already exists" in msg or "no such column option" in msg:
-                    continue
-                # sqlite ALTER TABLE add column will error if exists; ignore
-                if "duplicate column name" in msg or "already has a column" in msg:
-                    continue
-                # Some libsql builds throw different wording; safe to ignore typical add-column dup
-                if "cannot add a column that already exists" in msg:
-                    continue
-                raise
+                _run(conn, "ALTER TABLE vendors ADD COLUMN computed_keywords TEXT")
+            except Exception:
+                # Final guard: ignore any provider-specific wording if already added elsewhere
+                pass
+
+        # 3) Indexes
+        _run(conn, "CREATE INDEX IF NOT EXISTS idx_vendors_cat ON vendors(category)")
+        _run(conn, "CREATE INDEX IF NOT EXISTS idx_vendors_bus ON vendors(business_name)")
+        _run(conn, "CREATE INDEX IF NOT EXISTS idx_vendors_kw  ON vendors(keywords)")
+        _run(conn, "CREATE INDEX IF NOT EXISTS idx_vendors_bus_lower ON vendors(lower(business_name))")
+        _run(conn, "CREATE INDEX IF NOT EXISTS idx_vendors_cat_lower ON vendors(lower(category))")
+        _run(conn, "CREATE INDEX IF NOT EXISTS idx_vendors_svc_lower ON vendors(lower(service))")
+        _run(conn, "CREATE INDEX IF NOT EXISTS idx_vendors_phone ON vendors(phone)")
+        _run(conn, "CREATE INDEX IF NOT EXISTS idx_vendors_ckw ON vendors(computed_keywords)")
 
 
 # -----------------------------
 # Computed keywords
 # -----------------------------
-# Simple service synonyms and aliases. Extend as needed.
 SERVICE_ALIASES: Dict[str, List[str]] = {
     "Plumbing": ["plumber", "leak repair", "water heater", "drain", "sewer", "pipe", "toilet", "faucet"],
     "Roofing": ["roofer", "roof repair", "hail damage", "shingles", "leak"],
@@ -315,7 +290,6 @@ SERVICE_ALIASES: Dict[str, List[str]] = {
     "Primary Care": ["family doctor", "pcp", "checkup", "internal medicine"],
     "Audiology": ["hearing test", "hearing aids", "tinnitus"],
 }
-
 SVC_SYNONYMS = {k.lower(): v for k, v in SERVICE_ALIASES.items()}
 
 
@@ -345,17 +319,9 @@ def _sanitize_url(url: str | None) -> str:
 
 
 def _computed_keywords_for(category: str, service: str, business_name: str = "") -> str:
-    """
-    Build computed keywords using layered approach:
-      - base: category, service, business name tokens
-      - plus: known synonyms by service
-      - dedup, lowercase, simple short-token filter
-    If service is blank, returns "" (per your rule).
-    """
     cat = (category or "").strip()
     svc = (service or "").strip()
     name = (business_name or "").strip()
-
     if not svc:
         return ""
 
@@ -366,18 +332,12 @@ def _computed_keywords_for(category: str, service: str, business_name: str = "")
             if len(t) >= 2:
                 tokens.append(t)
 
-    # apply service synonyms
     syns = SVC_SYNONYMS.get(svc.lower(), [])
     for s in syns:
         s = s.strip().lower()
         if s:
             tokens.extend(re.split(r"[^\w]+", s))
 
-    # Add a few service-special cases (conservative)
-    # Example: if "pest control", include kill/bugs etc. (already in SVC_SYNONYMS)
-    # You can extend rules here.
-
-    # Deduplicate but keep order
     seen = set()
     out: List[str] = []
     for t in tokens:
@@ -392,9 +352,6 @@ def _computed_keywords_for(category: str, service: str, business_name: str = "")
 
 
 def _recompute_missing_computed_keywords(engine: Engine) -> Dict[str, int]:
-    """
-    Backfill missing computed_keywords for rows where service is not blank.
-    """
     now = datetime.utcnow().isoformat(timespec="seconds")
     updated = 0
     checked = 0
@@ -430,7 +387,7 @@ def _recompute_missing_computed_keywords(engine: Engine) -> Dict[str, int]:
 
 
 # -----------------------------
-# Data access helpers (DECLARED BEFORE UI)
+# Data access helpers
 # -----------------------------
 def load_df(engine: Engine) -> pd.DataFrame:
     with engine.begin() as conn:
@@ -452,9 +409,7 @@ def load_df(engine: Engine) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = ""
 
-    # Display-friendly phone; storage remains digits
     df["phone_fmt"] = df["phone"].apply(_format_phone)
-
     return df
 
 
@@ -486,7 +441,6 @@ st.markdown(
         padding-left: {LEFT_PAD_PX}px !important;
         padding-right: 0 !important;
       }}
-      /* No wrapping: you prefer horizontal resize */
       div[data-testid="stDataFrame"] table {{
         white-space: nowrap;
       }}
@@ -497,10 +451,9 @@ st.markdown(
 
 
 # -----------------------------
-# Admin sign-in gate (deterministic toggle)
+# Admin sign-in gate
 # -----------------------------
-# Code defaults (lowest precedence) — change here if you want different code-fallbacks.
-DISABLE_ADMIN_PASSWORD_DEFAULT = True      # True = bypass, False = require password
+DISABLE_ADMIN_PASSWORD_DEFAULT = True
 ADMIN_PASSWORD_DEFAULT = "admin"
 
 DISABLE_LOGIN = _resolve_bool("DISABLE_ADMIN_PASSWORD", DISABLE_ADMIN_PASSWORD_DEFAULT)
@@ -527,13 +480,11 @@ else:
 
 
 # -----------------------------
-# UI (engine + schema init occurs before UI uses helpers)
+# UI (engine + schema init)
 # -----------------------------
 engine, engine_info = build_engine()
-# Optional DDL debug controlled by secret/env: SCHEMA_DEBUG=true
 ensure_schema(engine, show_debug=_resolve_bool("SCHEMA_DEBUG", False))
 
-# Apply WAL PRAGMAs for local SQLite (not libsql driver)
 try:
     if not engine_info.get("using_remote", False) and engine_info.get("driver", "") != "libsql":
         with engine.begin() as _conn:
@@ -542,7 +493,7 @@ try:
 except Exception:
     pass
 
-# --- Startup backfill hook for computed_keywords (service must be present) ---
+# Startup backfill
 try:
     stats = _recompute_missing_computed_keywords(engine)
     if (stats.get("updated", 0) or 0) > 0 and _resolve_bool("SHOW_COMPUTED_BACKFILL", False):
@@ -566,7 +517,6 @@ _tabs = st.tabs(
 with _tabs[0]:
     df = load_df(engine)
 
-    # --- Build a lowercase search blob once (guarded) ---
     if "_blob" not in df.columns:
         parts = [
             df.get(c, pd.Series("", index=df.index)).astype(str)
@@ -585,22 +535,12 @@ with _tabs[0]:
         ]
         df["_blob"] = pd.concat(parts, axis=1).agg(" ".join, axis=1).str.lower()
 
-    # --- Search input at 25% width (table remains full width) ---
-    left, right = st.columns([1, 3])  # 25% / 75% split for this row only
+    left, right = st.columns([1, 3])
     with left:
-        q = st.text_input(
-            "Search",
-            placeholder="Search providers… (press Enter)",
-            label_visibility="collapsed",
-            key="q",
-        )
+        q = st.text_input("Search", placeholder="Search providers… (press Enter)", label_visibility="collapsed", key="q")
 
-    # Fast local filter using the prebuilt blob (no regex)
     qq = (st.session_state.get("q") or "").strip().lower()
-    if qq:
-        filtered = df[df["_blob"].str.contains(qq, regex=False, na=False)]
-    else:
-        filtered = df
+    filtered = df[df["_blob"].str.contains(qq, regex=False, na=False)] if qq else df
 
     view_cols = [
         "id",
@@ -614,16 +554,14 @@ with _tabs[0]:
         "notes",
         "keywords",
         "computed_keywords",
-        "__spacer",  # spacer for manual horizontal resizing
+        "__spacer",
     ]
 
-    # Create spacer column (blank)
     if "__spacer" not in filtered.columns:
         filtered["__spacer"] = ""
 
     vdf = filtered[view_cols].rename(columns={"phone_fmt": "phone"})
 
-    # Read-only table with clickable website links; fixed widths where useful
     st.dataframe(
         vdf,
         use_container_width=True,
@@ -637,13 +575,12 @@ with _tabs[0]:
             "website": st.column_config.LinkColumn("website", width=200),
             "notes": st.column_config.TextColumn(width=260),
             "keywords": st.column_config.TextColumn(width=220),
-            "computed_keywords": st.column_config.TextColumn(width=500),  # your requested width
+            "computed_keywords": st.column_config.TextColumn(width=500),
             "__spacer": st.column_config.TextColumn(label="", width=120),
         },
     )
 
     ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-    # Export button uses the view but DROPS the spacer
     vdf_no_spacer = vdf.drop(columns="__spacer")
     st.download_button(
         "Download filtered view (CSV)",
@@ -654,9 +591,7 @@ with _tabs[0]:
 
 # ---------- Add/Edit/Delete Vendor
 with _tabs[1]:
-    # ===== Add Vendor =====
     st.subheader("Add Vendor")
-    # Form state helpers
     ADD_FORM_KEYS = [
         "add_business_name",
         "add_category",
@@ -688,7 +623,6 @@ with _tabs[1]:
     def _queue_add_form_reset():
         st.session_state["_pending_add_reset"] = True
 
-    # init/apply
     _init_add_form_defaults()
     _apply_add_reset_if_needed()
 
@@ -700,14 +634,11 @@ with _tabs[1]:
         col1, col2 = st.columns(2)
         with col1:
             st.text_input("Provider *", key="add_business_name")
-
-            # Category select
             _add_cat_options = [""] + (cats or [])
             if (st.session_state.get("add_category") or "") not in _add_cat_options:
                 st.session_state["add_category"] = ""
             st.selectbox("Category *", options=_add_cat_options, key="add_category", placeholder="Select category")
 
-            # Service select
             _add_svc_options = [""] + (servs or [])
             if (st.session_state.get("add_service") or "") not in _add_svc_options:
                 st.session_state["add_service"] = ""
@@ -745,7 +676,6 @@ with _tabs[1]:
         notes = (st.session_state["add_notes"] or "").strip()
         keywords = (st.session_state["add_keywords"] or "").strip()
 
-        # Minimal validation
         if phone_norm and len(phone_norm) != 10:
             st.error("Phone must be 10 digits or blank.")
         elif not business_name or not category:
@@ -788,7 +718,6 @@ with _tabs[1]:
     st.divider()
     st.subheader("Edit / Delete Vendor")
 
-    # ----- Edit/Delete form state helpers -----
     EDIT_FORM_KEYS = [
         "edit_vendor_id",
         "edit_business_name",
@@ -873,7 +802,6 @@ with _tabs[1]:
         _apply_edit_reset_if_needed()
         _apply_delete_reset_if_needed()
 
-        # ----- EDIT: ID-backed selection with format_func -----
         ids = df_all["id"].astype(int).tolist()
         id_to_row = {int(r["id"]): r for _, r in df_all.iterrows()}
 
@@ -896,7 +824,6 @@ with _tabs[1]:
             key="edit_vendor_id",
         )
 
-        # Prefill only when selection changes
         if st.session_state["edit_vendor_id"] is not None:
             if st.session_state["edit_last_loaded_id"] != st.session_state["edit_vendor_id"]:
                 row = id_to_row[int(st.session_state["edit_vendor_id"])]
@@ -916,7 +843,6 @@ with _tabs[1]:
                     }
                 )
 
-        # -------- Edit form --------
         edit_form_key = f"edit_vendor_form_{st.session_state['edit_form_version']}"
         with st.form(edit_form_key, clear_on_submit=False):
             col1, col2 = st.columns(2)
@@ -946,6 +872,12 @@ with _tabs[1]:
 
             edited = st.form_submit_button("Save Changes")
 
+        def _nonce(name: str) -> str:
+            return st.session_state.get(f"{name}_nonce")
+
+        def _nonce_rotate(name: str) -> None:
+            st.session_state[f"{name}_nonce"] = uuid.uuid4().hex
+
         if edited:
             edit_nonce = _nonce("edit")
             if st.session_state.get("edit_last_done") == edit_nonce:
@@ -969,7 +901,6 @@ with _tabs[1]:
                         prev_updated = st.session_state.get("edit_row_updated_at") or ""
                         now = datetime.utcnow().isoformat(timespec="seconds")
                         computed = _computed_keywords_for(cat, svc, bn) if svc else ""
-
                         res = _exec_with_retry(
                             engine,
                             """
@@ -1005,9 +936,7 @@ with _tabs[1]:
                                 "prev_updated": prev_updated,
                             },
                         )
-                        rowcount = res.rowcount or 0
-
-                        if rowcount == 0:
+                        if (res.rowcount or 0) == 0:
                             st.warning("No changes applied (stale selection or already updated). Refresh and try again.")
                         else:
                             st.session_state["edit_last_done"] = edit_nonce
@@ -1019,14 +948,12 @@ with _tabs[1]:
                         st.error(f"Update failed: {e}")
 
         st.markdown("---")
-        # Use separate delete selection (ID-backed similar approach could be added later)
         sel_label_del = st.selectbox(
             "Select provider to delete (type to search)",
             options=["— Select —"] + [_fmt_vendor(i) for i in ids],
             key="delete_provider_label",
         )
         if sel_label_del != "— Select —":
-            # map back to id cheaply
             rev = {_fmt_vendor(i): i for i in ids}
             st.session_state["delete_vendor_id"] = int(rev.get(sel_label_del))
         else:
@@ -1041,7 +968,6 @@ with _tabs[1]:
             if st.session_state.get("delete_last_done") == del_nonce:
                 st.info("Delete already processed.")
                 st.stop()
-
             vid = st.session_state.get("delete_vendor_id")
             if vid is None:
                 st.error("Select a vendor first.")
@@ -1051,15 +977,10 @@ with _tabs[1]:
                     prev_updated = (row.iloc[0]["updated_at"] if not row.empty else "") or ""
                     res = _exec_with_retry(
                         engine,
-                        """
-                        DELETE FROM vendors
-                         WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
-                        """,
+                        "DELETE FROM vendors WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')",
                         {"id": int(vid), "prev_updated": prev_updated},
                     )
-                    rowcount = res.rowcount or 0
-
-                    if rowcount == 0:
+                    if (res.rowcount or 0) == 0:
                         st.warning("No delete performed (stale selection). Refresh and try again.")
                     else:
                         st.session_state["delete_last_done"] = del_nonce
@@ -1074,7 +995,6 @@ with _tabs[1]:
 with _tabs[2]:
     st.caption("Category is required. Manage the reference list and reassign vendors safely.")
 
-    # Category state helpers
     def _init_cat_defaults():
         st.session_state.setdefault("cat_form_version", 0)
         st.session_state.setdefault("_pending_cat_reset", False)
@@ -1096,7 +1016,7 @@ with _tabs[2]:
     _apply_cat_reset_if_needed()
 
     cats = list_names(engine, "categories")
-    cat_opts = ["— Select —"] + cats  # sentinel first
+    cat_opts = ["— Select —"] + cats
 
     colA, colB = st.columns(2)
     with colA:
@@ -1116,7 +1036,7 @@ with _tabs[2]:
 
         st.subheader("Rename Category")
         if cats:
-            old = st.selectbox("Current", options=cat_opts, key="cat_old")  # no index
+            old = st.selectbox("Current", options=cat_opts, key="cat_old")
             new = st.text_input("New name", key="cat_rename")
             if st.button("Rename", key="cat_rename_btn"):
                 if old == "— Select —":
@@ -1136,7 +1056,7 @@ with _tabs[2]:
     with colB:
         st.subheader("Delete / Reassign")
         if cats:
-            tgt = st.selectbox("Category to delete", options=cat_opts, key="cat_del")  # no index
+            tgt = st.selectbox("Category to delete", options=cat_opts, key="cat_del")
             if tgt == "— Select —":
                 st.write("Select a category.")
             else:
@@ -1153,7 +1073,7 @@ with _tabs[2]:
                             st.error(f"Delete category failed: {e}")
                 else:
                     repl_options = ["— Select —"] + [c for c in cats if c != tgt]
-                    repl = st.selectbox("Reassign vendors to…", options=repl_options, key="cat_reassign_to")  # no index
+                    repl = st.selectbox("Reassign vendors to…", options=repl_options, key="cat_reassign_to")
                     if st.button("Reassign vendors then delete", key="cat_reassign_btn"):
                         if repl == "— Select —":
                             st.error("Choose a category to reassign to.")
@@ -1171,7 +1091,6 @@ with _tabs[2]:
 with _tabs[3]:
     st.caption("Service is optional on vendors. Manage the reference list here.")
 
-    # Service state helpers
     def _init_svc_defaults():
         st.session_state.setdefault("svc_form_version", 0)
         st.session_state.setdefault("_pending_svc_reset", False)
@@ -1193,7 +1112,7 @@ with _tabs[3]:
     _apply_svc_reset_if_needed()
 
     servs = list_names(engine, "services")
-    svc_opts = ["— Select —"] + servs  # sentinel first
+    svc_opts = ["— Select —"] + servs
 
     colA, colB = st.columns(2)
     with colA:
@@ -1213,7 +1132,7 @@ with _tabs[3]:
 
         st.subheader("Rename Service")
         if servs:
-            old = st.selectbox("Current", options=svc_opts, key="svc_old")  # no index
+            old = st.selectbox("Current", options=svc_opts, key="svc_old")
             new = st.text_input("New name", key="svc_rename")
             if st.button("Rename Service", key="svc_rename_btn"):
                 if old == "— Select —":
@@ -1233,7 +1152,7 @@ with _tabs[3]:
     with colB:
         st.subheader("Delete / Reassign")
         if servs:
-            tgt = st.selectbox("Service to delete", options=svc_opts, key="svc_del")  # no index
+            tgt = st.selectbox("Service to delete", options=svc_opts, key="svc_del")
             if tgt == "— Select —":
                 st.write("Select a service.")
             else:
@@ -1250,7 +1169,7 @@ with _tabs[3]:
                             st.error(f"Delete service failed: {e}")
                 else:
                     repl_options = ["— Select —"] + [s for s in servs if s != tgt]
-                    repl = st.selectbox("Reassign vendors to…", options=repl_options, key="svc_reassign_to")  # no index
+                    repl = st.selectbox("Reassign vendors to…", options=repl_options, key="svc_reassign_to")
                     if st.button("Reassign vendors then delete service", key="svc_reassign_btn"):
                         if repl == "— Select —":
                             st.error("Choose a service to reassign to.")
@@ -1268,7 +1187,6 @@ with _tabs[3]:
 with _tabs[4]:
     st.subheader("Export / Import")
 
-    # --- Single export (formatted phone) ---
     query = "SELECT * FROM vendors ORDER BY lower(business_name)"
     with engine.begin() as conn:
         full = pd.read_sql(sql_text(query), conn)
@@ -1294,11 +1212,7 @@ with _tabs[4]:
 
     st.divider()
     st.subheader("CSV Restore (Append-only, ID-checked)")
-    st.caption(
-        "This import **only appends** new rows; existing `id` values are rejected. "
-        "Use Dry run first to validate."
-    )
-
+    st.caption("Append-only; existing IDs are rejected. Use Dry run first to validate.")
     uploaded = st.file_uploader("Upload CSV to append into `vendors`", type=["csv"], accept_multiple_files=False)
 
     col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
@@ -1313,15 +1227,13 @@ with _tabs[4]:
 
     def _soft_trim(s: str | None) -> str:
         s = (s or "").strip()
-        s = re.sub(r"[ \t]+", " ", s)  # collapse spaces/tabs; keep newlines
+        s = re.sub(r"[ \t]+", " ", s)
         return s
 
     def _fetch_existing_ids(engine: Engine, ids: Iterable[int]) -> set[int]:
         ids = [int(i) for i in ids if str(i).strip() != ""]
         if not ids:
             return set()
-        placeholders = ",".join(["?"] * len(ids)) if engine.dialect.name == "sqlite" else ",".join([":i"+str(k) for k in range(len(ids))])
-        # simple fallback for sqlite parameter style via sql_text with named params
         params = {("i"+str(k)): ids[k] for k in range(len(ids))}
         q = f"SELECT id FROM vendors WHERE id IN ({','.join([':i'+str(k) for k in range(len(ids))])})"
         with engine.begin() as conn:
@@ -1336,18 +1248,15 @@ with _tabs[4]:
         trim_strings: bool,
         treat_missing_id_as_autoincrement: bool,
     ):
-        # Determine insertable columns = intersection with vendors schema
         with engine.begin() as conn:
             cols = conn.execute(sql_text("PRAGMA table_info(vendors)")).fetchall()
         vendors_cols = [c[1] for c in cols]
         insertable_cols = [c for c in df_in.columns if c in vendors_cols]
-
         if not insertable_cols:
             raise ValueError("CSV has no columns matching `vendors` table.")
 
         df = df_in[insertable_cols].copy()
 
-        # Clean up columns
         if trim_strings:
             for c in df.columns:
                 if df[c].dtype == object:
@@ -1356,7 +1265,6 @@ with _tabs[4]:
         if normalize_phone and "phone" in df.columns:
             df["phone"] = df["phone"].map(lambda x: _normalize_phone(str(x)))
 
-        # Separate rows with/without id
         has_id = "id" in df.columns
         with_id_df = pd.DataFrame(columns=insertable_cols)
         without_id_df = pd.DataFrame(columns=insertable_cols)
@@ -1368,7 +1276,6 @@ with _tabs[4]:
         else:
             without_id_df = df.copy()
 
-        # Reject rows whose id already exists
         rejected_ids: List[int] = []
         if has_id and not with_id_df.empty:
             existing = _fetch_existing_ids(engine, with_id_df["id"].astype(int).tolist())
@@ -1377,9 +1284,7 @@ with _tabs[4]:
                 rejected_ids = sorted(list(existing))
                 with_id_df = with_id_df[keep_mask].copy()
 
-        # Handle autoincrement for rows without id
         if not treat_missing_id_as_autoincrement and not without_id_df.empty:
-            # If not autoincrementing, disallow rows with missing id
             without_id_df = pd.DataFrame(columns=insertable_cols)
 
         return with_id_df, without_id_df, rejected_ids, insertable_cols
@@ -1388,12 +1293,10 @@ with _tabs[4]:
         if not rows:
             return 0
         now = datetime.utcnow().isoformat(timespec="seconds")
-        # ensure timestamps
         for r in rows:
             r.setdefault("created_at", now)
             r.setdefault("updated_at", now)
             r.setdefault("updated_by", os.getenv("USER", "admin"))
-            # computed_keywords compute if service present
             cat = (r.get("category") or "").strip()
             svc = (r.get("service") or "").strip()
             name = (r.get("business_name") or "").strip()
@@ -1414,12 +1317,10 @@ with _tabs[4]:
         insertable_cols: List[str],
     ) -> int:
         inserted = 0
-        # Insert with explicit ids in a batch
         if not with_id_df.empty:
             rows = with_id_df.where(pd.notnull(with_id_df), None).to_dict(orient="records")
             inserted += _executemany_insert(engine, rows, insertable_cols)
 
-        # Insert rows without id (autoincrement). Remove 'id' if present but blank.
         if not without_id_df.empty:
             cols_no_id = [c for c in insertable_cols if c != "id"]
             rows = without_id_df.where(pd.notnull(without_id_df), None).to_dict(orient="records")
@@ -1429,7 +1330,6 @@ with _tabs[4]:
 
         return inserted
 
-    # Append UI
     with st.expander("CSV Restore (Append-only)", expanded=False):
         st.info("Append-only; existing IDs are rejected. Use Dry run first.")
         if uploaded is not None:
@@ -1465,167 +1365,11 @@ with _tabs[4]:
                     else:
                         inserted = _execute_append_only(engine, with_id_df, without_id_df, insertable_cols)
                         st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
-                        # Optional: immediate backfill for any blank computed_keywords with service
                         stats = _recompute_missing_computed_keywords(engine)
                         if stats.get("updated", 0):
                             st.info(f"Computed keywords backfill after import: {stats}")
             except Exception as e:
                 st.error(f"CSV restore failed: {e}")
-
-    st.divider()
-    st.subheader("Data cleanup")
-
-    if st.button("Normalize phone numbers & Title Case (vendors + categories/services)"):
-        def to_title(s: str | None) -> str:
-            return ((s or "").strip()).title()
-
-        TEXT_COLS_TO_TITLE = [
-            "category",
-            "service",
-            "business_name",
-            "contact_name",
-            "address",
-            "notes",
-            "keywords",
-        ]
-
-        changed_vendors = 0
-        try:
-            with engine.begin() as conn:
-                # --- vendors table ---
-                rows = conn.execute(sql_text("SELECT * FROM vendors")).fetchall()
-                for r in rows:
-                    row = dict(r._mapping) if hasattr(r, "_mapping") else dict(r)
-                    pid = int(row["id"])
-
-                    vals = {c: to_title(row.get(c)) for c in TEXT_COLS_TO_TITLE}
-                    vals["website"] = _sanitize_url((row.get("website") or "").strip())
-                    vals["phone"] = _normalize_phone(row.get("phone") or "")
-                    # keep computed_keywords as-is; regenerated by edits/backfill when service exists
-                    vals["id"] = pid
-
-                    conn.execute(
-                        sql_text(
-                            """
-                            UPDATE vendors
-                               SET category=:category,
-                                   service=NULLIF(:service,''),
-                                   business_name=:business_name,
-                                   contact_name=:contact_name,
-                                   phone=:phone,
-                                   address=:address,
-                                   website=:website,
-                                   notes=:notes,
-                                   keywords=:keywords
-                             WHERE id=:id
-                            """
-                        ),
-                        vals,
-                    )
-                    changed_vendors += 1
-
-                # --- categories table: retitle + reconcile duplicates by case ---
-                cat_rows = conn.execute(sql_text("SELECT name FROM categories")).fetchall()
-                for (old_name,) in cat_rows:
-                    new_name = to_title(old_name)
-                    if new_name != old_name:
-                        conn.execute(sql_text("INSERT OR IGNORE INTO categories(name) VALUES(:n)"), {"n": new_name})
-                        conn.execute(
-                            sql_text("UPDATE vendors SET category=:new WHERE category=:old"),
-                            {"new": new_name, "old": old_name},
-                        )
-                        conn.execute(sql_text("DELETE FROM categories WHERE name=:old"), {"old": old_name})
-
-                # --- services table: retitle + reconcile duplicates by case ---
-                svc_rows = conn.execute(sql_text("SELECT name FROM services")).fetchall()
-                for (old_name,) in svc_rows:
-                    new_name = to_title(old_name)
-                    if new_name != old_name:
-                        conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new_name})
-                        conn.execute(
-                            sql_text("UPDATE vendors SET service=:new WHERE service=:old"),
-                            {"new": new_name, "old": old_name},
-                        )
-                        conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"old": old_name})
-            st.success(f"Vendors normalized: {changed_vendors}. Categories/services retitled and reconciled.")
-        except Exception as e:
-            st.error(f"Normalization failed: {e}")
-
-    # Backfill timestamps (fix NULL and empty-string)
-    if st.button("Backfill created_at/updated_at when missing"):
-        try:
-            now = datetime.utcnow().isoformat(timespec="seconds")
-            with engine.begin() as conn:
-                conn.execute(
-                    sql_text(
-                        """
-                        UPDATE vendors
-                           SET created_at = CASE WHEN created_at IS NULL OR created_at = '' THEN :now ELSE created_at END,
-                               updated_at = CASE WHEN updated_at IS NULL OR updated_at = '' THEN :now ELSE updated_at END
-                        """
-                    ),
-                    {"now": now},
-                )
-            st.success("Backfill complete.")
-        except Exception as e:
-            st.error(f"Backfill failed: {e}")
-
-    # Trim extra whitespace across common text fields (preserves newlines in notes)
-    if st.button("Trim whitespace in text fields (safe)"):
-        try:
-            changed = 0
-            with engine.begin() as conn:
-                rows = conn.execute(
-                    sql_text(
-                        """
-                        SELECT id, category, service, business_name, contact_name, address, website, notes, keywords, phone
-                        FROM vendors
-                        """
-                    )
-                ).fetchall()
-
-                def clean_soft(s: str | None) -> str:
-                    s = (s or "").strip()
-                    # collapse runs of spaces/tabs only; KEEP line breaks
-                    s = re.sub(r"[ \t]+", " ", s)
-                    return s
-
-                for r in rows:
-                    pid = int(r[0])
-                    vals = {
-                        "category": clean_soft(r[1]),
-                        "service": clean_soft(r[2]),
-                        "business_name": clean_soft(r[3]),
-                        "contact_name": clean_soft(r[4]),
-                        "address": clean_soft(r[5]),
-                        "website": _sanitize_url(clean_soft(r[6])),
-                        "notes": clean_soft(r[7]),
-                        "keywords": clean_soft(r[8]),
-                        "phone": r[9],  # leave phone unchanged here
-                        "id": pid,
-                    }
-                    conn.execute(
-                        sql_text(
-                            """
-                            UPDATE vendors
-                               SET category=:category,
-                                   service=NULLIF(:service,''),
-                                   business_name=:business_name,
-                                   contact_name=:contact_name,
-                                   phone=:phone,
-                                   address=:address,
-                                   website=:website,
-                                   notes=:notes,
-                                   keywords=:keywords
-                             WHERE id=:id
-                            """
-                        ),
-                        vals,
-                    )
-                    changed += 1
-            st.success(f"Whitespace trimmed on {changed} row(s).")
-        except Exception as e:
-            st.error(f"Trim failed: {e}")
 
 # ---------- Debug
 with _tabs[5]:
@@ -1637,13 +1381,11 @@ with _tabs[5]:
         categories_cols = conn.execute(sql_text("PRAGMA table_info(categories)")).fetchall()
         services_cols = conn.execute(sql_text("PRAGMA table_info(services)")).fetchall()
 
-        # --- Index presence (vendors) ---
         idx_rows = conn.execute(sql_text("PRAGMA index_list(vendors)")).fetchall()
         vendors_indexes = [
             {"seq": r[0], "name": r[1], "unique": bool(r[2]), "origin": r[3], "partial": bool(r[4])} for r in idx_rows
         ]
 
-        # --- Null timestamp counts (quick sanity) ---
         created_at_nulls = conn.execute(
             sql_text("SELECT COUNT(*) FROM vendors WHERE created_at IS NULL OR created_at=''")
         ).scalar() or 0
@@ -1669,7 +1411,6 @@ with _tabs[5]:
         }
     )
 
-    # Quick probes
     st.markdown("**Run quick probes**")
     if st.button("Count rows needing computed_keywords"):
         try:
@@ -1690,5 +1431,4 @@ with _tabs[5]:
 
 
 if __name__ == "__main__":
-    # Streamlit runs via `streamlit run`, but keep guard for completeness.
     pass
