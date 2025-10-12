@@ -502,6 +502,11 @@ except Exception as _e:
     if _resolve_bool("SHOW_COMPUTED_BACKFILL", False):
         st.warning(f"Backfill skipped: {_e}")
 
+# ---- Admin Help / Tips (full-width expander) ----
+with st.expander("Admin Help / Tips (click to expand)", expanded=False):
+    st.markdown(_resolve_str("HELP_MD", "No help available."), unsafe_allow_html=True)
+# ---- end Admin Help / Tips ----
+
 _tabs = st.tabs(
     [
         "Browse Vendors",
@@ -1357,17 +1362,34 @@ with _tabs[4]:
                     }
                 )
 
+                # Preview first 20 rows that would be inserted
+                if planned_inserts > 0:
+                    preview_df = pd.concat([with_id_df, without_id_df], axis=0, ignore_index=True).head(20)
+                    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+
                 if dry_run:
                     st.success("Dry run complete. No changes applied.")
                 else:
                     if planned_inserts == 0:
                         st.info("Nothing to insert (all rows rejected or CSV empty after filters).")
                     else:
-                        inserted = _execute_append_only(engine, with_id_df, without_id_df, insertable_cols)
-                        st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
-                        stats = _recompute_missing_computed_keywords(engine)
-                        if stats.get("updated", 0):
-                            st.info(f"Computed keywords backfill after import: {stats}")
+                        # Modal confirmation before committing inserts
+                        if st.button("Append CSV…", type="primary", key="append_csv_open"):
+                            with st.dialog("Confirm CSV Append", width="small"):
+                                st.write("This will **append** rows from the uploaded file. This action is not reversible.")
+                                c1, c2 = st.columns(2)
+                                with c1:
+                                    if st.button("Cancel", key="append_cancel"):
+                                        st.rerun()
+                                with c2:
+                                    if st.button("Yes, append now", key="append_confirm"):
+                                        inserted = _execute_append_only(engine, with_id_df, without_id_df, insertable_cols)
+                                        st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
+                                        stats = _recompute_missing_computed_keywords(engine)
+                                        if stats.get("updated", 0):
+                                            st.info(f"Computed keywords backfill after import: {stats}")
+                                        st.rerun()
+
             except Exception as e:
                 st.error(f"CSV restore failed: {e}")
 
