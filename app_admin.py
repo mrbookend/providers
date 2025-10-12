@@ -1607,8 +1607,28 @@ with _tabs[4]:
     if _resolve_bool("ADMIN_SHOW_PROBES", True):
         st.divider()
         _render_quick_probes_ui(engine)
+# ------------------------------------
+# ------------------------------------
+# Category / Service Analysis
+# ------------------------------------
+st.divider()
+with st.expander("Show unique Category / Service pairs"):
+    if st.button("Run category/service analysis"):
+        with engine.connect() as conn:
+            rows = conn.execute(sql_text("""
+                SELECT
+                    TRIM(category) AS category,
+                    TRIM(service)  AS service,
+                    COUNT(*)       AS n
+                FROM vendors
+                GROUP BY category, service
+                ORDER BY category COLLATE NOCASE, service COLLATE NOCASE;
+            """)).fetchall()
+        df = pd.DataFrame(rows, columns=["category", "service", "count"])
+        st.dataframe(df, hide_index=True)
 
 # ---------- Debug
+
 with _tabs[5]:
     st.subheader("Status & Secrets (debug)")
     st.json(engine_info)
