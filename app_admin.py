@@ -6,9 +6,8 @@ import re
 import hmac
 import time
 import uuid
-import json
 from datetime import datetime
-from typing import List, Tuple, Dict, Iterable, Set
+from typing import List, Tuple, Dict
 
 import pandas as pd
 import streamlit as st
@@ -197,281 +196,75 @@ def build_engine() -> Tuple[Engine, Dict]:
 
 def ensure_schema(engine: Engine, show_debug: bool = False) -> None:
     """
-    Create baseline tables and migrate existing DBs to include new columns.
-    Important: if `vendors` exists without `computed_keywords`, add it before creating the index.
+    Execute schema DDL safely, one statement at a time, using driver-level execution.
+    Set show_debug=True (or SCHEMA_DEBUG=true in secrets/env) to print each statement.
     """
+    # Base DDL (note: keep each CREATE ... as its own statement for clarity)
+    stmts = [
+        """
+        CREATE TABLE IF NOT EXISTS vendors (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          category TEXT NOT NULL,
+          service TEXT,
+          business_name TEXT NOT NULL,
+          contact_name TEXT,
+          phone TEXT,
+          address TEXT,
+          website TEXT,
+          notes TEXT,
+          keywords TEXT,
+          created_at TEXT,
+          updated_at TEXT,
+          updated_by TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS categories (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT UNIQUE
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS services (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT UNIQUE
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_vendors_cat ON vendors(category)",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_bus ON vendors(business_name)",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_kw  ON vendors(keywords)",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_bus_lower ON vendors(lower(business_name))",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_cat_lower ON vendors(lower(category))",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_svc_lower ON vendors(lower(service))",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_phone ON vendors(phone)",
+    ]
+
+    def _split_sql(s: str) -> list[str]:
+        # Conservative split on ';', remove empties; keep order
+        parts = [p.strip() for p in s.replace("\r", "").split(";")]
+        return [p for p in parts if p]
+
+    # Flatten in case future edits accidentally introduce multi-statement blocks
+    flattened: list[str] = []
+    for s in stmts:
+        flattened.extend(_split_sql(s))
+
     from sqlalchemy import exc as sa_exc
 
-    def _exec(conn, stmt: str):
-        if show_debug:
-            st.write(":wrench: **DDL** →", f"`{stmt}`")
-        conn.exec_driver_sql(stmt)
-
     with engine.begin() as conn:
-        # --- Base tables (includes computed_keywords in the ideal schema) ---
-        _exec(conn, """
-            CREATE TABLE IF NOT EXISTS vendors (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              category TEXT NOT NULL,
-              service TEXT,
-              business_name TEXT NOT NULL,
-              contact_name TEXT,
-              phone TEXT,
-              address TEXT,
-              website TEXT,
-              notes TEXT,
-              keywords TEXT,
-              computed_keywords TEXT,
-              created_at TEXT,
-              updated_at TEXT,
-              updated_by TEXT
-            )
-        """)
-        _exec(conn, """
-            CREATE TABLE IF NOT EXISTS categories (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              name TEXT UNIQUE
-            )
-        """)
-        _exec(conn, """
-            CREATE TABLE IF NOT EXISTS services (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              name TEXT UNIQUE
-            )
-        """)
-
-        # --- Metadata tables to optionally persist service keyword knowledge ---
-        _exec(conn, """
-            CREATE TABLE IF NOT EXISTS service_synonyms (
-              service_key TEXT PRIMARY KEY,
-              synonyms    TEXT NOT NULL  -- JSON array
-            )
-        """)
-        _exec(conn, """
-            CREATE TABLE IF NOT EXISTS service_aliases (
-              alias_key     TEXT PRIMARY KEY,
-              canonical_key TEXT NOT NULL
-            )
-        """)
-
-        # --- MIGRATION: add computed_keywords if the vendors table predates it ---
-        cols = conn.exec_driver_sql("PRAGMA table_info(vendors)").fetchall()
-        have_cols = {str(c[1]) for c in cols}  # c[1] is column name
-        if "computed_keywords" not in have_cols:
-            _exec(conn, "ALTER TABLE vendors ADD COLUMN computed_keywords TEXT")
-
-        # --- Indexes (create-if-missing) ---
-        for stmt in [
-            "CREATE INDEX IF NOT EXISTS idx_vendors_cat ON vendors(category)",
-            "CREATE INDEX IF NOT EXISTS idx_vendors_bus ON vendors(business_name)",
-            "CREATE INDEX IF NOT EXISTS idx_vendors_kw  ON vendors(keywords)",
-            "CREATE INDEX IF NOT EXISTS idx_vendors_ckw ON vendors(computed_keywords)",
-            "CREATE INDEX IF NOT EXISTS idx_vendors_bus_lower ON vendors(lower(business_name))",
-            "CREATE INDEX IF NOT EXISTS idx_vendors_cat_lower ON vendors(lower(category))",
-            "CREATE INDEX IF NOT EXISTS idx_vendors_svc_lower ON vendors(lower(service))",
-            "CREATE INDEX IF NOT EXISTS idx_vendors_phone ON vendors(phone)",
-        ]:
+        for stmt in flattened:
+            if show_debug:
+                st.write(":wrench: **DDL** →", f"`{stmt}`")
             try:
-                _exec(conn, stmt)
+                conn.exec_driver_sql(stmt)
             except sa_exc.OperationalError as e:
                 msg = str(e).lower()
-                if "already exists" in msg or "duplicate" in msg:
+                # Skip benign duplicates across different SQLite/libsql builds
+                if ("already exists" in msg) or ("duplicate" in msg):
                     if show_debug:
                         st.write(":information_source: skipped benign error:", str(e))
                     continue
                 raise
-
-
-# -----------------------------
-# Keyword generation (computed_keywords)
-# -----------------------------
-SERVICE_ALIASES: Dict[str, str] = {
-    # alias_key -> canonical_key  (both kebab-case)
-    "a-c": "hvac",
-    "air-conditioning": "hvac",
-    "heating": "hvac",
-    "window-washing": "window-cleaning",
-    "weed-and-feed": "lawn-care",
-    "tree-trim": "tree-trimming",
-    "tree-removal": "tree-removal",
-    "curb-install": "curb-install",
-    "auto-repair": "auto-repair",
-    "address-tiles": "address-tiles",
-    "softener-service-sales": "water-softener",
-    "softener-service": "water-softener",
-    "screens": "screens",
-    "grout-clean": "grout-cleaning",
-    "granite-work": "granite",
-}
-
-SVC_SYNONYMS: Dict[str, List[str]] = {
-    # canonical service key -> synonyms/search intents
-    "pest-control": [
-        "exterminator", "pest removal", "spraying", "spray", "bugs", "insects",
-        "ants", "spiders", "termites", "roaches", "bed bugs", "fleas", "ticks",
-        "mosquitoes", "wasps", "scorpions"
-    ],
-    "plumbing": [
-        "plumber", "leak repair", "pipe repair", "sewer", "water heater",
-        "drain", "toilet", "faucet", "garbage disposal", "slab leak"
-    ],
-    "roofing": [
-        "roofer", "roof repair", "hail damage", "shingles", "leak", "re-roof",
-        "metal roof", "flat roof", "insurance claim"
-    ],
-    "hvac": [
-        "air conditioner", "air conditioning", "heating", "furnace", "mini split",
-        "ducts", "thermostat", "ac repair", "freon", "heat pump", "maintenance"
-    ],
-    "window-coverings": [
-        "shutters", "blinds", "plantation shutters", "shades", "window treatments"
-    ],
-    "handyman": [
-        "repairs", "doors", "drywall", "minor electrical", "minor plumbing", "carpentry"
-    ],
-    "lawn-care": [
-        "mowing", "edging", "fertilizer", "weed and feed", "yard service", "yard cleanup"
-    ],
-    "landscape-hardscape": [
-        "pavers", "patio", "retaining wall", "stone work", "hardscaping", "rock"
-    ],
-    "garage-doors": [
-        "overhead door", "torsion spring", "opener", "repair", "installation"
-    ],
-    "tree-trimming": [
-        "tree service", "branches", "pruning", "arborist", "stump grind"
-    ],
-    "tree-removal": [
-        "tree service", "stump removal", "stump grind", "arborist", "emergency"
-    ],
-    "carpet-cleaning": [
-        "steam clean", "stains", "pet odor", "tile grout", "upholstery cleaning"
-    ],
-    "flooring": [
-        "hardwood", "vinyl plank", "laminate", "tile", "carpet", "installation"
-    ],
-    "electrician": [
-        "electrical", "panel", "breaker", "outlet", "lighting", "ceiling fan",
-        "surge", "ev charger"
-    ],
-    "auto-repair": [
-        "mechanic", "oil change", "brakes", "tires", "alignment", "inspection"
-    ],
-    "grout-cleaning": ["grout", "tile", "sealant", "cleaning"],
-    "granite": ["countertop", "stone", "kitchen", "bath", "fabrication"],
-    "screens": ["window screens", "screen door", "screen repair"],
-    "window-cleaning": ["window washing", "squeegee", "pressure wash", "soft wash"],
-    "gutter-cleaning": ["downspout", "gutter guards", "roof wash"],
-    "artificial-turf": ["synthetic grass", "pet turf", "putting green"],
-    "irrigation": ["sprinklers", "sprinkler repair", "controller", "backflow"],
-    "deck-staining": ["deck sealing", "fence stain", "cedar", "pergola"],
-    "curb-install": ["concrete curb", "landscape edging", "borders"],
-    "water-softener": ["softener", "reverse osmosis", "water filter"],
-    "address-tiles": ["address numbers", "house numbers", "address plaques"],
-}
-
-_STOPWORDS: Set[str] = {
-    "the", "a", "an", "and", "or", "of", "for", "to", "llc", "inc", "co", "company",
-    "services", "service", "sa", "tx", "texas"
-}
-
-def _canon_key(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = s.replace("&", " and ")
-    s = re.sub(r"[^a-z0-9]+", "-", s)
-    s = re.sub(r"-+", "-", s).strip("-")
-    if not s:
-        return ""
-    # apply alias mapping
-    return SERVICE_ALIASES.get(s, s)
-
-def _tokenize(*parts: Iterable[str]) -> List[str]:
-    tokens: List[str] = []
-    for p in parts:
-        s = (p or "").lower()
-        s = re.sub(r"[^\w\s]+", " ", s)
-        for t in s.split():
-            t = t.strip()
-            if not t or t in _STOPWORDS or len(t) < 2:
-                continue
-            tokens.append(t)
-    return tokens
-
-def _uniq_keep_order(seq: Iterable[str]) -> List[str]:
-    seen = set()
-    out = []
-    for x in seq:
-        if x not in seen:
-            out.append(x)
-            seen.add(x)
-    return out
-
-def _synonyms_from_db(engine: Engine, service_key: str) -> List[str]:
-    try:
-        with engine.begin() as conn:
-            row = conn.execute(
-                sql_text("SELECT synonyms FROM service_synonyms WHERE service_key=:k"),
-                {"k": service_key},
-            ).fetchone()
-        if not row:
-            return []
-        arr = json.loads(row[0]) if isinstance(row[0], str) else []
-        return [str(x).strip() for x in arr if str(x).strip()]
-    except Exception:
-        return []
-
-def compute_computed_keywords(engine: Engine, category: str, service: str, business_name: str) -> str:
-    """
-    Layered approach:
-      - tokens from category, service, business_name
-      - + service synonyms (DB override if present, else built-in set)
-    If service is blank → return "" (your rule).
-    """
-    svc = (service or "").strip()
-    if not svc:
-        return ""
-    cat = (category or "")
-    name = (business_name or "")
-
-    base_tokens = _tokenize(cat, svc, name)
-
-    key = _canon_key(svc)
-    syn_db = _synonyms_from_db(engine, key)
-    syn_builtin = SVC_SYNONYMS.get(key, [])
-
-    # Allow DB to override/augment built-ins
-    syn_tokens = _tokenize(" ".join(syn_db or syn_builtin))
-
-    # Merge and uniq
-    all_tokens = _uniq_keep_order([*base_tokens, *syn_tokens])
-
-    # Final format: comma + space separated
-    return ", ".join(all_tokens)
-
-def backfill_missing_computed_keywords(engine: Engine) -> int:
-    """
-    Populate computed_keywords for rows that don't have it yet,
-    but only when service is non-blank (your rule).
-    """
-    updated = 0
-    with engine.begin() as conn:
-        rows = conn.execute(
-            sql_text("""
-                SELECT id, category, service, business_name
-                FROM vendors
-                WHERE (computed_keywords IS NULL OR computed_keywords = '')
-                  AND service IS NOT NULL AND TRIM(service) <> ''
-            """)
-        ).fetchall()
-        for rid, cat, svc, name in rows:
-            ck = compute_computed_keywords(engine, cat or "", svc or "", name or "")
-            if ck:
-                conn.execute(
-                    sql_text("UPDATE vendors SET computed_keywords=:ck, updated_at=:now WHERE id=:id"),
-                    {"ck": ck, "now": datetime.utcnow().isoformat(timespec="seconds"), "id": int(rid)},
-                )
-                updated += 1
-    return updated
 
 
 # -----------------------------
@@ -510,7 +303,6 @@ def load_df(engine: Engine) -> pd.DataFrame:
         "website",
         "notes",
         "keywords",
-        "computed_keywords",
         "service",
         "created_at",
         "updated_at",
@@ -596,14 +388,6 @@ engine, engine_info = build_engine()
 # Optional DDL debug controlled by secret/env: SCHEMA_DEBUG=true
 ensure_schema(engine, show_debug=_resolve_bool("SCHEMA_DEBUG", False))
 
-# NEW: one-time backfill for any rows missing computed_keywords (skips blank service)
-try:
-    n = backfill_missing_computed_keywords(engine)
-    if n:
-        st.caption(f"Backfilled computed keywords on {n} existing row(s).")
-except Exception as e:
-    st.caption(f"Computed keyword backfill skipped: {e}")
-
 # Apply WAL PRAGMAs for local SQLite (not libsql driver)
 try:
     if not engine_info.get("using_remote", False) and engine_info.get("driver", "") != "libsql":
@@ -632,7 +416,7 @@ with _tabs[0]:
     if "_blob" not in df.columns:
         parts = [
             df.get(c, pd.Series("", index=df.index)).astype(str)
-            for c in ["business_name", "category", "service", "contact_name", "phone", "address", "website", "notes", "keywords", "computed_keywords"]
+            for c in ["business_name", "category", "service", "contact_name", "phone", "address", "website", "notes", "keywords"]
         ]
         df["_blob"] = pd.concat(parts, axis=1).agg(" ".join, axis=1).str.lower()
 
@@ -664,7 +448,6 @@ with _tabs[0]:
         "website",
         "notes",
         "keywords",
-        "computed_keywords",   # visible in Admin browse
     ]
 
     vdf = filtered[view_cols].rename(columns={"phone_fmt": "phone"})
@@ -679,7 +462,6 @@ with _tabs[0]:
             "website": st.column_config.LinkColumn("website"),
             "notes": st.column_config.TextColumn(width=420),
             "keywords": st.column_config.TextColumn(width=300),
-            "computed_keywords": st.column_config.TextColumn(width=340),
         },
     )
 
@@ -780,17 +562,13 @@ with _tabs[1]:
         else:
             try:
                 now = datetime.utcnow().isoformat(timespec="seconds")
-                computed = compute_computed_keywords(engine, category, service, business_name)
-
                 _exec_with_retry(
                     engine,
                     """
                     INSERT INTO vendors(category, service, business_name, contact_name, phone, address,
-                                        website, notes, keywords, computed_keywords,
-                                        created_at, updated_at, updated_by)
+                                        website, notes, keywords, created_at, updated_at, updated_by)
                     VALUES(:category, NULLIF(:service, ''), :business_name, :contact_name, :phone, :address,
-                           :website, :notes, :keywords, :computed_keywords,
-                           :now, :now, :user)
+                           :website, :notes, :keywords, :now, :now, :user)
                     """,
                     {
                         "category": category,
@@ -802,7 +580,6 @@ with _tabs[1]:
                         "website": website,
                         "notes": notes,
                         "keywords": keywords,
-                        "computed_keywords": computed,
                         "now": now,
                         "user": os.getenv("USER", "admin"),
                     },
@@ -939,14 +716,13 @@ with _tabs[1]:
                 cats = list_names(engine, "categories")
                 servs = list_names(engine, "services")
 
-                _edit_cat_options = [""] + (cats or [])
-                if (st.session_state.get("edit_category") or "") not in _edit_cat_options:
-                    st.session_state["edit_category"] = ""
+                # --- FIX: don't blank out current values; include them in options
+                _curr_cat = (st.session_state.get("edit_category") or "").strip()
+                _edit_cat_options = [""] + sorted(set((cats or []) + ([_curr_cat] if _curr_cat else [])))
                 st.selectbox("Category *", options=_edit_cat_options, key="edit_category", placeholder="Select category")
 
-                _edit_svc_options = [""] + (servs or [])
-                if (st.session_state.get("edit_service") or "") not in _edit_svc_options:
-                    st.session_state["edit_service"] = ""
+                _curr_svc = (st.session_state.get("edit_service") or "").strip()
+                _edit_svc_options = [""] + sorted(set((servs or []) + ([_curr_svc] if _curr_svc else [])))
                 st.selectbox("Service (optional)", options=_edit_svc_options, key="edit_service")
 
                 st.text_input("Contact Name", key="edit_contact_name")
@@ -973,6 +749,19 @@ with _tabs[1]:
                 cat = (st.session_state["edit_category"] or "").strip()
                 svc = (st.session_state["edit_service"] or "").strip()
                 phone_norm = _normalize_phone(st.session_state["edit_phone"])
+
+                # --- FIX: auto-register category/service in reference lists (case-insensitive safe) ---
+                if cat:
+                    try:
+                        _exec_with_retry(engine, "INSERT OR IGNORE INTO categories(name) VALUES(:n)", {"n": cat})
+                    except Exception:
+                        pass
+                if svc:
+                    try:
+                        _exec_with_retry(engine, "INSERT OR IGNORE INTO services(name) VALUES(:n)", {"n": svc})
+                    except Exception:
+                        pass
+
                 if phone_norm and len(phone_norm) != 10:
                     st.error("Phone must be 10 digits or blank.")
                 elif not bn or not cat:
@@ -981,8 +770,6 @@ with _tabs[1]:
                     try:
                         prev_updated = st.session_state.get("edit_row_updated_at") or ""
                         now = datetime.utcnow().isoformat(timespec="seconds")
-                        computed = compute_computed_keywords(engine, cat, svc, bn)
-
                         res = _exec_with_retry(engine, """
                             UPDATE vendors
                                SET category=:category,
@@ -994,7 +781,6 @@ with _tabs[1]:
                                    website=:website,
                                    notes=:notes,
                                    keywords=:keywords,
-                                   computed_keywords=:computed_keywords,
                                    updated_at=:now,
                                    updated_by=:user
                              WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
@@ -1008,7 +794,6 @@ with _tabs[1]:
                             "website": _sanitize_url(st.session_state["edit_website"]),
                             "notes": (st.session_state["edit_notes"] or "").strip(),
                             "keywords": (st.session_state["edit_keywords"] or "").strip(),
-                            "computed_keywords": computed,
                             "now": now, "user": os.getenv("USER", "admin"),
                             "id": int(vid),
                             "prev_updated": prev_updated,
@@ -1508,29 +1293,6 @@ with _tabs[4]:
             st.success(f"Whitespace trimmed on {changed} row(s).")
         except Exception as e:
             st.error(f"Trim failed: {e}")
-
-    st.divider()
-    st.subheader("Computed keywords")
-
-    if st.button("Recompute `computed_keywords` for all rows"):
-        try:
-            updated = 0
-            with engine.begin() as conn:
-                rows = conn.execute(
-                    sql_text("SELECT id, category, service, business_name FROM vendors")
-                ).fetchall()
-                for rid, cat, svc, name in rows:
-                    ck = compute_computed_keywords(engine, cat or "", svc or "", name or "")
-                    conn.execute(
-                        sql_text(
-                            "UPDATE vendors SET computed_keywords=:ck, updated_at=:now WHERE id=:id"
-                        ),
-                        {"ck": ck, "now": datetime.utcnow().isoformat(timespec="seconds"), "id": int(rid)},
-                    )
-                    updated += 1
-            st.success(f"Recomputed computed_keywords on {updated} row(s).")
-        except Exception as e:
-            st.error(f"Recompute failed: {e}")
 
 # ---------- Debug
 with _tabs[5]:
