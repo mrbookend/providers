@@ -51,6 +51,18 @@ else:
 # =============================
 # Utilities
 # =============================
+# --- Phone display helper (Utilities) ---
+def format_phone_display(value):
+    """Return (xxx) xxx-xxxx for 10-digit inputs; otherwise original value."""
+    if value is None:
+        return value
+    s = str(value)
+    digits = re.sub(r"\D", "", s)
+    if len(digits) == 10:
+        return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+    return s
+# --- end phone display helper ---
+
 def _get_secret(name: str, default: Optional[str | int | dict | bool] = None):
     """Prefer Streamlit secrets; tolerate env fallback only for simple strings."""
     try:
@@ -337,22 +349,26 @@ def fetch_vendors(engine: Engine) -> pd.DataFrame:
     with engine.begin() as conn:
         df = pd.read_sql(sql_text(sql), conn)
 
-    def _mk_anchor(v: str) -> str:
-        if not isinstance(v, str) or not v.strip():
+    # Local helper to render website as an HTML anchor
+    def _mk_anchor(href: str) -> str:
+        if not href:
             return ""
-        u = v.strip()
-        if not (u.startswith("http://") or u.startswith("https://")):
-            u = "https://" + u
-        # compact label for display
-        href = html.escape(u, quote=True)
+        href = href.strip()
         return f'<a href="{href}" target="_blank" rel="noopener noreferrer">Website</a>'
 
+    # Website → HTML anchor
     if "website" in df.columns:
         df["website"] = df["website"].fillna("").astype(str).map(_mk_anchor)
 
+    # Phone display formatting (visual only)
+    if "phone" in df.columns:
+        df["phone"] = df["phone"].map(format_phone_display)
+
+    # Normalize remaining columns to strings (keep ids/timestamps untouched)
     for c in df.columns:
         if c not in ("id", "created_at", "updated_at"):
             df[c] = df[c].fillna("").astype(str)
+
     return df
 
 
@@ -502,7 +518,7 @@ def main():
     else:
         df_disp_sorted = df_disp_all.copy()
 
-        # Downloads (use sorted view) — guard empty frames
+    # Downloads (use sorted view) — guard empty frames
     # CSV: normalize 'website' to plain URL (match XLSX behavior)
     csv_df = df_disp_sorted.copy()
     if "website" in csv_df.columns and not csv_df.empty:
@@ -524,7 +540,6 @@ def main():
 
     # XLSX: also normalize 'website' to plain URL
     excel_df = df_disp_sorted.copy()
-
     if "website" in excel_df.columns and not excel_df.empty:
         # Convert anchor to plain URL for Excel export
         excel_df["website"] = excel_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
