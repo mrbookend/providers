@@ -209,7 +209,7 @@ st.markdown(
       {"[data-testid='stExpander'] details summary {padding-top: 4px !important; padding-bottom: 4px !important;}" if COMPACT else ""}
       {"[data-testid='stExpander'] .content {padding-top: 4px !important;}" if COMPACT else ""}
 
-      /* Optional: subtle search input affordance (kept inside the box; no external text) */
+      /* Optional: subtle search input affordance */
       [data-testid="stTextInput"] input {{
         border: 1px solid #d0d0d0 !important;
       }}
@@ -448,22 +448,26 @@ def main():
         st.error(f"Failed to load vendors: {e}")
         return
 
-    # Visible, explicit search box — substring matching (e.g., "plumb" finds "plumber", "plumbing")
-    st.text_input(
-        "Search",
-        key="q",
-        placeholder='e.g., plumb → matches "plumber", "plumbing", etc.',
-        help="Case-insensitive substring match across all columns (including hidden computed_keywords).",
-        autocomplete="off",
-    )
-    q = st.session_state.get("q", "")
+    # ---------- One-row controls: Search | CSV | XLSX | Sort by | Order ----------
+    c_search, c_csv, c_xlsx, c_sort, c_order = st.columns([5, 2, 2, 2, 2])
+
+    with c_search:
+        st.text_input(
+            "Search",
+            key="q",
+            label_visibility="collapsed",  # saves vertical space in the row
+            placeholder='plumb → matches "plumber", "plumbing", etc.',
+            help="Case-insensitive substring match across all columns (including hidden computed_keywords).",
+            autocomplete="off",
+        )
+
+    q = (st.session_state.get("q") or "")
     filtered_full = apply_global_search(df_full, q)
 
     # Columns we show (hide internal columns)
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
     df_disp_all = filtered_full[disp_cols]
 
-    # ----- Controls Row: Downloads + Sort -----
     def _label_for(col_key: str) -> str:
         return READONLY_COLUMN_LABELS.get(col_key, col_key.replace("_", " ").title())
 
@@ -471,35 +475,31 @@ def main():
     sortable_cols = [c for c in disp_cols if c != "website"]
     sort_labels = [_label_for(c) for c in sortable_cols]
 
-    c_spacer, c_csv, c_xlsx, c_sort, c_order = st.columns([6, 2, 2, 2, 2])
-
-    # Safe defaults when no sortable cols (defensive)
-    if len(sortable_cols) == 0:
-        chosen_label = "Business Name"
-        order = "Ascending"
-        sort_col = None
-        ascending = True
-    else:
-        default_sort_col = "business_name" if "business_name" in sortable_cols else sortable_cols[0]
-        default_label = _label_for(default_sort_col)
-
-        with c_sort:
+    with c_sort:
+        if sortable_cols:
+            default_sort_col = "business_name" if "business_name" in sortable_cols else sortable_cols[0]
+            default_label = _label_for(default_sort_col)
             chosen_label = st.selectbox(
                 "Sort by",
                 options=sort_labels,
                 index=max(0, sort_labels.index(default_label)) if default_label in sort_labels else 0,
                 key="sort_by_label",
             )
-        with c_order:
-            order = st.selectbox(
-                "Order",
-                options=["Ascending", "Descending"],
-                index=0,
-                key="sort_order",
-            )
+        else:
+            chosen_label = st.selectbox("Sort by", options=["(none)"], index=0, key="sort_by_label")
 
-        sort_col = sortable_cols[sort_labels.index(chosen_label)] if chosen_label in sort_labels else sortable_cols[0]
-        ascending = (order == "Ascending")
+    with c_order:
+        order = st.selectbox(
+            "Order",
+            options=["Ascending", "Descending"],
+            index=0,
+            key="sort_order",
+        )
+
+    sort_col = None
+    if sortable_cols and chosen_label in sort_labels:
+        sort_col = sortable_cols[sort_labels.index(chosen_label)]
+    ascending = (order == "Ascending")
 
     # Case-insensitive sort for text columns; stable sort keeps ties predictable
     if sort_col is not None and sort_col in df_disp_all.columns and not df_disp_all.empty:
@@ -513,16 +513,11 @@ def main():
     else:
         df_disp_sorted = df_disp_all.copy()
 
-    # Help/Tips expander (placed LOWER to shorten header height)
-    with st.expander("Help / Tips (click to expand)", expanded=False):
-        st.markdown(_get_help_md(), unsafe_allow_html=True)
-
     # Downloads (use sorted view) — guard empty frames
     # CSV: normalize 'website' to plain URL (match XLSX behavior)
     csv_df = df_disp_sorted.copy()
     if "website" in csv_df.columns and not csv_df.empty:
         csv_df["website"] = csv_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
-
     csv_buf = io.StringIO()
     if not csv_df.empty:
         csv_df.to_csv(csv_buf, index=False)
@@ -541,7 +536,6 @@ def main():
     excel_df = df_disp_sorted.copy()
     if "website" in excel_df.columns and not excel_df.empty:
         excel_df["website"] = excel_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
-
     xlsx_buf = io.BytesIO()
     if not excel_df.empty:
         with pd.ExcelWriter(xlsx_buf, engine="xlsxwriter") as writer:
@@ -559,6 +553,10 @@ def main():
             use_container_width=True,
             disabled=excel_df.empty,
         )
+
+    # Help/Tips expander (placed LOWER to shorten header height)
+    with st.expander("Help / Tips (click to expand)", expanded=False):
+        st.markdown(_get_help_md(), unsafe_allow_html=True)
 
     # Optional status line (toggle via Secrets)
     if SHOW_STATUS:
