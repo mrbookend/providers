@@ -670,7 +670,7 @@ with _tabs[0]:
             "website": st.column_config.LinkColumn("website"),
             "notes": st.column_config.TextColumn(width=420),
             "keywords": st.column_config.TextColumn(width=300),
-            "computed_keywords": st.column_config.TextColumn(width=340),
+            "computed_keywords": st.column_config.TextColumn(width=600),
         },
     )
 
