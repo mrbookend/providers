@@ -426,7 +426,7 @@ def main():
             "Search",
             key="q",
             label_visibility="collapsed",
-            placeholder='plumb → plumber, plumbing',
+            placeholder='SEARCH plumb → plumber, plumbing, plumbago',
             help="Case-insensitive substring match across all columns (including hidden computed_keywords).",
             autocomplete="off",
         )
