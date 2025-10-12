@@ -145,7 +145,7 @@ PAD_LEFT_CSS = _css_len_from_secret(_get_secret("page_left_padding_px", "12"), 1
 TOP_PAD_PX = _to_int(_get_secret("page_top_padding_px", "10"), 10)
 COMPACT = _as_bool(_get_secret("READONLY_COMPACT", True), True)
 
-# Force single-row controls by secret; default to one_row for reliability here
+# Controls layout (we'll still respect the secret, but code below is single-row)
 CONTROLS_LAYOUT = str(_get_secret("READONLY_CONTROLS_LAYOUT", "one_row") or "one_row").strip().lower()
 if CONTROLS_LAYOUT not in ("two_row", "one_row"):
     CONTROLS_LAYOUT = "one_row"
@@ -418,7 +418,6 @@ def main():
         return
 
     # ---------- Single-row controls: Search(40%) | CSV(15%) | XLSX(15%) | Sort(15%) | Order(15%) ----------
-    # Column ratios sum to 20: 8/20=40%, 3/20=15% each for the rest
     c_search, c_csv, c_xlsx, c_sort, c_order = st.columns([8, 3, 3, 3, 3])
 
     with c_search:
@@ -426,7 +425,7 @@ def main():
             "Search",
             key="q",
             label_visibility="collapsed",
-            placeholder='SEARCH plumb → plumber, plumbing, plumbago',
+            placeholder='plumb → plumber, plumbing',
             help="Case-insensitive substring match across all columns (including hidden computed_keywords).",
             autocomplete="off",
         )
@@ -438,6 +437,9 @@ def main():
     # Columns we show (hide internal columns)
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
     df_disp_all = filtered_full[disp_cols]
+
+    # --- safety default so df_disp_sorted always exists ---
+    df_disp_sorted = df_disp_all.copy()
 
     # Sort controls
     def _label_for(col_key: str) -> str:
@@ -483,8 +485,6 @@ def main():
             kind="mergesort",
             key=keyfunc
         )
-    else:
-        df_disp_sorted = df_disp_all.copy()
 
     # ---- Download buttons (sorted view) — single-line labels to minimize height ----
     csv_df = df_disp_sorted.copy()
@@ -532,16 +532,14 @@ def main():
         st.caption(f"{len(df_disp_sorted)} matching provider(s). Viewport rows: {VIEWPORT_ROWS}")
 
     # ---------------- Scrollable full table ----------------
-if df_disp_sorted.empty:
-    st.info("No matching providers.")
-else:
-    # 👇 add this spacer line to create a little room above the headings
-    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+    if df_disp_sorted.empty:
+        st.info("No matching providers.")
+    else:
+        # small spacer to add room above headings
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+        st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
 
-    st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
-
-# Help/Tips expander — moved BELOW the table to free vertical space
-
+    # Help/Tips expander — moved BELOW the table to free vertical space
     with st.expander("Help / Tips (click to expand)", expanded=False):
         st.markdown(_get_help_md(), unsafe_allow_html=True)
 
