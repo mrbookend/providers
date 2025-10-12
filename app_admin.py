@@ -419,6 +419,12 @@ def list_names(engine: Engine, table: str) -> list[str]:
     return [r[0] for r in rows]
 
 
+def list_names_normalized(engine: Engine, table: str) -> list[str]:
+    """Normalized list (trim blanks and discard empties)."""
+    raw = list_names(engine, table)
+    return [str(x).strip() for x in raw if (x or "").strip()]
+
+
 def usage_count(engine: Engine, col: str, name: str) -> int:
     with engine.begin() as conn:
         cnt = conn.execute(sql_text(f"SELECT COUNT(*) FROM vendors WHERE {col} = :n"), {"n": name}).scalar()
@@ -542,7 +548,7 @@ with _tabs[0]:
 
     left, right = st.columns([1, 3])
     with left:
-        q = st.text_input("Search", placeholder="Search providers… (press Enter)", label_visibility="collapsed", key="q")
+        st.text_input("Search", placeholder="Search providers… (press Enter)", label_visibility="collapsed", key="q")
 
     qq = (st.session_state.get("q") or "").strip().lower()
     filtered = df[df["_blob"].str.contains(qq, regex=False, na=False)] if qq else df
@@ -631,8 +637,8 @@ with _tabs[1]:
     _init_add_form_defaults()
     _apply_add_reset_if_needed()
 
-    cats = list_names(engine, "categories")
-    servs = list_names(engine, "services")
+    cats = list_names_normalized(engine, "categories")
+    servs = list_names_normalized(engine, "services")
 
     add_form_key = f"add_vendor_form_{st.session_state['add_form_version']}"
     with st.form(add_form_key, clear_on_submit=False):
@@ -687,6 +693,11 @@ with _tabs[1]:
             st.error("Business Name and Category are required.")
         else:
             try:
+                # Ensure reference rows exist (idempotent)
+                _exec_with_retry(engine, "INSERT OR IGNORE INTO categories(name) VALUES(:n)", {"n": category})
+                if service:
+                    _exec_with_retry(engine, "INSERT OR IGNORE INTO services(name) VALUES(:n)", {"n": service})
+
                 now = datetime.utcnow().isoformat(timespec="seconds")
                 computed = _computed_keywords_for(category, service, business_name) if service else ""
                 _exec_with_retry(
@@ -832,17 +843,18 @@ with _tabs[1]:
         if st.session_state["edit_vendor_id"] is not None:
             if st.session_state["edit_last_loaded_id"] != st.session_state["edit_vendor_id"]:
                 row = id_to_row[int(st.session_state["edit_vendor_id"])]
+                # Trim values on load to avoid invisible whitespace mismatches
                 st.session_state.update(
                     {
-                        "edit_business_name": row.get("business_name") or "",
-                        "edit_category": row.get("category") or "",
-                        "edit_service": row.get("service") or "",
-                        "edit_contact_name": row.get("contact_name") or "",
-                        "edit_phone": row.get("phone") or "",
-                        "edit_address": row.get("address") or "",
-                        "edit_website": row.get("website") or "",
-                        "edit_notes": row.get("notes") or "",
-                        "edit_keywords": row.get("keywords") or "",
+                        "edit_business_name": (row.get("business_name") or "").strip(),
+                        "edit_category": (row.get("category") or "").strip(),
+                        "edit_service": (row.get("service") or "").strip(),
+                        "edit_contact_name": (row.get("contact_name") or "").strip(),
+                        "edit_phone": (row.get("phone") or "").strip(),
+                        "edit_address": (row.get("address") or "").strip(),
+                        "edit_website": (row.get("website") or "").strip(),
+                        "edit_notes": (row.get("notes") or "").strip(),
+                        "edit_keywords": (row.get("keywords") or "").strip(),
                         "edit_row_updated_at": row.get("updated_at") or "",
                         "edit_last_loaded_id": st.session_state["edit_vendor_id"],
                     }
@@ -854,18 +866,35 @@ with _tabs[1]:
             with col1:
                 st.text_input("Provider *", key="edit_business_name")
 
-                cats = list_names(engine, "categories")
-                servs = list_names(engine, "services")
+                cats = list_names_normalized(engine, "categories")
+                servs = list_names_normalized(engine, "services")
+
+                # Preserve current values even if not in reference tables
+                cur_cat = (st.session_state.get("edit_category") or "").strip()
+                cur_svc = (st.session_state.get("edit_service") or "").strip()
 
                 _edit_cat_options = [""] + (cats or [])
-                if (st.session_state.get("edit_category") or "") not in _edit_cat_options:
-                    st.session_state["edit_category"] = ""
-                st.selectbox("Category *", options=_edit_cat_options, key="edit_category", placeholder="Select category")
+                if cur_cat and cur_cat not in _edit_cat_options:
+                    _edit_cat_options = [""] + [cur_cat] + [c for c in cats if c != cur_cat]
 
                 _edit_svc_options = [""] + (servs or [])
-                if (st.session_state.get("edit_service") or "") not in _edit_svc_options:
-                    st.session_state["edit_service"] = ""
-                st.selectbox("Service (optional)", options=_edit_svc_options, key="edit_service")
+                if cur_svc and cur_svc not in _edit_svc_options:
+                    _edit_svc_options = [""] + [cur_svc] + [s for s in servs if s != cur_svc]
+
+                st.selectbox(
+                    "Category *",
+                    options=_edit_cat_options,
+                    index=_edit_cat_options.index(cur_cat) if cur_cat in _edit_cat_options else 0,
+                    key="edit_category",
+                    placeholder="Select category",
+                )
+
+                st.selectbox(
+                    "Service (optional)",
+                    options=_edit_svc_options,
+                    index=_edit_svc_options.index(cur_svc) if cur_svc in _edit_svc_options else 0,
+                    key="edit_service",
+                )
 
                 st.text_input("Contact Name", key="edit_contact_name")
                 st.text_input("Phone (10 digits or blank)", key="edit_phone")
@@ -899,10 +928,17 @@ with _tabs[1]:
                 phone_norm = _normalize_phone(st.session_state["edit_phone"])
                 if phone_norm and len(phone_norm) != 10:
                     st.error("Phone must be 10 digits or blank.")
-                elif not bn or not cat:
-                    st.error("Business Name and Category are required.")
+                elif not bn:
+                    st.error("Business Name is required.")
+                elif not cat:
+                    st.error("Category is required. Pick one under 'Category Admin' if missing.")
                 else:
                     try:
+                        # Ensure chosen references exist (idempotent)
+                        _exec_with_retry(engine, "INSERT OR IGNORE INTO categories(name) VALUES(:n)", {"n": cat})
+                        if svc:
+                            _exec_with_retry(engine, "INSERT OR IGNORE INTO services(name) VALUES(:n)", {"n": svc})
+
                         prev_updated = st.session_state.get("edit_row_updated_at") or ""
                         now = datetime.utcnow().isoformat(timespec="seconds")
                         computed = _computed_keywords_for(cat, svc, bn) if svc else ""
@@ -1020,7 +1056,7 @@ with _tabs[2]:
     _init_cat_defaults()
     _apply_cat_reset_if_needed()
 
-    cats = list_names(engine, "categories")
+    cats = list_names_normalized(engine, "categories")
     cat_opts = ["— Select —"] + cats
 
     colA, colB = st.columns(2)
@@ -1116,7 +1152,7 @@ with _tabs[3]:
     _init_svc_defaults()
     _apply_svc_reset_if_needed()
 
-    servs = list_names(engine, "services")
+    servs = list_names_normalized(engine, "services")
     svc_opts = ["— Select —"] + servs
 
     colA, colB = st.columns(2)
@@ -1373,22 +1409,32 @@ with _tabs[4]:
                     if planned_inserts == 0:
                         st.info("Nothing to insert (all rows rejected or CSV empty after filters).")
                     else:
-                        # Modal confirmation before committing inserts
-                        if st.button("Append CSV…", type="primary", key="append_csv_open"):
-                            with st.dialog("Confirm CSV Append", width="small"):
-                                st.write("This will **append** rows from the uploaded file. This action is not reversible.")
-                                c1, c2 = st.columns(2)
-                                with c1:
-                                    if st.button("Cancel", key="append_cancel"):
-                                        st.rerun()
-                                with c2:
-                                    if st.button("Yes, append now", key="append_confirm"):
-                                        inserted = _execute_append_only(engine, with_id_df, without_id_df, insertable_cols)
-                                        st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
-                                        stats = _recompute_missing_computed_keywords(engine)
-                                        if stats.get("updated", 0):
-                                            st.info(f"Computed keywords backfill after import: {stats}")
-                                        st.rerun()
+                        # Modal confirmation before committing inserts (Streamlit >= 1.31)
+                        try:
+                            if st.button("Append CSV…", type="primary", key="append_csv_open"):
+                                with st.dialog("Confirm CSV Append", width="small"):
+                                    st.write("This will **append** rows from the uploaded file. This action is not reversible.")
+                                    c1, c2 = st.columns(2)
+                                    with c1:
+                                        if st.button("Cancel", key="append_cancel"):
+                                            st.rerun()
+                                    with c2:
+                                        if st.button("Yes, append now", key="append_confirm"):
+                                            inserted = _execute_append_only(engine, with_id_df, without_id_df, insertable_cols)
+                                            st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
+                                            stats = _recompute_missing_computed_keywords(engine)
+                                            if stats.get("updated", 0):
+                                                st.info(f"Computed keywords backfill after import: {stats}")
+                                            st.rerun()
+                        except Exception:
+                            # Fallback (older Streamlit): no modal, execute directly
+                            if st.button("Append CSV (no modal)"):
+                                inserted = _execute_append_only(engine, with_id_df, without_id_df, insertable_cols)
+                                st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
+                                stats = _recompute_missing_computed_keywords(engine)
+                                if stats.get("updated", 0):
+                                    st.info(f"Computed keywords backfill after import: {stats}")
+                                st.rerun()
 
             except Exception as e:
                 st.error(f"CSV restore failed: {e}")
