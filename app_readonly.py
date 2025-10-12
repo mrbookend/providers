@@ -532,12 +532,16 @@ def main():
         st.caption(f"{len(df_disp_sorted)} matching provider(s). Viewport rows: {VIEWPORT_ROWS}")
 
     # ---------------- Scrollable full table ----------------
-    if df_disp_sorted.empty:
-        st.info("No matching providers.")
-    else:
-        st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
+if df_disp_sorted.empty:
+    st.info("No matching providers.")
+else:
+    # 👇 add this spacer line to create a little room above the headings
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
-    # Help/Tips expander — moved BELOW the table to free vertical space
+    st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
+
+# Help/Tips expander — moved BELOW the table to free vertical space
+
     with st.expander("Help / Tips (click to expand)", expanded=False):
         st.markdown(_get_help_md(), unsafe_allow_html=True)
 
