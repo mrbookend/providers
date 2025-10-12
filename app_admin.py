@@ -296,7 +296,6 @@ def _compute_keywords_row(category: str, service: str, business_name: str) -> st
     Layered keyword strategy:
     1) Baseline: category + service + business name terms.
     2) Service synonyms (canonicalized).
-    3) (Optional) lightweight geo terms if address looks local (NOT implemented here).
     """
     tokens: list[str] = []
 
@@ -352,7 +351,7 @@ def backfill_computed_keywords(engine: Engine) -> int:
                 {"ck": ck, "now": now, "id": int(r["id"])},
             )
             updated += 1
-    return updated)
+    return updated
 
 
 # -----------------------------
@@ -414,6 +413,116 @@ def usage_count(engine: Engine, col: str, name: str) -> int:
     with engine.begin() as conn:
         cnt = conn.execute(sql_text(f"SELECT COUNT(*) FROM vendors WHERE {col} = :n"), {"n": name}).scalar()
     return int(cnt or 0)
+
+
+# -----------------------------
+# CSV restore helpers (append-only, ID-checked)
+# -----------------------------
+def _prepare_csv_for_append(
+    engine: Engine,
+    df_in: pd.DataFrame,
+    *,
+    normalize_phone: bool = True,
+    trim_strings: bool = True,
+    treat_missing_id_as_autoincrement: bool = True,
+) -> Tuple[pd.DataFrame, pd.DataFrame, List[int], List[str]]:
+    """
+    Split uploaded CSV into rows that specify id (and are not present) vs rows without id
+    (to use autoincrement). Filter to only actual vendor columns.
+    """
+    with engine.begin() as conn:
+        cols_info = conn.execute(sql_text("PRAGMA table_info(vendors)")).mappings().all()
+    vendor_cols = [c["name"] for c in cols_info]
+
+    # Keep only known columns
+    df = df_in.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    keep = [c for c in df.columns if c in vendor_cols]
+    df = df[keep] if keep else pd.DataFrame(columns=vendor_cols)
+
+    # optional trims
+    if trim_strings:
+        for c in df.columns:
+            if pd.api.types.is_string_dtype(df[c]):
+                df[c] = df[c].astype(str).str.strip()
+
+    if normalize_phone and "phone" in df.columns:
+        df["phone"] = df["phone"].apply(_normalize_phone)
+
+    # Determine existing ids
+    existing_ids: set[int] = set()
+    if "id" in df.columns and df["id"].notna().any():
+        ids = [int(x) for x in pd.to_numeric(df["id"], errors="coerce").dropna().tolist()]
+        if ids:
+            with engine.begin() as conn:
+                rows = conn.execute(
+                    sql_text("SELECT id FROM vendors WHERE id IN (%s)" % ",".join(["?"] * len(ids))),
+                    ids,
+                ).fetchall()
+            existing_ids = {int(r[0]) for r in rows}
+
+    with_id_df = pd.DataFrame(columns=vendor_cols)
+    without_id_df = pd.DataFrame(columns=vendor_cols)
+    rejected_ids: List[int] = []
+
+    if "id" in df.columns:
+        has_id_mask = pd.to_numeric(df["id"], errors="coerce").notna()
+        with_id = df[has_id_mask].copy()
+        without_id = df[~has_id_mask].copy()
+    else:
+        with_id = pd.DataFrame(columns=df.columns)
+        without_id = df.copy()
+
+    # reject existing ids
+    if not with_id.empty:
+        with_id["id"] = with_id["id"].astype(int)
+        mask_new = ~with_id["id"].isin(list(existing_ids))
+        rejected_ids = sorted(with_id.loc[~mask_new, "id"].astype(int).tolist())
+        with_id_df = with_id.loc[mask_new, vendor_cols].copy()
+    else:
+        with_id_df = pd.DataFrame(columns=vendor_cols)
+
+    # rows that will autoincrement id → simply drop id column if present
+    wi = without_id.copy()
+    if "id" in wi.columns:
+        wi = wi.drop(columns=["id"])
+    without_id_df = wi[[c for c in vendor_cols if c != "id"]].copy()
+
+    insertable_cols = [c for c in vendor_cols if c in df.columns]  # informational
+    return with_id_df, without_id_df, rejected_ids, insertable_cols
+
+def _execute_append_only(
+    engine: Engine,
+    with_id_df: pd.DataFrame,
+    without_id_df: pd.DataFrame,
+    insertable_cols: List[str],
+) -> int:
+    """
+    Perform the actual INSERTs. Rows with explicit id are inserted with that id.
+    Rows without id use autoincrement.
+    """
+    inserted = 0
+    with engine.begin() as conn:
+        # explicit id rows
+        if not with_id_df.empty:
+            cols = [c for c in with_id_df.columns if c != ""]
+            placeholders = ", ".join([f":{c}" for c in cols])
+            sql = f"INSERT INTO vendors({', '.join(cols)}) VALUES({placeholders})"
+            data = with_id_df.where(pd.notnull(with_id_df), None).to_dict(orient="records")
+            for chunk_start in range(0, len(data), 500):
+                conn.execute(sql_text(sql), data[chunk_start:chunk_start + 500])
+            inserted += len(data)
+
+        # autoincrement id rows
+        if not without_id_df.empty:
+            cols = [c for c in without_id_df.columns if c != ""]
+            placeholders = ", ".join([f":{c}" for c in cols])
+            sql = f"INSERT INTO vendors({', '.join(cols)}) VALUES({placeholders})"
+            data = without_id_df.where(pd.notnull(without_id_df), None).to_dict(orient="records")
+            for chunk_start in range(0, len(data), 500):
+                conn.execute(sql_text(sql), data[chunk_start:chunk_start + 500])
+            inserted += len(data)
+    return inserted
 
 
 # -----------------------------
