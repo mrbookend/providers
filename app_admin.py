@@ -271,7 +271,7 @@ SERVICE_ALIASES: Dict[str, List[str]] = {
     "Tree Trim": ["tree service", "pruning", "arborist", "branch removal"],
     "Garage Doors": ["overhead door", "door opener", "springs", "garage repair", "panel"],
     "Carpet Cleaning": ["steam clean", "stain removal", "upholstery cleaning"],
-    "Window Washing": ["window cleaning", "glass cleaning", "screen cleaning"],
+    "Window Washing": ["window cleaning", "glass cleaning"],
     "Flooring": ["hardwood", "tile", "vinyl plank", "laminate", "carpet install", "refinish"],
     "Decks, Gazebo, Arbor, Pergola": ["patio cover", "pergola", "gazebo", "deck build", "outdoor living"],
     "Concrete Resurfacing": ["stamped concrete", "overlay", "cool deck", "resurface"],
@@ -665,71 +665,71 @@ with _tabs[1]:
 
         submitted = st.form_submit_button("Add Vendor")
 
-    def _nonce(name: str) -> str:
-        return st.session_state.get(f"{name}_nonce")
+        def _nonce(name: str) -> str:
+            return st.session_state.get(f"{name}_nonce")
 
-    def _nonce_rotate(name: str) -> None:
-        st.session_state[f"{name}_nonce"] = uuid.uuid4().hex
+        def _nonce_rotate(name: str) -> None:
+            st.session_state[f"{name}_nonce"] = uuid.uuid4().hex
 
-    if submitted:
-        add_nonce = _nonce("add")
-        if st.session_state.get("add_last_done") == add_nonce:
-            st.info("Add already processed.")
-            st.stop()
+        if submitted:
+            add_nonce = _nonce("add")
+            if st.session_state.get("add_last_done") == add_nonce:
+                st.info("Add already processed.")
+                st.stop()
 
-        business_name = (st.session_state["add_business_name"] or "").strip()
-        category = (st.session_state["add_category"] or "").strip()
-        service = (st.session_state["add_service"] or "").strip()
-        contact_name = (st.session_state["add_contact_name"] or "").strip()
-        phone_norm = _normalize_phone(st.session_state["add_phone"])
-        address = (st.session_state["add_address"] or "").strip()
-        website = _sanitize_url(st.session_state["add_website"])
-        notes = (st.session_state["add_notes"] or "").strip()
-        keywords = (st.session_state["add_keywords"] or "").strip()
+            business_name = (st.session_state["add_business_name"] or "").strip()
+            category = (st.session_state["add_category"] or "").strip()
+            service = (st.session_state["add_service"] or "").strip()
+            contact_name = (st.session_state["add_contact_name"] or "").strip()
+            phone_norm = _normalize_phone(st.session_state["add_phone"])
+            address = (st.session_state["add_address"] or "").strip()
+            website = _sanitize_url(st.session_state["add_website"])
+            notes = (st.session_state["add_notes"] or "").strip()
+            keywords = (st.session_state["add_keywords"] or "").strip()
 
-        if phone_norm and len(phone_norm) != 10:
-            st.error("Phone must be 10 digits or blank.")
-        elif not business_name or not category:
-            st.error("Business Name and Category are required.")
-        else:
-            try:
-                # Ensure reference rows exist (idempotent)
-                _exec_with_retry(engine, "INSERT OR IGNORE INTO categories(name) VALUES(:n)", {"n": category})
-                if service:
-                    _exec_with_retry(engine, "INSERT OR IGNORE INTO services(name) VALUES(:n)", {"n": service})
+            if phone_norm and len(phone_norm) != 10:
+                st.error("Phone must be 10 digits or blank.")
+            elif not business_name or not category:
+                st.error("Business Name and Category are required.")
+            else:
+                try:
+                    # Ensure reference rows exist (idempotent)
+                    _exec_with_retry(engine, "INSERT OR IGNORE INTO categories(name) VALUES(:n)", {"n": category})
+                    if service:
+                        _exec_with_retry(engine, "INSERT OR IGNORE INTO services(name) VALUES(:n)", {"n": service})
 
-                now = datetime.utcnow().isoformat(timespec="seconds")
-                computed = _computed_keywords_for(category, service, business_name) if service else ""
-                _exec_with_retry(
-                    engine,
-                    """
-                    INSERT INTO vendors(category, service, business_name, contact_name, phone, address,
-                                        website, notes, keywords, computed_keywords, created_at, updated_at, updated_by)
-                    VALUES(:category, NULLIF(:service, ''), :business_name, :contact_name, :phone, :address,
-                           :website, :notes, :keywords, :computed_keywords, :now, :now, :user)
-                    """,
-                    {
-                        "category": category,
-                        "service": service,
-                        "business_name": business_name,
-                        "contact_name": contact_name,
-                        "phone": phone_norm,
-                        "address": address,
-                        "website": website,
-                        "notes": notes,
-                        "keywords": keywords,
-                        "computed_keywords": computed,
-                        "now": now,
-                        "user": os.getenv("USER", "admin"),
-                    },
-                )
-                st.session_state["add_last_done"] = add_nonce
-                st.success(f"Vendor added: {business_name}")
-                _queue_add_form_reset()
-                _nonce_rotate("add")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Add failed: {e}")
+                    now = datetime.utcnow().isoformat(timespec="seconds")
+                    computed = _computed_keywords_for(category, service, business_name) if service else ""
+                    _exec_with_retry(
+                        engine,
+                        """
+                        INSERT INTO vendors(category, service, business_name, contact_name, phone, address,
+                                            website, notes, keywords, computed_keywords, created_at, updated_at, updated_by)
+                        VALUES(:category, NULLIF(:service, ''), :business_name, :contact_name, :phone, :address,
+                               :website, :notes, :keywords, :computed_keywords, :now, :now, :user)
+                        """,
+                        {
+                            "category": category,
+                            "service": service,
+                            "business_name": business_name,
+                            "contact_name": contact_name,
+                            "phone": phone_norm,
+                            "address": address,
+                            "website": website,
+                            "notes": notes,
+                            "keywords": keywords,
+                            "computed_keywords": computed,
+                            "now": now,
+                            "user": os.getenv("USER", "admin"),
+                        },
+                    )
+                    st.session_state["add_last_done"] = add_nonce
+                    st.success(f"Vendor added: {business_name}")
+                    _queue_add_form_reset()
+                    _nonce_rotate("add")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Add failed: {e}")
 
     st.divider()
     st.subheader("Edit / Delete Vendor")
@@ -864,135 +864,134 @@ with _tabs[1]:
         with st.form(edit_form_key, clear_on_submit=False):
             col1, col2 = st.columns(2)
 
-with col1:
-    # --- Text inputs ---
-    st.text_input("Provider *", key="edit_business_name")
+            with col1:
+                # --- Text inputs ---
+                st.text_input("Provider *", key="edit_business_name")
 
-    # --- Build choices and ensure current values are valid BEFORE rendering widgets ---
-    cats = list_names(engine, "categories")
-    servs = list_names(engine, "services")
+                # --- Build choices and ensure current values are valid BEFORE rendering widgets ---
+                cats = list_names(engine, "categories")
+                servs = list_names(engine, "services")
 
-    _edit_cat_options = [""] + (cats or [])
-    _edit_svc_options = [""] + (servs or [])
+                _edit_cat_options = [""] + (cats or [])
+                _edit_svc_options = [""] + (servs or [])
 
-    # Current values from session (populated when the user selects a vendor)
-    cur_cat = (st.session_state.get("edit_category") or "")
-    cur_svc = (st.session_state.get("edit_service") or "")
+                # Current values from session (populated when the user selects a vendor)
+                cur_cat = (st.session_state.get("edit_category") or "")
+                cur_svc = (st.session_state.get("edit_service") or "")
 
-    # If the stored value isn’t in the choices (e.g., it was renamed/deleted), reset to ""
-    if cur_cat not in _edit_cat_options:
-        st.session_state["edit_category"] = ""
-        cur_cat = ""
-    if cur_svc not in _edit_svc_options:
-        st.session_state["edit_service"] = ""
-        cur_svc = ""
+                # If the stored value isn’t in the choices (e.g., it was renamed/deleted), reset to ""
+                if cur_cat not in _edit_cat_options:
+                    st.session_state["edit_category"] = ""
+                    cur_cat = ""
+                if cur_svc not in _edit_svc_options:
+                    st.session_state["edit_service"] = ""
+                    cur_svc = ""
 
-    # --- Render selectboxes WITHOUT index= so Streamlit uses session_state as the value ---
-    st.selectbox(
-        "Category *",
-        options=_edit_cat_options,
-        key="edit_category",
-        placeholder="Select category",
-    )
-    st.selectbox(
-        "Service (optional)",
-        options=_edit_svc_options,
-        key="edit_service",
-    )
+                # --- Render selectboxes WITHOUT index= so Streamlit uses session_state as the value ---
+                st.selectbox(
+                    "Category *",
+                    options=_edit_cat_options,
+                    key="edit_category",
+                    placeholder="Select category",
+                )
+                st.selectbox(
+                    "Service (optional)",
+                    options=_edit_svc_options,
+                    key="edit_service",
+                )
 
-    st.text_input("Contact Name", key="edit_contact_name")
-    st.text_input("Phone (10 digits or blank)", key="edit_phone")
+                st.text_input("Contact Name", key="edit_contact_name")
+                st.text_input("Phone (10 digits or blank)", key="edit_phone")
 
-with col2:
-    st.text_area("Address", height=80, key="edit_address")
-    st.text_input("Website (https://…)", key="edit_website")
-    st.text_area("Notes", height=100, key="edit_notes")
-    st.text_input("Keywords (comma separated)", key="edit_keywords")
+            with col2:
+                st.text_area("Address", height=80, key="edit_address")
+                st.text_input("Website (https://…)", key="edit_website")
+                st.text_area("Notes", height=100, key="edit_notes")
+                st.text_input("Keywords (comma separated)", key="edit_keywords")
 
-edited = st.form_submit_button("Save Changes")
+            edited = st.form_submit_button("Save Changes")
 
+            def _nonce(name: str) -> str:
+                return st.session_state.get(f"{name}_nonce")
 
-        def _nonce(name: str) -> str:
-            return st.session_state.get(f"{name}_nonce")
+            def _nonce_rotate(name: str) -> None:
+                st.session_state[f"{name}_nonce"] = uuid.uuid4().hex
 
-        def _nonce_rotate(name: str) -> None:
-            st.session_state[f"{name}_nonce"] = uuid.uuid4().hex
+            if edited:
+                edit_nonce = _nonce("edit")
+                if st.session_state.get("edit_last_done") == edit_nonce:
+                    st.info("Edit already processed.")
+                    st.stop()
 
-        if edited:
-            edit_nonce = _nonce("edit")
-            if st.session_state.get("edit_last_done") == edit_nonce:
-                st.info("Edit already processed.")
-                st.stop()
-
-            vid = st.session_state.get("edit_vendor_id")
-            if vid is None:
-                st.error("Select a vendor first.")
-            else:
-                bn = (st.session_state["edit_business_name"] or "").strip()
-                cat = (st.session_state["edit_category"] or "").strip()
-                svc = (st.session_state["edit_service"] or "").strip()
-                phone_norm = _normalize_phone(st.session_state["edit_phone"])
-                if phone_norm and len(phone_norm) != 10:
-                    st.error("Phone must be 10 digits or blank.")
-                elif not bn:
-                    st.error("Business Name is required.")
-                elif not cat:
-                    st.error("Category is required. Pick one under 'Category Admin' if missing.")
+                vid = st.session_state.get("edit_vendor_id")
+                if vid is None:
+                    st.error("Select a vendor first.")
                 else:
-                    try:
-                        # Ensure chosen references exist (idempotent)
-                        _exec_with_retry(engine, "INSERT OR IGNORE INTO categories(name) VALUES(:n)", {"n": cat})
-                        if svc:
-                            _exec_with_retry(engine, "INSERT OR IGNORE INTO services(name) VALUES(:n)", {"n": svc})
+                    bn = (st.session_state["edit_business_name"] or "").strip()
+                    cat = (st.session_state["edit_category"] or "").strip()
+                    svc = (st.session_state["edit_service"] or "").strip()
+                    phone_norm = _normalize_phone(st.session_state["edit_phone"])
+                    if phone_norm and len(phone_norm) != 10:
+                        st.error("Phone must be 10 digits or blank.")
+                    elif not bn:
+                        st.error("Business Name is required.")
+                    elif not cat:
+                        st.error("Category is required. Pick one under 'Category Admin' if missing.")
+                    else:
+                        try:
+                            # Ensure chosen references exist (idempotent)
+                            _exec_with_retry(engine, "INSERT OR IGNORE INTO categories(name) VALUES(:n)", {"n": cat})
+                            if svc:
+                                _exec_with_retry(engine, "INSERT OR IGNORE INTO services(name) VALUES(:n)", {"n": svc})
 
-                        prev_updated = st.session_state.get("edit_row_updated_at") or ""
-                        now = datetime.utcnow().isoformat(timespec="seconds")
-                        computed = _computed_keywords_for(cat, svc, bn) if svc else ""
-                        res = _exec_with_retry(
-                            engine,
-                            """
-                            UPDATE vendors
-                               SET category=:category,
-                                   service=NULLIF(:service, ''),
-                                   business_name=:business_name,
-                                   contact_name=:contact_name,
-                                   phone=:phone,
-                                   address=:address,
-                                   website=:website,
-                                   notes=:notes,
-                                   keywords=:keywords,
-                                   computed_keywords=:computed_keywords,
-                                   updated_at=:now,
-                                   updated_by=:user
-                             WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
-                            """,
-                            {
-                                "category": cat,
-                                "service": svc,
-                                "business_name": bn,
-                                "contact_name": (st.session_state["edit_contact_name"] or "").strip(),
-                                "phone": phone_norm,
-                                "address": (st.session_state["edit_address"] or "").strip(),
-                                "website": _sanitize_url(st.session_state["edit_website"]),
-                                "notes": (st.session_state["edit_notes"] or "").strip(),
-                                "keywords": (st.session_state["edit_keywords"] or "").strip(),
-                                "computed_keywords": computed,
-                                "now": now,
-                                "user": os.getenv("USER", "admin"),
-                                "id": int(vid),
-                                "prev_updated": prev_updated,
-                            },
-                        )
-                        if (res.rowcount or 0) == 0:
-                            st.warning("No changes applied (stale selection or already updated). Refresh and try again.")
-                        else:
-                            st.session_state["edit_last_done"] = edit_nonce
-                            st.success(f"Vendor updated: {bn}")
-                            _queue_edit_form_reset()
-                            _nonce_rotate("edit")
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Update failed: {e}")
+                            prev_updated = st.session_state.get("edit_row_updated_at") or ""
+                            now = datetime.utcnow().isoformat(timespec="seconds")
+                            computed = _computed_keywords_for(cat, svc, bn) if svc else ""
+                            res = _exec_with_retry(
+                                engine,
+                                """
+                                UPDATE vendors
+                                   SET category=:category,
+                                       service=NULLIF(:service, ''),
+                                       business_name=:business_name,
+                                       contact_name=:contact_name,
+                                       phone=:phone,
+                                       address=:address,
+                                       website=:website,
+                                       notes=:notes,
+                                       keywords=:keywords,
+                                       computed_keywords=:computed_keywords,
+                                       updated_at=:now,
+                                       updated_by=:user
+                                 WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
+                                """,
+                                {
+                                    "category": cat,
+                                    "service": svc,
+                                    "business_name": bn,
+                                    "contact_name": (st.session_state["edit_contact_name"] or "").strip(),
+                                    "phone": phone_norm,
+                                    "address": (st.session_state["edit_address"] or "").strip(),
+                                    "website": _sanitize_url(st.session_state["edit_website"]),
+                                    "notes": (st.session_state["edit_notes"] or "").strip(),
+                                    "keywords": (st.session_state["edit_keywords"] or "").strip(),
+                                    "computed_keywords": computed,
+                                    "now": now,
+                                    "user": os.getenv("USER", "admin"),
+                                    "id": int(vid),
+                                    "prev_updated": prev_updated,
+                                },
+                            )
+                            if (res.rowcount or 0) == 0:
+                                st.warning("No changes applied (stale selection or already updated). Refresh and try again.")
+                            else:
+                                st.session_state["edit_last_done"] = edit_nonce
+                                st.success(f"Vendor updated: {bn}")
+                                _queue_edit_form_reset()
+                                _nonce_rotate("edit")
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"Update failed: {e}")
 
         st.markdown("---")
         sel_label_del = st.selectbox(
@@ -1011,6 +1010,12 @@ edited = st.form_submit_button("Save Changes")
             deleted = st.form_submit_button("Delete Vendor")
 
         if deleted:
+            def _nonce(name: str) -> str:
+                return st.session_state.get(f"{name}_nonce")
+
+            def _nonce_rotate(name: str) -> None:
+                st.session_state[f"{name}_nonce"] = uuid.uuid4().hex
+
             del_nonce = _nonce("delete")
             if st.session_state.get("delete_last_done") == del_nonce:
                 st.info("Delete already processed.")
