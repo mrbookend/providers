@@ -863,48 +863,54 @@ with _tabs[1]:
         edit_form_key = f"edit_vendor_form_{st.session_state['edit_form_version']}"
         with st.form(edit_form_key, clear_on_submit=False):
             col1, col2 = st.columns(2)
-            with col1:
-                st.text_input("Provider *", key="edit_business_name")
 
-                cats = list_names_normalized(engine, "categories")
-                servs = list_names_normalized(engine, "services")
+with col1:
+    # --- Text inputs ---
+    st.text_input("Provider *", key="edit_business_name")
 
-                # Preserve current values even if not in reference tables
-                cur_cat = (st.session_state.get("edit_category") or "").strip()
-                cur_svc = (st.session_state.get("edit_service") or "").strip()
+    # --- Build choices and ensure current values are valid BEFORE rendering widgets ---
+    cats = list_names(engine, "categories")
+    servs = list_names(engine, "services")
 
-                _edit_cat_options = [""] + (cats or [])
-                if cur_cat and cur_cat not in _edit_cat_options:
-                    _edit_cat_options = [""] + [cur_cat] + [c for c in cats if c != cur_cat]
+    _edit_cat_options = [""] + (cats or [])
+    _edit_svc_options = [""] + (servs or [])
 
-                _edit_svc_options = [""] + (servs or [])
-                if cur_svc and cur_svc not in _edit_svc_options:
-                    _edit_svc_options = [""] + [cur_svc] + [s for s in servs if s != cur_svc]
+    # Current values from session (populated when the user selects a vendor)
+    cur_cat = (st.session_state.get("edit_category") or "")
+    cur_svc = (st.session_state.get("edit_service") or "")
 
-                st.selectbox(
-                    "Category *",
-                    options=_edit_cat_options,
-                    index=_edit_cat_options.index(cur_cat) if cur_cat in _edit_cat_options else 0,
-                    key="edit_category",
-                    placeholder="Select category",
-                )
+    # If the stored value isn’t in the choices (e.g., it was renamed/deleted), reset to ""
+    if cur_cat not in _edit_cat_options:
+        st.session_state["edit_category"] = ""
+        cur_cat = ""
+    if cur_svc not in _edit_svc_options:
+        st.session_state["edit_service"] = ""
+        cur_svc = ""
 
-                st.selectbox(
-                    "Service (optional)",
-                    options=_edit_svc_options,
-                    index=_edit_svc_options.index(cur_svc) if cur_svc in _edit_svc_options else 0,
-                    key="edit_service",
-                )
+    # --- Render selectboxes WITHOUT index= so Streamlit uses session_state as the value ---
+    st.selectbox(
+        "Category *",
+        options=_edit_cat_options,
+        key="edit_category",
+        placeholder="Select category",
+    )
+    st.selectbox(
+        "Service (optional)",
+        options=_edit_svc_options,
+        key="edit_service",
+    )
 
-                st.text_input("Contact Name", key="edit_contact_name")
-                st.text_input("Phone (10 digits or blank)", key="edit_phone")
-            with col2:
-                st.text_area("Address", height=80, key="edit_address")
-                st.text_input("Website (https://…)", key="edit_website")
-                st.text_area("Notes", height=100, key="edit_notes")
-                st.text_input("Keywords (comma separated)", key="edit_keywords")
+    st.text_input("Contact Name", key="edit_contact_name")
+    st.text_input("Phone (10 digits or blank)", key="edit_phone")
 
-            edited = st.form_submit_button("Save Changes")
+with col2:
+    st.text_area("Address", height=80, key="edit_address")
+    st.text_input("Website (https://…)", key="edit_website")
+    st.text_area("Notes", height=100, key="edit_notes")
+    st.text_input("Keywords (comma separated)", key="edit_keywords")
+
+edited = st.form_submit_button("Save Changes")
+
 
         def _nonce(name: str) -> str:
             return st.session_state.get(f"{name}_nonce")
