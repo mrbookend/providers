@@ -208,6 +208,16 @@ st.markdown(
       {"[data-testid='stDownloadButton'] button, [data-testid='baseButton-secondary'] button, [data-testid='baseButton-primary'] button {padding-top: 4px !important; padding-bottom: 4px !important; min-height: 32px !important;}" if COMPACT else ""}
       {"[data-testid='stExpander'] details summary {padding-top: 4px !important; padding-bottom: 4px !important;}" if COMPACT else ""}
       {"[data-testid='stExpander'] .content {padding-top: 4px !important;}" if COMPACT else ""}
+
+      /* Optional: subtle search input affordance (kept inside the box; no external text) */
+      [data-testid="stTextInput"] input {{
+        border: 1px solid #d0d0d0 !important;
+      }}
+      [data-testid="stTextInput"]:focus-within input {{
+        outline: none !important;
+        border: 1px solid #6aa0ff !important;
+        box-shadow: 0 0 0 2px rgba(106,160,255,0.15) !important;
+      }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -438,14 +448,13 @@ def main():
         st.error(f"Failed to load vendors: {e}")
         return
 
-    # Search runs on the full frame (so 'keywords' and 'computed_keywords' work),
-    # but display hides selected cols via HIDE_IN_DISPLAY.
+    # Visible, explicit search box — substring matching (e.g., "plumb" finds "plumber", "plumbing")
     st.text_input(
-        "",
+        "Search",
         key="q",
-        label_visibility="collapsed",
-        placeholder="Search e.g., plumb, roofing, 'Inverness', phone digits, etc.",
-        help="Case-insensitive, matches partial words across all columns (including hidden computed_keywords).",
+        placeholder='e.g., plumb → matches "plumber", "plumbing", etc.',
+        help="Case-insensitive substring match across all columns (including hidden computed_keywords).",
+        autocomplete="off",
     )
     q = st.session_state.get("q", "")
     filtered_full = apply_global_search(df_full, q)
@@ -454,7 +463,7 @@ def main():
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
     df_disp_all = filtered_full[disp_cols]
 
-    # ----- Controls Row: Downloads + Sort (kept dense via CSS) -----
+    # ----- Controls Row: Downloads + Sort -----
     def _label_for(col_key: str) -> str:
         return READONLY_COLUMN_LABELS.get(col_key, col_key.replace("_", " ").title())
 
