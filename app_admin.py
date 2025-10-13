@@ -1,20 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-"""
-HCR Providers — Admin
-- Embedded replica (Turso/libSQL) first, with graceful local fallback
-- Append-only CSV Restore (simple read_csv) + header map + 'id' block
-- computed_keywords auto-generation + on-demand recompute + startup backfill
-- Global search on Browse via _make_search_blob()
-- Phone normalization/display
-- Quick Probes: counts, indexes, unused services, category/service counts
-- Forms: Add (left) / Edit (right) aligned; selector inside Edit; header removed
-- Category / Service Admin: Add, Rename (cascade to vendors), Delete (only if unused)
-- Diagnostics block for secrets/engine status
-- Main navigation: TOP TABS (no sidebar)
-"""
-
 import re
 import json
 from datetime import datetime
@@ -115,7 +101,8 @@ def _make_search_blob(row: dict) -> str:
         if v:
             tokens.append(v)
     blob = " ".join(tokens).lower()
-    return re.sub(r"\s+", " ", blob)
+    blob = re.sub(r"\s+", " ", blob)
+    return blob
 
 
 # -----------------------------
@@ -208,6 +195,17 @@ def ensure_schema(engine: Engine) -> None:
             conn.execute(sql_text(s))
         for s in idx_stmts:
             conn.execute(sql_text(s))
+
+
+def drop_redundant_plain_indexes(engine: Engine) -> None:
+    """
+    Drop legacy plain (case-sensitive) indexes we don't use:
+      - idx_vendors_bus  (business_name)
+      - idx_vendors_cat  (category)
+    """
+    with engine.begin() as conn:
+        conn.execute(sql_text("DROP INDEX IF EXISTS idx_vendors_bus"))
+        conn.execute(sql_text("DROP INDEX IF EXISTS idx_vendors_cat"))
 
 
 def _row_to_dict(row) -> dict:
@@ -318,6 +316,7 @@ st.markdown(
 
 engine, engine_info = build_engine()
 ensure_schema(engine)
+drop_redundant_plain_indexes(engine)
 
 # ---- automatic, idempotent backfill on startup ----
 RUN_STARTUP_BACKFILL = _as_bool(_get_secret("RUN_STARTUP_BACKFILL", True), default=True)
@@ -366,8 +365,10 @@ def page_browse(engine: Engine):
     if do_search and (q or "").strip():
         q_norm = (q or "").strip().lower()
         terms = [t for t in re.split(r"[,\s;/]+", q_norm) if t]
+
         def _match(blob: str) -> bool:
             return all(t in blob for t in terms)
+
         filtered = [r for r in data if _match(r["_search_blob"])]
 
     st.caption(f"{len(filtered)} of {len(data)} rows")
@@ -386,10 +387,10 @@ def page_browse(engine: Engine):
 
 
 # -----------------------------
-# Add / Edit / Delete
+# Add / Edit / Delete (split labels + bottom delete section)
 # -----------------------------
 def page_add_edit(engine: Engine):
-    st.subheader("Add / Edit / Delete Provider")
+    st.subheader("Manage Providers")
 
     categories = fetch_categories(engine)
     services = fetch_services(engine)
@@ -399,8 +400,9 @@ def page_add_edit(engine: Engine):
 
     # ---- ADD ----
     with col_add:
+        st.markdown("### Add Provider")
         with st.form("form_add", clear_on_submit=True):
-            st.markdown("<div style='height: 38px'></div>", unsafe_allow_html=True)  # align with right side header
+            st.markdown("<div style='height: 2px'></div>", unsafe_allow_html=True)  # spacing
             add_business_name = st.text_input("Provider *", key="add_business_name")
             add_category = st.selectbox("Category *", options=[""] + categories, index=0, key="add_category", placeholder="Select category")
             add_service = st.selectbox("Service (optional)", options=[""] + services, index=0, key="add_service", placeholder="Select service")
@@ -411,8 +413,8 @@ def page_add_edit(engine: Engine):
             add_notes = st.text_area("Notes", height=100, key="add_notes")
             add_keywords = st.text_input("Keywords (comma separated)", key="add_keywords")
 
-            submitted = st.form_submit_button("Add Provider", type="primary")
-            if submitted:
+            add_submit = st.form_submit_button("Add Provider", type="primary")
+            if add_submit:
                 errs = []
                 if not (add_business_name or "").strip():
                     errs.append("Provider name is required.")
@@ -444,14 +446,17 @@ def page_add_edit(engine: Engine):
 
     # ---- EDIT ----
     with col_edit:
+        st.markdown("### Edit Provider")
         _edit_options = [f"{v['id']:>4} — {v['business_name']}" for v in vendors]
         with st.form("form_edit"):
             edit_sel = st.selectbox("Select provider to edit", options=[""] + _edit_options, index=0, key="edit_selector")
+            sel_row = None
             if edit_sel and edit_sel.strip():
-                sel_id = int(edit_sel.split("—", 1)[0])
-                sel_row = next((v for v in vendors if v["id"] == sel_id), None)
-            else:
-                sel_row = None
+                try:
+                    sel_id = int(edit_sel.split("—", 1)[0])
+                    sel_row = next((v for v in vendors if v["id"] == sel_id), None)
+                except Exception:
+                    sel_row = None
 
             if sel_row:
                 _edit_cat_options = sorted(set(categories + ([sel_row["category"]] if sel_row.get("category") else [])))
@@ -467,11 +472,8 @@ def page_add_edit(engine: Engine):
                 st.text_area("Notes", height=100, key="edit_notes", value=sel_row.get("notes") or "")
                 st.text_input("Keywords (comma separated)", key="edit_keywords", value=sel_row.get("keywords") or "")
 
-                colA, colB = st.columns([1, 1])
-                save_clicked = colA.form_submit_button("Save Changes", type="primary")
-                del_clicked = colB.form_submit_button("Delete Provider", type="secondary")
-
-                if save_clicked:
+                edit_submit = st.form_submit_button("Save Changes", type="primary")
+                if edit_submit:
                     errs = []
                     ebn = (st.session_state.get("edit_business_name") or "").strip()
                     ecat = (st.session_state.get("edit_category") or "").strip()
@@ -509,17 +511,33 @@ def page_add_edit(engine: Engine):
                         })
                         st.success(f"Updated provider id={sel_row['id']}.")
                         st.rerun()
-
-                if del_clicked:
-                    with st.popover("Confirm delete?"):
-                        st.write(f"Delete provider id={sel_row['id']} — **{sel_row['business_name']}**")
-                        really = st.button("Yes, delete", type="primary")
-                        if really:
-                            delete_vendor(engine, sel_row["id"])
-                            st.success("Deleted.")
-                            st.rerun()
             else:
-                st.info("Select a provider to edit.")
+                st.info("Select a provider to edit and press 'Save Changes' to apply updates.")
+
+    # ---- DELETE (bottom, its own form to avoid 'Missing Submit Button') ----
+    st.markdown("---")
+    st.markdown("### Delete Provider")
+    del_options = [f"{v['id']:>4} — {v['business_name']}" for v in vendors]
+    with st.form("form_delete"):
+        del_sel = st.selectbox("Select provider to delete", options=[""] + del_options, index=0, key="delete_selector")
+        confirm = st.checkbox("I understand this will permanently delete the provider.", value=False, key="delete_confirm")
+        del_submit = st.form_submit_button("Delete Provider", type="secondary")
+        if del_submit:
+            if not del_sel or not del_sel.strip():
+                st.error("Select a provider to delete.")
+            elif not confirm:
+                st.error("Please confirm deletion.")
+            else:
+                try:
+                    del_id = int(del_sel.split("—", 1)[0])
+                except Exception:
+                    del_id = None
+                if del_id is None:
+                    st.error("Invalid selection.")
+                else:
+                    delete_vendor(engine, del_id)
+                    st.success(f"Deleted provider id={del_id}.")
+                    st.rerun()
 
 
 # -----------------------------
