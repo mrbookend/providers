@@ -17,11 +17,10 @@ HCR Providers — Admin
 import os
 import re
 import json
-import hmac
 import time
 import uuid
 from datetime import datetime
-from typing import List, Tuple, Dict, Iterable, Any, Optional
+from typing import List, Tuple, Dict, Any, Optional
 
 import pandas as pd
 import streamlit as st
@@ -29,12 +28,9 @@ from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-# ---- Page config MUST be the first Streamlit call ----
-st.set_page_config(page_title="HCR Providers — Admin", layout="wide")
-
 # ---- register libsql dialect (must be AFTER "import streamlit as st") ----
 try:
-    import sqlalchemy_libsql  # noqa: F401  (ensures 'sqlite+libsql' is registered)
+    import sqlalchemy_libsql  # noqa: F401
 except Exception:
     pass
 # ---- end dialect registration ----
@@ -78,7 +74,7 @@ def _fmt_phone(s: str) -> str:
     return s or ""
 
 
-# ---- service synonyms / keyword expander (quick-win set; extend as needed) ----
+# ---- service synonyms / keyword expander ----
 _SERVICE_SYNONYMS = {
     "insurance agent": {"insurance", "broker", "policy", "auto", "home"},
     "electrician": {"electrical", "wiring", "breaker"},
@@ -89,22 +85,14 @@ _SERVICE_SYNONYMS = {
 
 
 def _ckw(category: str, service: str, business_name: str, extra_keywords: str = "") -> str:
-    """
-    Build computed_keywords: lowercased, deduped keyword bag from cat/svc/name (+ synonyms) + explicit keywords.
-    """
     parts: List[str] = []
     for v in (category, service, business_name, extra_keywords):
         if v:
             parts.extend(re.split(r"[,\s;/]+", str(v).strip().lower()))
     parts = [p for p in parts if p]
-
-    # add synonyms for service
     svc = (service or "").strip().lower()
     parts.extend(list(_SERVICE_SYNONYMS.get(svc, set())))
-
-    # dedupe while preserving order
-    seen = set()
-    out: List[str] = []
+    seen, out = set(), []
     for p in parts:
         if p not in seen:
             seen.add(p)
@@ -113,10 +101,6 @@ def _ckw(category: str, service: str, business_name: str, extra_keywords: str = 
 
 
 def _make_search_blob(row: dict) -> str:
-    """
-    Build a normalized search blob for the Browse global search.
-    Merge category/service/business_name/contact/address/website/notes/keywords/computed_keywords.
-    """
     fields = [
         "business_name", "category", "service", "contact_name",
         "address", "website", "notes", "keywords", "computed_keywords",
@@ -127,18 +111,13 @@ def _make_search_blob(row: dict) -> str:
         if v:
             tokens.append(v)
     blob = " ".join(tokens).lower()
-    blob = re.sub(r"\s+", " ", blob)
-    return blob
+    return re.sub(r"\s+", " ", blob)
 
 
 # -----------------------------
 # Engine / DB bootstrap
 # -----------------------------
 def build_engine() -> Tuple[Engine, Dict[str, Any]]:
-    """
-    Prefer embedded replica (sqlite+libsql) with sync_url (Turso) if secrets present,
-    else fallback to local sqlite file.
-    """
     info: Dict[str, Any] = {}
     turso_url = _get_secret("TURSO_DATABASE_URL", "")
     turso_token = _get_secret("TURSO_AUTH_TOKEN", "")
@@ -147,7 +126,7 @@ def build_engine() -> Tuple[Engine, Dict[str, Any]]:
     using_remote = False
     try:
         if turso_url and embedded_db_path:
-            db_file = embedded_db_path if embedded_db_path.startswith("/") else f"/mount/src/{embedded_db_path}"
+            db_file = embedded_db_path if str(embedded_db_path).startswith("/") else f"/mount/src/{embedded_db_path}"
             db_url = f"sqlite+libsql:///{db_file}"
             connect_args = {"sync_url": turso_url}
             if turso_token:
@@ -160,29 +139,21 @@ def build_engine() -> Tuple[Engine, Dict[str, Any]]:
                 "sync_url": turso_url,
             })
         else:
-            # plain sqlite fallback
-            db_file = embedded_db_path if embedded_db_path.startswith("/") else f"/mount/src/{embedded_db_path}"
+            db_file = embedded_db_path if str(embedded_db_path).startswith("/") else f"/mount/src/{embedded_db_path}"
             db_url = f"sqlite:///{db_file}"
             engine = create_engine(db_url, pool_pre_ping=True, future=True)
-            info.update({
-                "strategy": "local_sqlite",
-                "sqlalchemy_url": db_url,
-            })
+            info.update({"strategy": "local_sqlite", "sqlalchemy_url": db_url})
         info["dialect"] = "sqlite"
-        info["driver"] = "libsql" if "libsql" in info.get("strategy", "") else "pysqlite"
+        info["driver"] = "libsql" if "embedded_replica" in info.get("strategy", "") else "pysqlite"
         info["using_remote"] = using_remote
         return engine, info
     except Exception as e:
-        # final fallback: temp in-memory (keeps app alive for diagnostics)
         engine = create_engine("sqlite://", future=True)
         info.update({"strategy": "memory_fallback", "error": str(e), "using_remote": False})
         return engine, info
 
 
 def ensure_schema(engine: Engine) -> None:
-    """
-    Create tables if not present; add computed_keywords column and indexes safely.
-    """
     stmts: List[str] = [
         """
         CREATE TABLE IF NOT EXISTS categories (
@@ -294,9 +265,6 @@ def delete_vendor(engine: Engine, vid: int) -> None:
 
 
 def backfill_computed_keywords(engine: Engine) -> int:
-    """
-    Recompute computed_keywords where NULL or blank.
-    """
     with engine.begin() as conn:
         res = conn.execute(sql_text("""
             SELECT id, category, service, business_name, keywords
@@ -315,19 +283,13 @@ def backfill_computed_keywords(engine: Engine) -> int:
 
 
 # -----------------------------
-# Streamlit Page Setup (no second set_page_config call)
+# Page config substitutes (title + width without set_page_config)
 # -----------------------------
-# Page config already set at top. Read secrets now and (optionally) update tab title.
 page_title = _get_secret("page_title", "HCR Providers — Admin") or "HCR Providers — Admin"
-if page_title != "HCR Providers — Admin":
-    st.markdown(f"<script>document.title = {json.dumps(page_title)};</script>", unsafe_allow_html=True)
+st.markdown(f"<script>document.title = {json.dumps(page_title)};</script>", unsafe_allow_html=True)
 
-# Optional UI tweaks from secrets
 page_left_padding_px = _get_secret("page_left_padding_px", "12")
 page_max_width_px = _get_secret("page_max_width_px", "2300")
-sidebar_state = _get_secret("sidebar_state", "expanded")
-
-# Inject simple container style if desired
 st.markdown(
     f"""
     <style>
@@ -343,7 +305,7 @@ st.markdown(
 engine, engine_info = build_engine()
 ensure_schema(engine)
 
-# ======= BEGIN: STARTUP BACKFILL CALL =======
+# ---- automatic, idempotent backfill on startup ----
 RUN_STARTUP_BACKFILL = _as_bool(_get_secret("RUN_STARTUP_BACKFILL", True), default=True)
 if RUN_STARTUP_BACKFILL:
     try:
@@ -352,7 +314,6 @@ if RUN_STARTUP_BACKFILL:
             st.caption(f"Startup backfill: computed_keywords filled for {n_backfilled} rows.")
     except Exception as e:
         st.warning(f"Startup backfill skipped due to error: {e}")
-# ======= END: STARTUP BACKFILL CALL =======
 
 # Session defaults
 if "edit_id" not in st.session_state:
@@ -365,14 +326,11 @@ if "edit_id" not in st.session_state:
 def page_browse(engine: Engine):
     st.subheader("Browse Providers")
 
-    # --- Load all vendors into memory (dataset is small) ---
     data = list_vendors(engine)
     if not data:
         st.info("No providers found yet.")
         return
 
-    # === GLOBAL SEARCH UI ===
-    # ======= BEGIN:BROWSE_GLOBAL_SEARCH_BLOCK =======
     with st.container(border=True):
         col1, col2, col3 = st.columns([2, 1, 1], vertical_alignment="bottom")
         with col1:
@@ -381,12 +339,10 @@ def page_browse(engine: Engine):
             do_search = st.button("Search", use_container_width=True)
         with col3:
             reset = st.button("Reset", use_container_width=True)
-
     if reset:
         st.session_state["browse_query"] = ""
         q = ""
 
-    # build in-memory blobs (lowercased) once
     for row in data:
         row["_search_blob"] = _make_search_blob(row)
 
@@ -394,15 +350,12 @@ def page_browse(engine: Engine):
     if do_search and (q or "").strip():
         q_norm = (q or "").strip().lower()
         terms = [t for t in re.split(r"[,\s;/]+", q_norm) if t]
-        # AND all query terms
         def _match(blob: str) -> bool:
             return all(t in blob for t in terms)
         filtered = [r for r in data if _match(r["_search_blob"])]
 
     st.caption(f"{len(filtered)} of {len(data)} rows")
-    # ======= END:BROWSE_GLOBAL_SEARCH_BLOCK =======
 
-    # Render a simple table (formatted phone)
     def _render_row(r: dict) -> dict:
         out = dict(r)
         out["phone"] = _fmt_phone(out.get("phone", ""))
@@ -417,7 +370,7 @@ def page_browse(engine: Engine):
 
 
 # -----------------------------
-# Add / Edit / Delete (aligned)
+# Add / Edit / Delete
 # -----------------------------
 def page_add_edit(engine: Engine):
     st.subheader("Add / Edit / Delete Provider")
@@ -426,13 +379,10 @@ def page_add_edit(engine: Engine):
     services = fetch_services(engine)
     vendors = list_vendors(engine)
 
-    # Left: Add  |  Right: Edit (aligned)
     col_add, col_edit = st.columns(2)
 
-    # ---- ADD ----
     with col_add:
         with st.form("form_add", clear_on_submit=True):
-            # equalized top spacing to align with Edit form which begins with a selector
             st.markdown("<div style='height: 38px'></div>", unsafe_allow_html=True)
 
             add_business_name = st.text_input("Provider *", key="add_business_name")
@@ -457,7 +407,6 @@ def page_add_edit(engine: Engine):
                     errs.append("Phone must be 10 digits (or blank).")
                 if add_service and re.search(r"[,/;]", add_service):
                     errs.append("Service name must be a single service (no commas or slashes).")
-
                 if errs:
                     st.error(" • " + "\n • ".join(errs))
                 else:
@@ -476,7 +425,6 @@ def page_add_edit(engine: Engine):
                     st.success(f"Added provider id={vid}.")
                     st.rerun()
 
-    # ---- EDIT ----
     with col_edit:
         _edit_options = [f"{v['id']:>4} — {v['business_name']}" for v in vendors]
         with st.form("form_edit"):
@@ -570,7 +518,6 @@ def _csv_restore_append(engine: Engine):
     allowed = {"business_name", "category", "service", "contact_name", "phone", "address", "website", "notes", "keywords"}
     forbidden = {"id"}
 
-    # header synonyms (lowercased, punctuation/space tolerant)
     header_map = {
         "business_name": {"business_name", "name", "provider", "company", "vendor", "business"},
         "category": {"category", "cat", "type"},
@@ -585,22 +532,20 @@ def _csv_restore_append(engine: Engine):
 
     def _norm(h: str) -> str:
         h = (h or "").strip().lower()
-        h = re.sub(r"[^\w\s]", "", h)        # drop punctuation
-        h = re.sub(r"\s+", " ", h).strip()   # collapse spaces
+        h = re.sub(r"[^\w\s]", "", h)
+        h = re.sub(r"\s+", " ", h).strip()
         return h
 
     def _canonicalize_header(raw: str) -> Optional[str]:
         n = _norm(raw)
         if n in forbidden:
             return "__FORBIDDEN__"
-        # exact allowed first
         if n in allowed:
             return n
-        # try map
         for canon, aliases in header_map.items():
             if n in aliases:
                 return canon
-        return None  # unknown header; will be ignored
+        return None
 
     if do_it and up is not None:
         try:
@@ -609,39 +554,29 @@ def _csv_restore_append(engine: Engine):
             st.error(f"CSV read error: {e}")
             return
 
-        # Build header mapping from df_raw.columns → canonical
-        col_map: Dict[str, Optional[str]] = {}
-        for c in df_raw.columns:
-            col_map[c] = _canonicalize_header(str(c))
+        col_map: Dict[str, Optional[str]] = {c: _canonicalize_header(str(c)) for c in df_raw.columns}
 
-        # hard block: forbidden columns present?
         if any(v == "__FORBIDDEN__" for v in col_map.values()):
             bads = [k for k, v in col_map.items() if v == "__FORBIDDEN__"]
             st.error(f"CSV contains forbidden column(s): {', '.join(bads)}. Remove them and try again.")
             return
 
-        # Construct a normalized df with only allowed canon columns; add missing as empty
         df = pd.DataFrame()
         for orig, canon in col_map.items():
             if canon and canon in allowed:
                 df[canon] = df_raw[orig].astype("string").fillna("").map(str).map(str.strip)
-
         for c in allowed:
             if c not in df.columns:
                 df[c] = ""
 
-        # validation
         errs: List[str] = []
         for i, r in df.iterrows():
-            # required columns non-empty
             for req in required:
                 if not (str(r.get(req) or "").strip()):
                     errs.append(f"Row {i+1}: '{req}' is required.")
-            # phone
             d = _digits_only(r.get("phone") or "")
             if d and len(d) != 10:
                 errs.append(f"Row {i+1}: phone must be 10 digits or blank.")
-            # multi-service guard
             svc = str(r.get("service") or "")
             if svc and re.search(r"[,/;]", svc):
                 errs.append(f"Row {i+1}: service must be a single value (no commas or slashes).")
@@ -662,7 +597,6 @@ def _csv_restore_append(engine: Engine):
         if dry_run:
             st.success("Dry run complete. No changes applied.")
         else:
-            # append
             ins_rows = 0
             with engine.begin() as conn:
                 for _, r in df.iterrows():
@@ -700,27 +634,21 @@ def _csv_restore_append(engine: Engine):
 
 
 # -----------------------------
-# Quick Probes (read-only health checks)
+# Quick Probes
 # -----------------------------
 def _quick_probes(engine: Engine):
     st.markdown("### Quick Probes (read-only health checks)")
 
     out: Dict[str, Any] = {}
     with engine.begin() as conn:
-        # counts
         vcount = conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0
         ccount = conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar() or 0
         scount = conn.execute(sql_text("SELECT COUNT(*) FROM services")).scalar() or 0
         out["counts"] = {"vendors": int(vcount), "categories": int(ccount), "services": int(scount)}
 
-        # integrity (shallow)
-        out["integrity_check"] = "ok"
-
-        # indexes
         idx = conn.execute(sql_text("PRAGMA index_list('vendors')")).mappings().all()
         out["vendors_indexes"] = [dict(r) for r in idx]
 
-        # category/service counts
         res = conn.execute(sql_text("""
             SELECT category, COALESCE(service, '') AS service, COUNT(*) AS cnt
             FROM vendors
@@ -729,7 +657,6 @@ def _quick_probes(engine: Engine):
         """)).mappings().all()
         out["category_service_counts"] = [dict(r) for r in res]
 
-        # unused services: services not referenced in vendors.service
         res2 = conn.execute(sql_text("SELECT DISTINCT LOWER(COALESCE(service,'')) AS s FROM vendors")).mappings().all()
         svc_used = {r["s"] for r in res2 if r["s"]}
         all_services = {s.lower() for s in fetch_services(engine)}
@@ -740,7 +667,7 @@ def _quick_probes(engine: Engine):
 
 
 # -----------------------------
-# Maintenance (Recompute, CSV Restore, Quick Probes, Help)
+# Maintenance / Help
 # -----------------------------
 def page_maintenance(engine: Engine):
     st.subheader("Maintenance / Help")
@@ -755,7 +682,6 @@ def page_maintenance(engine: Engine):
     _csv_restore_append(engine)
     _quick_probes(engine)
 
-    # Help / Tips (from secrets if provided)
     help_md = _get_secret("HELP_MD", "")
     with st.expander("Provider Help / Tips"):
         if help_md:
@@ -777,7 +703,6 @@ def page_diag(engine: Engine, info: Dict[str, Any]):
     st.code(json.dumps(info, indent=2))
 
     with engine.begin() as conn:
-        # Show schema columns and indexes quickly
         def _cols(tbl: str) -> List[str]:
             res = conn.execute(sql_text(f"PRAGMA table_info('{tbl}')")).mappings().all()
             return [r["name"] for r in res]
@@ -787,8 +712,6 @@ def page_diag(engine: Engine, info: Dict[str, Any]):
             "categories_columns": _cols("categories"),
             "services_columns": _cols("services"),
         }
-
-        # counts & indexes again (compact)
         diag["counts"] = {
             "vendors": int(conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0),
             "categories": int(conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar() or 0),
@@ -801,7 +724,7 @@ def page_diag(engine: Engine, info: Dict[str, Any]):
 
 
 # -----------------------------
-# Category / Service Admin (Add, Rename with cascade, Delete if unused)
+# Category / Service Admin
 # -----------------------------
 def _rename_cascade(engine: Engine, field: str, old: str, new: str):
     if field not in {"category", "service"}:
@@ -816,10 +739,7 @@ def _delete_if_unused(engine: Engine, field: str, name: str) -> bool:
     if field not in {"category", "service"}:
         return False
     with engine.begin() as conn:
-        cnt = conn.execute(
-            sql_text(f"SELECT COUNT(*) FROM vendors WHERE {field}=:n"),
-            {"n": name}
-        ).scalar() or 0
+        cnt = conn.execute(sql_text(f"SELECT COUNT(*) FROM vendors WHERE {field}=:n"), {"n": name}).scalar() or 0
         if cnt:
             return False
         tbl = "categories" if field == "category" else "services"
@@ -832,7 +752,6 @@ def page_admin_taxonomy(engine: Engine):
 
     tabs = st.tabs(["Categories", "Services"])
 
-    # --- Categories ---
     with tabs[0]:
         cats = fetch_categories(engine)
         st.markdown("**Add Category**")
@@ -885,7 +804,6 @@ def page_admin_taxonomy(engine: Engine):
                     else:
                         st.warning("Category is in use by vendors; reassign or rename first.")
 
-    # --- Services ---
     with tabs[1]:
         svcs = fetch_services(engine)
         st.markdown("**Add Service**")
