@@ -785,36 +785,21 @@ def page_diag(engine: Engine, info: Dict[str, Any]):
 
 
 # -----------------------------
-# Category / Service Admin
-# -----------------------------
-def _rename_cascade(engine: Engine, field: str, old: str, new: str):
-    if field not in {"category", "service"}:
-        raise ValueError("field must be 'category' or 'service'")
-    with engine.begin() as conn:
-        conn.execute(sql_text(f"UPDATE vendors SET {field}=:new WHERE {field}=:old"), {"new": new, "old": old})
-        tbl = "categories" if field == "category" else "services"
-        conn.execute(sql_text(f"UPDATE {tbl} SET name=:new WHERE name=:old"), {"new": new, "old": old})
-
-
-def _delete_if_unused(engine: Engine, field: str, name: str) -> bool:
-    if field not in {"category", "service"}:
-        return False
-    with engine.begin() as conn:
-        cnt = conn.execute(sql_text(f"SELECT COUNT(*) FROM vendors WHERE {field}=:n"), {"n": name}).scalar() or 0
-        if cnt:
-            return False
-        tbl = "categories" if field == "category" else "services"
-        conn.execute(sql_text(f"DELETE FROM {tbl} WHERE name=:n"), {"n": name})
-        return True
-
-
+# ==== BEGIN DROP-IN: page_admin_taxonomy (two-column layout with explicit labels) ====
 def page_admin_taxonomy(engine: Engine):
     st.subheader("Category / Service Admin")
-    tabs = st.tabs(["Categories", "Services"])
 
-    # Categories
-    with tabs[0]:
-        cats = fetch_categories(engine)
+    # Fetch once per render (no added overhead vs tabs)
+    categories = fetch_categories(engine)
+    services = fetch_services(engine)
+
+    col_cat, col_svc = st.columns(2)
+
+    # ------------- LEFT: Category Admin -------------
+    with col_cat:
+        st.markdown("#### Category Admin")
+
+        # Add
         st.markdown("**Add Category**")
         with st.form("cat_add"):
             new_cat = st.text_input("New category name", key="new_cat")
@@ -823,7 +808,7 @@ def page_admin_taxonomy(engine: Engine):
                 name = (new_cat or "").strip()
                 if not name:
                     st.error("Category name required.")
-                elif name.lower() in {c.lower() for c in cats}:
+                elif name.lower() in {c.lower() for c in categories}:
                     st.warning("Category already exists.")
                 else:
                     with engine.begin() as conn:
@@ -832,9 +817,11 @@ def page_admin_taxonomy(engine: Engine):
                     st.rerun()
 
         st.markdown("---")
+
+        # Rename (cascade to vendors)
         st.markdown("**Rename Category (cascades to vendors)**")
         with st.form("cat_rename"):
-            old = st.selectbox("Current category", options=[""] + cats, index=0, key="old_cat")
+            old = st.selectbox("Current category", options=[""] + categories, index=0, key="old_cat")
             new = st.text_input("New category name", key="new_cat2")
             do_rename = st.form_submit_button("Rename")
             if do_rename:
@@ -850,9 +837,11 @@ def page_admin_taxonomy(engine: Engine):
                         st.rerun()
 
         st.markdown("---")
+
+        # Delete (only if unused)
         st.markdown("**Delete Category (only if unused)**")
         with st.form("cat_delete"):
-            target = st.selectbox("Category to delete", options=[""] + cats, index=0, key="del_cat")
+            target = st.selectbox("Category to delete", options=[""] + categories, index=0, key="del_cat")
             do_del = st.form_submit_button("Delete Category")
             if do_del:
                 if not target:
@@ -865,9 +854,11 @@ def page_admin_taxonomy(engine: Engine):
                     else:
                         st.warning("Category is in use by vendors; reassign or rename first.")
 
-    # Services
-    with tabs[1]:
-        svcs = fetch_services(engine)
+    # ------------- RIGHT: Service Admin -------------
+    with col_svc:
+        st.markdown("#### Service Admin")
+
+        # Add
         st.markdown("**Add Service**")
         with st.form("svc_add"):
             new_svc = st.text_input("New service name", key="new_svc")
@@ -876,7 +867,7 @@ def page_admin_taxonomy(engine: Engine):
                 name = (new_svc or "").strip()
                 if not name:
                     st.error("Service name required.")
-                elif name.lower() in {s.lower() for s in svcs}:
+                elif name.lower() in {s.lower() for s in services}:
                     st.warning("Service already exists.")
                 else:
                     with engine.begin() as conn:
@@ -885,9 +876,11 @@ def page_admin_taxonomy(engine: Engine):
                     st.rerun()
 
         st.markdown("---")
+
+        # Rename (cascade to vendors)
         st.markdown("**Rename Service (cascades to vendors)**")
         with st.form("svc_rename"):
-            old = st.selectbox("Current service", options=[""] + svcs, index=0, key="old_svc")
+            old = st.selectbox("Current service", options=[""] + services, index=0, key="old_svc")
             new = st.text_input("New service name", key="new_svc2")
             do_rename = st.form_submit_button("Rename")
             if do_rename:
@@ -903,9 +896,11 @@ def page_admin_taxonomy(engine: Engine):
                         st.rerun()
 
         st.markdown("---")
+
+        # Delete (only if unused)
         st.markdown("**Delete Service (only if unused)**")
         with st.form("svc_delete"):
-            target = st.selectbox("Service to delete", options=[""] + svcs, index=0, key="del_svc")
+            target = st.selectbox("Service to delete", options=[""] + services, index=0, key="del_svc")
             do_del = st.form_submit_button("Delete Service")
             if do_del:
                 if not target:
@@ -917,7 +912,7 @@ def page_admin_taxonomy(engine: Engine):
                         st.rerun()
                     else:
                         st.warning("Service is in use by vendors; reassign or rename first.")
-
+# ==== END DROP-IN: page_admin_taxonomy ====
 
 # -----------------------------
 # Main (top tabs, no sidebar)
