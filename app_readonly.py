@@ -532,7 +532,6 @@ def main():
     # Optional status line (toggle via Secrets)
     if SHOW_STATUS:
         st.caption(f"{len(df_disp_sorted)} matching provider(s). Viewport rows: {VIEWPORT_ROWS}")
-
     # ---------------- Scrollable full table ----------------
     if df_disp_sorted.empty:
         st.info("No matching providers.")
@@ -540,6 +539,11 @@ def main():
         # small spacer to add room above headings
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
         st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
+
+        # ==== BEGIN PATCH: small gap above Help/Tips (spacer only) ====
+        # Add a small vertical spacer between the table and the Help/Tips box
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        # ==== END PATCH ====
 
     # Help/Tips expander — moved BELOW the table to free vertical space
     with st.expander("Help / Tips (click to expand)", expanded=False):
