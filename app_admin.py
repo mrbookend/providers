@@ -911,6 +911,101 @@ def page_diag(engine: Engine, info: Dict[str, Any]):
 
     st.code(json.dumps(diag, indent=2))
 
+# ==== BEGIN PATCH: taxonomy helpers (_rename_cascade, _delete_if_unused) ====
+_VALID_TAX_FIELDS = {"category", "service"}
+
+def _rename_cascade(engine: Engine, field: str, old: str, new: str) -> Dict[str, int]:
+    """
+    Rename a category/service and cascade the change to vendors.
+    - Case-insensitive match on 'old'
+    - If 'new' already exists in the lookup table, we merge and drop 'old'
+    - Returns counts of rows changed
+    """
+    if field not in _VALID_TAX_FIELDS:
+        raise ValueError(f"invalid field '{field}' (expected one of {_VALID_TAX_FIELDS})")
+
+    old = (old or "").strip()
+    new = (new or "").strip()
+    if not old or not new:
+        raise ValueError("old and new names are required")
+
+    tbl = "categories" if field == "category" else "services"
+
+    changed = {"vendors_updated": 0, "lookup_deleted": 0, "lookup_renamed": 0}
+    with engine.begin() as conn:
+        # Does NEW already exist?
+        new_exists = bool(
+            conn.execute(sql_text(f"SELECT 1 FROM {tbl} WHERE LOWER(name)=LOWER(:n) LIMIT 1"), {"n": new}).fetchone()
+        )
+
+        # Update vendors: set field=new where field=old (case-insensitive)
+        vu = conn.execute(
+            sql_text(f"UPDATE vendors SET {field}=:new WHERE LOWER({field})=LOWER(:old)"),
+            {"new": new, "old": old},
+        )
+        changed["vendors_updated"] = int(vu.rowcount or 0)
+
+        if new_exists:
+            # If target exists, just delete the old lookup row (if present)
+            delres = conn.execute(
+                sql_text(f"DELETE FROM {tbl} WHERE LOWER(name)=LOWER(:old)"),
+                {"old": old},
+            )
+            changed["lookup_deleted"] = int(delres.rowcount or 0)
+        else:
+            # If target doesn't exist:
+            # 1) try to rename the lookup row if it exists
+            rn = conn.execute(
+                sql_text(f"UPDATE {tbl} SET name=:new WHERE LOWER(name)=LOWER(:old)"),
+                {"new": new, "old": old},
+            )
+            changed["lookup_renamed"] = int(rn.rowcount or 0)
+
+            # 2) if no row was renamed (old didn’t exist), insert the new lookup
+            if changed["lookup_renamed"] == 0:
+                try:
+                    conn.execute(sql_text(f"INSERT INTO {tbl}(name) VALUES(:n)"), {"n": new})
+                except Exception:
+                    # Ignore if a concurrent insert happened
+                    pass
+
+            # 3) delete any lingering 'old' rows (harmless if none)
+            delres = conn.execute(
+                sql_text(f"DELETE FROM {tbl} WHERE LOWER(name)=LOWER(:old)"),
+                {"old": old},
+            )
+            changed["lookup_deleted"] += int(delres.rowcount or 0)
+
+    return changed
+
+
+def _delete_if_unused(engine: Engine, field: str, value: str) -> bool:
+    """
+    Delete a category/service only if no vendor rows reference it.
+    Returns True if deleted, False if in use (or nothing to delete).
+    """
+    if field not in _VALID_TAX_FIELDS:
+        raise ValueError(f"invalid field '{field}' (expected one of {_VALID_TAX_FIELDS})")
+
+    value = (value or "").strip()
+    if not value:
+        return False
+
+    tbl = "categories" if field == "category" else "services"
+
+    with engine.begin() as conn:
+        # Any usage?
+        in_use = conn.execute(
+            sql_text(f"SELECT 1 FROM vendors WHERE LOWER({field})=LOWER(:v) LIMIT 1"),
+            {"v": value},
+        ).fetchone()
+        if in_use:
+            return False
+
+        # Not used -> safe to delete
+        conn.execute(sql_text(f"DELETE FROM {tbl} WHERE LOWER(name)=LOWER(:v)"), {"v": value})
+        return True
+# ==== END PATCH ====
 
 # -----------------------------
 # ==== BEGIN DROP-IN: page_admin_taxonomy (two-column layout; no page-level subheader) ====
