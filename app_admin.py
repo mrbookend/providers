@@ -68,9 +68,7 @@ _SERVICE_SYNONYMS = {
 
 
 def _ckw(category: str, service: str, business_name: str, extra_keywords: str = "") -> str:
-    """
-    Build computed_keywords: lowercased, deduped keyword bag from cat/svc/name (+ synonyms) + explicit keywords.
-    """
+    """Build computed_keywords from cat/svc/name (+ synonyms) + explicit keywords."""
     parts: List[str] = []
     for v in (category, service, business_name, extra_keywords):
         if v:
@@ -87,10 +85,7 @@ def _ckw(category: str, service: str, business_name: str, extra_keywords: str = 
 
 
 def _make_search_blob(row: dict) -> str:
-    """
-    Build a normalized search blob for the Browse global search.
-    Merge category/service/business_name/contact/address/website/notes/keywords/computed_keywords.
-    """
+    """Concat fields (lowercased) for Browse global search, including computed_keywords."""
     fields = [
         "business_name", "category", "service", "contact_name",
         "address", "website", "notes", "keywords", "computed_keywords",
@@ -101,18 +96,14 @@ def _make_search_blob(row: dict) -> str:
         if v:
             tokens.append(v)
     blob = " ".join(tokens).lower()
-    blob = re.sub(r"\s+", " ", blob)
-    return blob
+    return re.sub(r"\s+", " ", blob)
 
 
 # -----------------------------
 # Engine / DB bootstrap
 # -----------------------------
 def build_engine() -> Tuple[Engine, Dict[str, Any]]:
-    """
-    Prefer embedded replica (sqlite+libsql) with sync_url (Turso) if secrets present,
-    else fallback to local sqlite file.
-    """
+    """Prefer embedded replica (sqlite+libsql) with Turso sync; fallback to local sqlite file."""
     info: Dict[str, Any] = {}
     turso_url = _get_secret("TURSO_DATABASE_URL", "")
     turso_token = _get_secret("TURSO_AUTH_TOKEN", "")
@@ -150,9 +141,7 @@ def build_engine() -> Tuple[Engine, Dict[str, Any]]:
 
 
 def ensure_schema(engine: Engine) -> None:
-    """
-    Create tables if not present; indexes created idempotently.
-    """
+    """Create tables if not present; create useful indexes idempotently."""
     stmts: List[str] = [
         """
         CREATE TABLE IF NOT EXISTS categories (
@@ -189,6 +178,7 @@ def ensure_schema(engine: Engine) -> None:
         "CREATE INDEX IF NOT EXISTS idx_vendors_ckw ON vendors(computed_keywords)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_phone ON vendors(phone)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_svc_lower ON vendors(LOWER(service))",
+        # legacy NOCASE helpers that may already exist are harmless; we don't recreate them here
     ]
     with engine.begin() as conn:
         for s in stmts:
@@ -198,11 +188,7 @@ def ensure_schema(engine: Engine) -> None:
 
 
 def drop_redundant_plain_indexes(engine: Engine) -> None:
-    """
-    Drop legacy plain (case-sensitive) indexes we don't use:
-      - idx_vendors_bus  (business_name)
-      - idx_vendors_cat  (category)
-    """
+    """Drop legacy plain (case-sensitive) indexes we don't use."""
     with engine.begin() as conn:
         conn.execute(sql_text("DROP INDEX IF EXISTS idx_vendors_bus"))
         conn.execute(sql_text("DROP INDEX IF EXISTS idx_vendors_cat"))
@@ -275,9 +261,7 @@ def delete_vendor(engine: Engine, vid: int) -> None:
 
 
 def backfill_computed_keywords(engine: Engine) -> int:
-    """
-    Recompute computed_keywords where NULL or blank (idempotent).
-    """
+    """Recompute computed_keywords where NULL or blank (idempotent)."""
     with engine.begin() as conn:
         rows = conn.execute(sql_text("""
             SELECT id, category, service, business_name, keywords
@@ -458,10 +442,10 @@ def page_add_edit(engine: Engine):
                 except Exception:
                     sel_row = None
 
+            # Always render inputs (with current values if selected), and ALWAYS render submit button
             if sel_row:
                 _edit_cat_options = sorted(set(categories + ([sel_row["category"]] if sel_row.get("category") else [])))
                 _edit_svc_options = sorted(set(services + ([sel_row["service"]] if sel_row.get("service") else [])))
-
                 st.text_input("Provider *", key="edit_business_name", value=sel_row.get("business_name") or "")
                 st.selectbox("Category *", options=_edit_cat_options, key="edit_category", placeholder="Select category")
                 st.selectbox("Service (optional)", options=[""] + _edit_svc_options, key="edit_service")
@@ -471,50 +455,62 @@ def page_add_edit(engine: Engine):
                 st.text_input("Website (https://…)", key="edit_website", value=sel_row.get("website") or "")
                 st.text_area("Notes", height=100, key="edit_notes", value=sel_row.get("notes") or "")
                 st.text_input("Keywords (comma separated)", key="edit_keywords", value=sel_row.get("keywords") or "")
-
-                edit_submit = st.form_submit_button("Save Changes", type="primary")
-                if edit_submit:
-                    errs = []
-                    ebn = (st.session_state.get("edit_business_name") or "").strip()
-                    ecat = (st.session_state.get("edit_category") or "").strip()
-                    esvc = (st.session_state.get("edit_service") or "").strip()
-                    ecn = (st.session_state.get("edit_contact_name") or "").strip()
-                    eph = (st.session_state.get("edit_phone") or "").strip()
-                    eaddr = (st.session_state.get("edit_address") or "").strip()
-                    eweb = (st.session_state.get("edit_website") or "").strip()
-                    enotes = (st.session_state.get("edit_notes") or "").strip()
-                    ekw = (st.session_state.get("edit_keywords") or "").strip()
-
-                    if not ebn:
-                        errs.append("Provider name is required.")
-                    if not ecat:
-                        errs.append("Category is required.")
-                    d = _digits_only(eph)
-                    if d and len(d) != 10:
-                        errs.append("Phone must be 10 digits (or blank).")
-                    if esvc and re.search(r"[,/;]", esvc):
-                        errs.append("Service name must be a single service (no commas or slashes).")
-
-                    if errs:
-                        st.error(" • " + "\n • ".join(errs))
-                    else:
-                        update_vendor(engine, sel_row["id"], {
-                            "category": ecat,
-                            "service": esvc or None,
-                            "business_name": ebn,
-                            "contact_name": ecn or None,
-                            "phone": d,
-                            "address": eaddr or None,
-                            "website": eweb or None,
-                            "notes": enotes or None,
-                            "keywords": ekw or None,
-                        })
-                        st.success(f"Updated provider id={sel_row['id']}.")
-                        st.rerun()
             else:
-                st.info("Select a provider to edit and press 'Save Changes' to apply updates.")
+                # render empty/disabled inputs to keep layout stable
+                st.text_input("Provider *", key="edit_business_name", value="", disabled=True)
+                st.selectbox("Category *", options=[""], key="edit_category", disabled=True)
+                st.selectbox("Service (optional)", options=[""], key="edit_service", disabled=True)
+                st.text_input("Contact Name", key="edit_contact_name", value="", disabled=True)
+                st.text_input("Phone (10 digits or blank)", key="edit_phone", value="", disabled=True)
+                st.text_area("Address", height=80, key="edit_address", value="", disabled=True)
+                st.text_input("Website (https://…)", key="edit_website", value="", disabled=True)
+                st.text_area("Notes", height=100, key="edit_notes", value="", disabled=True)
+                st.text_input("Keywords (comma separated)", key="edit_keywords", value="", disabled=True)
+                st.info("Select a provider to edit, then click 'Save Changes'.")
 
-    # ---- DELETE (bottom, its own form to avoid 'Missing Submit Button') ----
+            # ALWAYS render the submit button (disabled if nothing selected)
+            edit_submit = st.form_submit_button("Save Changes", type="primary", disabled=(sel_row is None))
+
+            if sel_row and edit_submit:
+                errs = []
+                ebn = (st.session_state.get("edit_business_name") or "").strip()
+                ecat = (st.session_state.get("edit_category") or "").strip()
+                esvc = (st.session_state.get("edit_service") or "").strip()
+                ecn = (st.session_state.get("edit_contact_name") or "").strip()
+                eph = (st.session_state.get("edit_phone") or "").strip()
+                eaddr = (st.session_state.get("edit_address") or "").strip()
+                eweb = (st.session_state.get("edit_website") or "").strip()
+                enotes = (st.session_state.get("edit_notes") or "").strip()
+                ekw = (st.session_state.get("edit_keywords") or "").strip()
+
+                if not ebn:
+                    errs.append("Provider name is required.")
+                if not ecat:
+                    errs.append("Category is required.")
+                d = _digits_only(eph)
+                if d and len(d) != 10:
+                    errs.append("Phone must be 10 digits (or blank).")
+                if esvc and re.search(r"[,/;]", esvc):
+                    errs.append("Service name must be a single service (no commas or slashes).")
+
+                if errs:
+                    st.error(" • " + "\n • ".join(errs))
+                else:
+                    update_vendor(engine, sel_row["id"], {
+                        "category": ecat,
+                        "service": esvc or None,
+                        "business_name": ebn,
+                        "contact_name": ecn or None,
+                        "phone": d,
+                        "address": eaddr or None,
+                        "website": eweb or None,
+                        "notes": enotes or None,
+                        "keywords": ekw or None,
+                    })
+                    st.success(f"Updated provider id={sel_row['id']}.")
+                    st.rerun()
+
+    # ---- DELETE (bottom, its own form) ----
     st.markdown("---")
     st.markdown("### Delete Provider")
     del_options = [f"{v['id']:>4} — {v['business_name']}" for v in vendors]
@@ -577,10 +573,8 @@ def _csv_restore_append(engine: Engine):
         n = _norm(raw)
         if n in forbidden:
             return "__FORBIDDEN__"
-        # exact allowed first
         if n in allowed:
             return n
-        # try map
         for canon, aliases in header_map.items():
             if n in aliases:
                 return canon
@@ -607,7 +601,6 @@ def _csv_restore_append(engine: Engine):
         for orig, canon in col_map.items():
             if canon and canon in allowed:
                 df[canon] = df_raw[orig].astype("string").fillna("").map(str).map(str.strip)
-
         for c in allowed:
             if c not in df.columns:
                 df[c] = ""
@@ -615,15 +608,12 @@ def _csv_restore_append(engine: Engine):
         # validation
         errs: List[str] = []
         for i, r in df.iterrows():
-            # required columns non-empty
             for req in required:
                 if not (str(r.get(req) or "").strip()):
                     errs.append(f"Row {i+1}: '{req}' is required.")
-            # phone
             d = _digits_only(r.get("phone") or "")
             if d and len(d) != 10:
                 errs.append(f"Row {i+1}: phone must be 10 digits or blank.")
-            # multi-service guard
             svc = str(r.get("service") or "")
             if svc and re.search(r"[,/;]", svc):
                 errs.append(f"Row {i+1}: service must be a single value (no commas or slashes).")
@@ -690,18 +680,13 @@ def _quick_probes(engine: Engine):
 
     out: Dict[str, Any] = {}
     with engine.begin() as conn:
-        # counts
         out["counts"] = {
             "vendors": int(conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0),
             "categories": int(conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar() or 0),
             "services": int(conn.execute(sql_text("SELECT COUNT(*) FROM services")).scalar() or 0),
         }
-
-        # vendors index list
         idx = conn.execute(sql_text("PRAGMA index_list('vendors')")).mappings().all()
         out["vendors_indexes"] = [dict(r) for r in idx]
-
-        # category/service counts
         res = conn.execute(sql_text("""
             SELECT category, COALESCE(service, '') AS service, COUNT(*) AS cnt
             FROM vendors
@@ -709,13 +694,10 @@ def _quick_probes(engine: Engine):
             ORDER BY category COLLATE NOCASE, service COLLATE NOCASE
         """)).mappings().all()
         out["category_service_counts"] = [dict(r) for r in res]
-
-        # unused services: services not referenced in vendors.service
         res2 = conn.execute(sql_text("SELECT DISTINCT LOWER(COALESCE(service,'')) AS s FROM vendors")).mappings().all()
         svc_used = {r["s"] for r in res2 if r["s"]}
         all_services = {s.lower() for s in fetch_services(engine)}
-        unused = sorted(list(all_services - svc_used))
-        out["unused_services"] = unused
+        out["unused_services"] = sorted(list(all_services - svc_used))
 
     st.code(json.dumps(out, indent=2))
 
@@ -736,7 +718,6 @@ def page_maintenance(engine: Engine):
     _csv_restore_append(engine)
     _quick_probes(engine)
 
-    # Help / Tips (from secrets if provided)
     help_md = _get_secret("HELP_MD", "")
     with st.expander("Provider Help / Tips"):
         if help_md:
@@ -758,7 +739,6 @@ def page_diag(engine: Engine, info: Dict[str, Any]):
     st.code(json.dumps(info, indent=2))
 
     with engine.begin() as conn:
-        # Show schema columns quickly
         def _cols(tbl: str) -> List[str]:
             res = conn.execute(sql_text(f"PRAGMA table_info('{tbl}')")).mappings().all()
             return [r["name"] for r in res]
@@ -768,13 +748,11 @@ def page_diag(engine: Engine, info: Dict[str, Any]):
             "categories_columns": _cols("categories"),
             "services_columns": _cols("services"),
         }
-
         diag["counts"] = {
             "vendors": int(conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0),
             "categories": int(conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar() or 0),
             "services": int(conn.execute(sql_text("SELECT COUNT(*) FROM services")).scalar() or 0),
         }
-
         idx = conn.execute(sql_text("PRAGMA index_list('vendors')")).mappings().all()
         diag["vendors_indexes"] = [dict(r) for r in idx]
 
@@ -782,7 +760,7 @@ def page_diag(engine: Engine, info: Dict[str, Any]):
 
 
 # -----------------------------
-# Category / Service Admin (Add, Rename with cascade, Delete if unused)
+# Category / Service Admin
 # -----------------------------
 def _rename_cascade(engine: Engine, field: str, old: str, new: str):
     if field not in {"category", "service"}:
@@ -807,10 +785,9 @@ def _delete_if_unused(engine: Engine, field: str, name: str) -> bool:
 
 def page_admin_taxonomy(engine: Engine):
     st.subheader("Category / Service Admin")
-
     tabs = st.tabs(["Categories", "Services"])
 
-    # --- Categories ---
+    # Categories
     with tabs[0]:
         cats = fetch_categories(engine)
         st.markdown("**Add Category**")
@@ -863,7 +840,7 @@ def page_admin_taxonomy(engine: Engine):
                     else:
                         st.warning("Category is in use by vendors; reassign or rename first.")
 
-    # --- Services ---
+    # Services
     with tabs[1]:
         svcs = fetch_services(engine)
         st.markdown("**Add Service**")
@@ -928,7 +905,6 @@ def _run_main(engine: Engine):
         "Maintenance / Help",
         "Diagnostics / Debug",
     ])
-
     with tabs[0]:
         page_browse(engine)
     with tabs[1]:
