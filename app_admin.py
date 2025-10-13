@@ -336,7 +336,6 @@ if RUN_STARTUP_BACKFILL:
 # Browse (with Global Search)
 # -----------------------------
 def page_browse(engine: Engine):
-    st.subheader("Browse Providers")
 
     data = list_vendors(engine)
     if not data:
