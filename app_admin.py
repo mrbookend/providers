@@ -1039,161 +1039,162 @@ with _tabs[1]:
                     st.error(f"Add failed: {e}")
 
     # RIGHT — Edit Provider
-    with col_right:
-        st.subheader("Edit Provider")
+with col_right:
+    st.subheader("Edit Provider")
 
-        if df_all.empty:
-            st.info("No providers yet. Add a provider on the left.")
-        else:
-            edit_form_key = f"edit_provider_form_{st.session_state['edit_form_version']}"
-            with st.form(edit_form_key, clear_on_submit=False):
-                # Row 0: the selector (now INSIDE the form to align with spacer on the left)
-                c0a, c0b = st.columns(2)
-                with c0a:
-                    st.selectbox(
-                        "Select provider to edit (type to search)",
-                        options=[None] + ids,
-                        format_func=_fmt_provider,
-                        key="edit_vendor_id",
-                    )
-                with c0b:
-                    # keep row height symmetric; optional tiny caption space
-                    st.caption("")
+    if df_all.empty:
+        st.info("No providers yet. Add a provider on the left.")
+    else:
+        # --- 0) Selector OUTSIDE the form so it triggers a rerun ---
+        c0a, c0b = st.columns(2)
+        with c0a:
+            st.selectbox(
+                "Select provider to edit (type to search)",
+                options=[None] + ids,
+                format_func=_fmt_provider,
+                key="edit_vendor_id",
+            )
+        with c0b:
+            st.caption("")
 
-                # If selection changed, hydrate fields
-                if st.session_state.get("edit_vendor_id") is not None:
-                    if st.session_state.get("edit_last_loaded_id") != st.session_state.get("edit_vendor_id"):
-                        row = id_to_row[int(st.session_state["edit_vendor_id"])]
-                        st.session_state.update(
-                            {
-                                "edit_business_name": _s(row.get("business_name")),
-                                "edit_category": _s(row.get("category")),
-                                "edit_service": _s(row.get("service")),
-                                "edit_contact_name": _s(row.get("contact_name")),
-                                "edit_phone": _s(row.get("phone")),
-                                "edit_address": _s(row.get("address")),
-                                "edit_website": _s(row.get("website")),
-                                "edit_notes": _s(row.get("notes")),
-                                "edit_keywords": _s(row.get("keywords")),
-                                "edit_row_updated_at": row.get("updated_at") or "",
-                                "edit_last_loaded_id": st.session_state["edit_vendor_id"],
-                            }
-                        )
+        # --- 0b) Hydrate fields immediately after selection change ---
+        if st.session_state.get("edit_vendor_id") is not None:
+            if st.session_state.get("edit_last_loaded_id") != st.session_state.get("edit_vendor_id"):
+                row = id_to_row[int(st.session_state["edit_vendor_id"])]
+                st.session_state.update(
+                    {
+                        "edit_business_name": (row.get("business_name") or "").strip(),
+                        "edit_category": (row.get("category") or "").strip(),
+                        "edit_service": (row.get("service") or "").strip(),
+                        "edit_contact_name": (row.get("contact_name") or "").strip(),
+                        "edit_phone": (row.get("phone") or "").strip(),
+                        "edit_address": (row.get("address") or "").strip(),
+                        "edit_website": (row.get("website") or "").strip(),
+                        "edit_notes": (row.get("notes") or "").strip(),
+                        "edit_keywords": (row.get("keywords") or "").strip(),
+                        "edit_row_updated_at": row.get("updated_at") or "",
+                        "edit_last_loaded_id": st.session_state["edit_vendor_id"],
+                    }
+                )
 
-                # Row 1..: inputs laid out to mirror Add
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.text_input("Provider *", key="edit_business_name")
+        # --- 1) Now open the form for the actual fields/buttons ---
+        edit_form_key = f"edit_provider_form_{st.session_state['edit_form_version']}"
+        with st.form(edit_form_key, clear_on_submit=False):
+            # Row 1..: inputs laid out to mirror Add
+            c1, c2 = st.columns(2)
+            with c1:
+                st.text_input("Provider *", key="edit_business_name")
 
-                    cats_choices = list_names(engine, "categories")
-                    svcs_choices = list_names(engine, "services")
-                    _edit_cat_options = [""] + (cats_choices or [])
-                    _edit_svc_options = [""] + (svcs_choices or [])
+                cats_choices = list_names(engine, "categories")
+                svcs_choices = list_names(engine, "services")
+                _edit_cat_options = [""] + (cats_choices or [])
+                _edit_svc_options = [""] + (svcs_choices or [])
 
-                    if (st.session_state.get("edit_category") or "") not in _edit_cat_options:
-                        st.session_state["edit_category"] = ""
-                    if (st.session_state.get("edit_service") or "") not in _edit_svc_options:
-                        st.session_state["edit_service"] = ""
+                if (st.session_state.get("edit_category") or "") not in _edit_cat_options:
+                    st.session_state["edit_category"] = ""
+                if (st.session_state.get("edit_service") or "") not in _edit_svc_options:
+                    st.session_state["edit_service"] = ""
 
-                    st.selectbox("Category *", options=_edit_cat_options, key="edit_category", placeholder="Select category")
-                    st.selectbox("Service (optional)", options=_edit_svc_options, key="edit_service")
+                st.selectbox("Category *", options=_edit_cat_options, key="edit_category", placeholder="Select category")
+                st.selectbox("Service (optional)", options=_edit_svc_options, key="edit_service")
 
-                    st.text_input("Contact Name", key="edit_contact_name")
-                    st.text_input("Phone (10 digits or blank)", key="edit_phone")
-                with c2:
-                    st.text_area("Address", height=80, key="edit_address")
-                    st.text_input("Website (https://…)", key="edit_website")
-                    st.text_area("Notes", height=100, key="edit_notes")
-                    st.text_input("Keywords (comma separated)", key="edit_keywords")
+                st.text_input("Contact Name", key="edit_contact_name")
+                st.text_input("Phone (10 digits or blank)", key="edit_phone")
+            with c2:
+                st.text_area("Address", height=80, key="edit_address")
+                st.text_input("Website (https://…)", key="edit_website")
+                st.text_area("Notes", height=100, key="edit_notes")
+                st.text_input("Keywords (comma separated)", key="edit_keywords")
 
-                edited = st.form_submit_button("Save Provider Changes")
+            edited = st.form_submit_button("Save Provider Changes")
 
-            def _nonce(name: str) -> str:
-                return st.session_state.get(f"{name}_nonce")
+        # --- 2) Submit handling (unchanged) ---
+        def _nonce(name: str) -> str:
+            return st.session_state.get(f"{name}_nonce")
 
-            def _nonce_rotate(name: str) -> None:
-                st.session_state[f"{name}_nonce"] = uuid.uuid4().hex
+        def _nonce_rotate(name: str) -> None:
+            st.session_state[f"{name}_nonce"] = uuid.uuid4().hex
 
-            if edited:
-                edit_nonce = _nonce("edit")
-                if st.session_state.get("edit_last_done") == edit_nonce:
-                    st.info("Edit already processed.")
+        if edited:
+            edit_nonce = _nonce("edit")
+            if st.session_state.get("edit_last_done") == edit_nonce:
+                st.info("Edit already processed.")
+                st.stop()
+
+            vid = st.session_state.get("edit_vendor_id")
+            if vid is None:
+                st.error("Select a provider first.")
+            else:
+                bn = (st.session_state["edit_business_name"] or "").strip()
+                cat = (st.session_state["edit_category"] or "").strip()
+                svc = (st.session_state["edit_service"] or "").strip()
+
+                # Guard: service must be a single term (no lists)
+                if svc and re.search(r"(,|/|;|&|\\band\\b)", svc, flags=re.I):
+                    st.error("Enter a single Service (no lists like 'Plumbing, Electrical'). Use Service Admin to manage multiple services.")
                     st.stop()
 
-                vid = st.session_state.get("edit_vendor_id")
-                if vid is None:
-                    st.error("Select a provider first.")
+                phone_norm = _normalize_phone(st.session_state["edit_phone"])
+                if phone_norm and len(phone_norm) != 10:
+                    st.error("Phone must be 10 digits or blank.")
+                elif not bn:
+                    st.error("Provider name is required.")
+                elif not cat:
+                    st.error("Category is required. Pick one under 'Category Admin' if missing.")
                 else:
-                    bn = _s(st.session_state["edit_business_name"])
-                    cat = _s(st.session_state["edit_category"])
-                    svc = _s(st.session_state["edit_service"])
+                    try:
+                        _exec_with_retry(engine, "INSERT OR IGNORE INTO categories(name) VALUES(:n)", {"n": cat})
+                        if svc:
+                            _exec_with_retry(engine, "INSERT OR IGNORE INTO services(name) VALUES(:n)", {"n": svc})
 
-                    # Guard: service must be a single term (no lists)
-                    if svc and re.search(r"(,|/|;|&|\\band\\b)", svc, flags=re.I):
-                        st.error("Enter a single Service (no lists like 'Plumbing, Electrical'). Use Service Admin to manage multiple services.")
-                        st.stop()
-
-                    phone_norm = _normalize_phone(st.session_state["edit_phone"])
-                    if phone_norm and len(phone_norm) != 10:
-                        st.error("Phone must be 10 digits or blank.")
-                    elif not bn:
-                        st.error("Provider name is required.")
-                    elif not cat:
-                        st.error("Category is required. Pick one under 'Category Admin' if missing.")
-                    else:
-                        try:
-                            _exec_with_retry(engine, "INSERT OR IGNORE INTO categories(name) VALUES(:n)", {"n": cat})
-                            if svc:
-                                _exec_with_retry(engine, "INSERT OR IGNORE INTO services(name) VALUES(:n)", {"n": svc})
-
-                            prev_updated = st.session_state.get("edit_row_updated_at") or ""
-                            now = datetime.utcnow().isoformat(timespec="seconds")
-                            computed = _computed_keywords_for(cat, svc, bn) if svc else ""
-                            res = _exec_with_retry(
-                                engine,
-                                """
-                                UPDATE vendors
-                                   SET category=:category,
-                                       service=NULLIF(:service, ''),
-                                       business_name=:business_name,
-                                       contact_name=:contact_name,
-                                       phone=:phone,
-                                       address=:address,
-                                       website=:website,
-                                       notes=:notes,
-                                       keywords=:keywords,
-                                       computed_keywords=:computed_keywords,
-                                       updated_at=:now,
-                                       updated_by=:user
-                                 WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
-                                """,
-                                {
-                                    "category": cat,
-                                    "service": svc,
-                                    "business_name": bn,
-                                    "contact_name": _s(st.session_state["edit_contact_name"]),
-                                    "phone": phone_norm,
-                                    "address": _s(st.session_state["edit_address"]),
-                                    "website": _sanitize_url(st.session_state["edit_website"]),
-                                    "notes": _s(st.session_state["edit_notes"]),
-                                    "keywords": _s(st.session_state["edit_keywords"]),
-                                    "computed_keywords": computed,
-                                    "now": now,
-                                    "user": os.getenv("USER", "admin"),
-                                    "id": int(vid),
-                                    "prev_updated": prev_updated,
-                                },
-                            )
-                            if (res.rowcount or 0) == 0:
-                                st.warning("No changes applied (stale selection or already updated). Refresh and try again.")
-                            else:
-                                st.session_state["edit_last_done"] = edit_nonce
-                                st.success(f"Provider updated: {bn}")
-                                _queue_edit_form_reset()
-                                _nonce_rotate("edit")
-                                st.rerun()
-                        except Exception as e:
-                            st.error(f"Update failed: {e}")
+                        prev_updated = st.session_state.get("edit_row_updated_at") or ""
+                        now = datetime.utcnow().isoformat(timespec="seconds")
+                        computed = _computed_keywords_for(cat, svc, bn) if svc else ""
+                        res = _exec_with_retry(
+                            engine,
+                            """
+                            UPDATE vendors
+                               SET category=:category,
+                                   service=NULLIF(:service, ''),
+                                   business_name=:business_name,
+                                   contact_name=:contact_name,
+                                   phone=:phone,
+                                   address=:address,
+                                   website=:website,
+                                   notes=:notes,
+                                   keywords=:keywords,
+                                   computed_keywords=:computed_keywords,
+                                   updated_at=:now,
+                                   updated_by=:user
+                             WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
+                            """,
+                            {
+                                "category": cat,
+                                "service": svc,
+                                "business_name": bn,
+                                "contact_name": (st.session_state["edit_contact_name"] or "").strip(),
+                                "phone": phone_norm,
+                                "address": (st.session_state["edit_address"] or "").strip(),
+                                "website": _sanitize_url(st.session_state["edit_website"]),
+                                "notes": (st.session_state["edit_notes"] or "").strip(),
+                                "keywords": (st.session_state["edit_keywords"] or "").strip(),
+                                "computed_keywords": computed,
+                                "now": now,
+                                "user": os.getenv("USER", "admin"),
+                                "id": int(vid),
+                                "prev_updated": prev_updated,
+                            },
+                        )
+                        if (res.rowcount or 0) == 0:
+                            st.warning("No changes applied (stale selection or already updated). Refresh and try again.")
+                        else:
+                            st.session_state["edit_last_done"] = edit_nonce
+                            st.success(f"Provider updated: {bn}")
+                            _queue_edit_form_reset()
+                            _nonce_rotate("edit")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Update failed: {e}")
 
     # Bottom — Delete Provider
     st.markdown("---")
