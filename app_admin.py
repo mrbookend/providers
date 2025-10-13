@@ -57,6 +57,18 @@ def _ct_equals(a: str, b: str) -> bool:
     return hmac.compare_digest((a or ""), (b or ""))
 
 
+def _s(x: Any) -> str:
+    """Safe string: trim and collapse internal whitespace."""
+    ss = str(x or "")
+    ss = ss.strip()
+    ss = re.sub(r"[ \t]+", " ", ss)
+    return ss
+
+
+def _digits_only(x: Any) -> str:
+    return re.sub(r"\D", "", str(x or ""))
+
+
 # -----------------------------
 # Hrana/libSQL transient error retry
 # -----------------------------
@@ -538,6 +550,18 @@ def _run_quick_probes(engine: Engine) -> dict[str, Any]:
         results["unused_services_count"] = len(unused_svc)
         results["_unused_services_rows"] = [dict(zip(("name",), r)) for r in unused_svc]
 
+        # Category/Service counts
+        pairs = conn.execute(sql_text("""
+            SELECT
+                TRIM(category) AS category,
+                TRIM(service)  AS service,
+                COUNT(*)       AS n
+            FROM vendors
+            GROUP BY category, service
+            ORDER BY category COLLATE NOCASE, service COLLATE NOCASE
+        """)).fetchall()
+        results["category_service_counts"] = [dict(zip(("category","service","count"), r)) for r in pairs]
+
     return results
 
 
@@ -545,7 +569,10 @@ def _render_quick_probes_ui(engine: Engine) -> None:
     if st.button("Run Quick Probes", type="primary"):
         data = _run_quick_probes(engine)
         st.json({k: v for k, v in data.items() if not k.startswith("_")})
-        for key, label in [
+
+        # Detail tables
+        tables = [
+            ("category_service_counts", "Category / Service counts"),
             ("_dupes_rows", "Possible duplicates"),
             ("_bad_phones_rows", "Bad phone formats"),
             ("_bad_websites_rows", "Bad website formats"),
@@ -553,7 +580,8 @@ def _render_quick_probes_ui(engine: Engine) -> None:
             ("_orphan_services_rows", "Orphan services (not in library)"),
             ("_unused_categories_rows", "Unused categories"),
             ("_unused_services_rows", "Unused services"),
-        ]:
+        ]
+        for key, label in tables:
             rows = data.get(key, [])
             if isinstance(rows, list) and rows:
                 st.write(f"**{label}** ({len(rows)})")
@@ -914,7 +942,7 @@ with _tabs[1]:
         add_form_key = f"add_provider_form_{st.session_state['add_form_version']}"
         with st.form(add_form_key, clear_on_submit=False):
             # Row 0: spacer to align with the Edit selectbox height
-            st.markdown("<div style='height: 70px;'></div>", unsafe_allow_html=True)
+            st.markdown("<div style='height: 80px;'></div>", unsafe_allow_html=True)
 
             # Row 1..: inputs laid out in two columns to mirror Edit
             c1, c2 = st.columns(2)
@@ -952,15 +980,20 @@ with _tabs[1]:
                 st.info("Add already processed.")
                 st.stop()
 
-            business_name = (st.session_state["add_business_name"] or "").strip()
-            category = (st.session_state["add_category"] or "").strip()
-            service = (st.session_state["add_service"] or "").strip()
-            contact_name = (st.session_state["add_contact_name"] or "").strip()
+            business_name = _s(st.session_state["add_business_name"])
+            category = _s(st.session_state["add_category"])
+            service = _s(st.session_state["add_service"])
+            contact_name = _s(st.session_state["add_contact_name"])
             phone_norm = _normalize_phone(st.session_state["add_phone"])
-            address = (st.session_state["add_address"] or "").strip()
+            address = _s(st.session_state["add_address"])
             website = _sanitize_url(st.session_state["add_website"])
-            notes = (st.session_state["add_notes"] or "").strip()
-            keywords = (st.session_state["add_keywords"] or "").strip()
+            notes = _s(st.session_state["add_notes"])
+            keywords = _s(st.session_state["add_keywords"])
+
+            # Guard: service must be a single term (no lists)
+            if service and re.search(r"(,|/|;|&|\\band\\b)", service, flags=re.I):
+                st.error("Enter a single Service (no lists like 'Plumbing, Electrical'). Use Service Admin to manage multiple services.")
+                st.stop()
 
             if phone_norm and len(phone_norm) != 10:
                 st.error("Phone must be 10 digits or blank.")
@@ -1033,15 +1066,15 @@ with _tabs[1]:
                         row = id_to_row[int(st.session_state["edit_vendor_id"])]
                         st.session_state.update(
                             {
-                                "edit_business_name": (row.get("business_name") or "").strip(),
-                                "edit_category": (row.get("category") or "").strip(),
-                                "edit_service": (row.get("service") or "").strip(),
-                                "edit_contact_name": (row.get("contact_name") or "").strip(),
-                                "edit_phone": (row.get("phone") or "").strip(),
-                                "edit_address": (row.get("address") or "").strip(),
-                                "edit_website": (row.get("website") or "").strip(),
-                                "edit_notes": (row.get("notes") or "").strip(),
-                                "edit_keywords": (row.get("keywords") or "").strip(),
+                                "edit_business_name": _s(row.get("business_name")),
+                                "edit_category": _s(row.get("category")),
+                                "edit_service": _s(row.get("service")),
+                                "edit_contact_name": _s(row.get("contact_name")),
+                                "edit_phone": _s(row.get("phone")),
+                                "edit_address": _s(row.get("address")),
+                                "edit_website": _s(row.get("website")),
+                                "edit_notes": _s(row.get("notes")),
+                                "edit_keywords": _s(row.get("keywords")),
                                 "edit_row_updated_at": row.get("updated_at") or "",
                                 "edit_last_loaded_id": st.session_state["edit_vendor_id"],
                             }
@@ -1091,9 +1124,15 @@ with _tabs[1]:
                 if vid is None:
                     st.error("Select a provider first.")
                 else:
-                    bn = (st.session_state["edit_business_name"] or "").strip()
-                    cat = (st.session_state["edit_category"] or "").strip()
-                    svc = (st.session_state["edit_service"] or "").strip()
+                    bn = _s(st.session_state["edit_business_name"])
+                    cat = _s(st.session_state["edit_category"])
+                    svc = _s(st.session_state["edit_service"])
+
+                    # Guard: service must be a single term (no lists)
+                    if svc and re.search(r"(,|/|;|&|\\band\\b)", svc, flags=re.I):
+                        st.error("Enter a single Service (no lists like 'Plumbing, Electrical'). Use Service Admin to manage multiple services.")
+                        st.stop()
+
                     phone_norm = _normalize_phone(st.session_state["edit_phone"])
                     if phone_norm and len(phone_norm) != 10:
                         st.error("Phone must be 10 digits or blank.")
@@ -1132,12 +1171,12 @@ with _tabs[1]:
                                     "category": cat,
                                     "service": svc,
                                     "business_name": bn,
-                                    "contact_name": (st.session_state["edit_contact_name"] or "").strip(),
+                                    "contact_name": _s(st.session_state["edit_contact_name"]),
                                     "phone": phone_norm,
-                                    "address": (st.session_state["edit_address"] or "").strip(),
+                                    "address": _s(st.session_state["edit_address"]),
                                     "website": _sanitize_url(st.session_state["edit_website"]),
-                                    "notes": (st.session_state["edit_notes"] or "").strip(),
-                                    "keywords": (st.session_state["edit_keywords"] or "").strip(),
+                                    "notes": _s(st.session_state["edit_notes"]),
+                                    "keywords": _s(st.session_state["edit_keywords"]),
                                     "computed_keywords": computed,
                                     "now": now,
                                     "user": os.getenv("USER", "admin"),
@@ -1453,7 +1492,7 @@ with _tabs[4]:
 
     # 3) CSV Restore (Append-only)
     st.subheader("CSV Restore (Append-only)")
-    st.caption("Append-only; existing IDs are rejected. Use Dry run first to validate.")
+    st.caption("Append-only; explicit IDs are rejected. Use Dry run first to validate.")
     uploaded = st.file_uploader("Upload CSV to append into `vendors`", type=["csv"], accept_multiple_files=False)
 
     col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
@@ -1464,31 +1503,63 @@ with _tabs[4]:
     with col3:
         normalize_phone = st.checkbox("Normalize phone to digits", value=True)
     with col4:
-        auto_id = st.checkbox("Missing `id` ➜ autoincrement", value=True)
+        # explicit IDs are blocked; we keep this visible to communicate behavior
+        auto_id = st.checkbox("Missing `id` ➜ autoincrement", value=True, disabled=True)
 
     def _soft_trim(s: str | None) -> str:
         s = (s or "").strip()
         s = re.sub(r"[ \t]+", " ", s)
         return s
 
-    def _fetch_existing_ids(engine: Engine, ids: Iterable[int]) -> set[int]:
-        ids = [int(i) for i in ids if str(i).strip() != ""]
-        if not ids:
-            return set()
-        params = {("i"+str(k)): ids[k] for k in range(len(ids))}
-        q = f"SELECT id FROM vendors WHERE id IN ({','.join([':i'+str(k) for k in range(len(ids))])})"
-        with engine.begin() as conn:
-            rows = conn.execute(sql_text(q), params).fetchall()
-        return set(int(r[0]) for r in rows)
+    def _prepare_csv_for_append_strict(df_in: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+        """
+        Force strings, trim, validate requireds & phones, and BLOCK any explicit id.
+        Returns (clean_df_without_id, insertable_cols)
+        """
+        # 1) Force strings for all columns
+        for c in df_in.columns:
+            df_in[c] = df_in[c].astype(str)
 
-    def _prepare_csv_for_append(
-        engine: Engine,
-        df_in: pd.DataFrame,
-        *,
-        normalize_phone: bool,
-        trim_strings: bool,
-        treat_missing_id_as_autoincrement: bool,
-    ):
+        # 2) Trim strings (optional)
+        if trim_strings:
+            for c in df_in.columns:
+                df_in[c] = df_in[c].map(_soft_trim)
+
+        # 3) Block 'id' entirely if any non-blank present
+        if "id" in df_in.columns:
+            nonblank_id = df_in["id"].astype(str).str.strip().ne("")
+            if nonblank_id.any():
+                raise ValueError("CSV contains explicit `id` values. Append-only mode rejects explicit IDs.")
+            # drop id column if present (all blank)
+            df_in = df_in.drop(columns=["id"])
+
+        # 4) Normalize phone (optional)
+        if normalize_phone and "phone" in df_in.columns:
+            df_in["phone"] = df_in["phone"].map(lambda x: _normalize_phone(str(x)))
+
+        # 5) Validate requireds
+        for req in REQUIRED_VENDOR_COLUMNS:
+            if req not in df_in.columns:
+                raise ValueError(f"Required column missing in CSV: {req}")
+            if df_in[req].astype(str).str.strip().eq("").any():
+                raise ValueError(f"CSV has blank required values in `{req}`")
+
+        # 6) Validate phones: must be 10 digits or blank
+        if "phone" in df_in.columns:
+            bad = df_in["phone"].astype(str).str.strip()
+            badmask = bad.ne("") & bad.map(lambda s: len(_digits_only(s)) != 10)
+            if badmask.any():
+                sample = df_in.loc[badmask, ["business_name", "phone"]].head(10)
+                raise ValueError(f"Invalid phone(s) (must be 10 digits or blank). Sample:\n{sample.to_dict(orient='records')}")
+
+        # 7) Service single-name guard: reject lists in CSV
+        if "service" in df_in.columns:
+            svc_bad = df_in["service"].astype(str).str.contains(r"(,|/|;|&|\\band\\b)", case=False, regex=True, na=False)
+            if svc_bad.any():
+                sample = df_in.loc[svc_bad, ["business_name", "service"]].head(10)
+                raise ValueError(f"CSV service values must be a single name (no lists). Sample:\n{sample.to_dict(orient='records')}")
+
+        # 8) Decide insertable columns = intersection with vendors table
         with engine.begin() as conn:
             cols = conn.execute(sql_text("PRAGMA table_info(vendors)")).fetchall()
         vendors_cols = [c[1] for c in cols]
@@ -1496,39 +1567,8 @@ with _tabs[4]:
         if not insertable_cols:
             raise ValueError("CSV has no columns matching `vendors` table.")
 
-        df = df_in[insertable_cols].copy()
-
-        if trim_strings:
-            for c in df.columns:
-                if df[c].dtype == object:
-                    df[c] = df[c].map(_soft_trim)
-
-        if normalize_phone and "phone" in df.columns:
-            df["phone"] = df["phone"].map(lambda x: _normalize_phone(str(x)))
-
-        has_id = "id" in df.columns
-        with_id_df = pd.DataFrame(columns=insertable_cols)
-        without_id_df = pd.DataFrame(columns=insertable_cols)
-
-        if has_id:
-            mask_with_id = df["id"].astype(str).str.strip().ne("")
-            with_id_df = df[mask_with_id].copy()
-            without_id_df = df[~mask_with_id].copy()
-        else:
-            without_id_df = df.copy()
-
-        rejected_ids: List[int] = []
-        if has_id and not with_id_df.empty:
-            existing = _fetch_existing_ids(engine, with_id_df["id"].astype(int).tolist())
-            if existing:
-                keep_mask = ~with_id_df["id"].astype(int).isin(existing)
-                rejected_ids = sorted(list(existing))
-                with_id_df = with_id_df[keep_mask].copy()
-
-        if not treat_missing_id_as_autoincrement and not without_id_df.empty:
-            without_id_df = pd.DataFrame(columns=insertable_cols)
-
-        return with_id_df, without_id_df, rejected_ids, insertable_cols
+        clean = df_in[insertable_cols].copy()
+        return clean, insertable_cols
 
     def _executemany_insert(engine: Engine, rows: List[Dict], cols: List[str]) -> int:
         if not rows:
@@ -1538,10 +1578,10 @@ with _tabs[4]:
             r.setdefault("created_at", now)
             r.setdefault("updated_at", now)
             r.setdefault("updated_by", os.getenv("USER", "admin"))
-            cat = (r.get("category") or "").strip()
-            svc = (r.get("service") or "").strip()
-            name = (r.get("business_name") or "").strip()
-            if svc and not (r.get("computed_keywords") or "").strip():
+            cat = _s(r.get("category"))
+            svc = _s(r.get("service"))
+            name = _s(r.get("business_name"))
+            if svc and not _s(r.get("computed_keywords")):
                 r["computed_keywords"] = _computed_keywords_for(cat, svc, name)
 
         col_list = ", ".join(cols)
@@ -1551,61 +1591,33 @@ with _tabs[4]:
             res = conn.execute(sql_text(sql), rows)
             return res.rowcount or 0
 
-    def _execute_append_only(
-        engine: Engine,
-        with_id_df: pd.DataFrame,
-        without_id_df: pd.DataFrame,
-        insertable_cols: List[str],
-    ) -> int:
-        inserted = 0
-        if not with_id_df.empty:
-            rows = with_id_df.where(pd.notnull(with_id_df), None).to_dict(orient="records")
-            inserted += _executemany_insert(engine, rows, insertable_cols)
-
-        if not without_id_df.empty:
-            cols_no_id = [c for c in insertable_cols if c != "id"]
-            rows = without_id_df.where(pd.notnull(without_id_df), None).to_dict(orient="records")
-            for r in rows:
-                r.pop("id", None)
-            inserted += _executemany_insert(engine, rows, cols_no_id)
-
-        return inserted
-
     with st.expander("CSV Restore (Append-only) — Validate & Append"):
         if uploaded is not None:
             try:
-                df_in = pd.read_csv(uploaded)
-                with_id_df, without_id_df, rejected_ids, insertable_cols = _prepare_csv_for_append(
-                    engine,
-                    df_in,
-                    normalize_phone=normalize_phone,
-                    trim_strings=trim_strings,
-                    treat_missing_id_as_autoincrement=auto_id,
-                )
+                # Force strings at read time to avoid dtype surprises
+                df_in = pd.read_csv(uploaded, dtype=str).fillna("")
+                clean_df, insertable_cols = _prepare_csv_for_append_strict(df_in)
 
-                planned_inserts = len(with_id_df) + len(without_id_df)
+                planned_inserts = len(clean_df)
 
                 st.write("**Validation summary**")
                 st.write(
                     {
                         "csv_rows": int(len(df_in)),
                         "insertable_columns": insertable_cols,
-                        "rows_with_explicit_id": int(len(with_id_df)),
-                        "rows_autoincrement_id": int(len(without_id_df)),
-                        "rows_rejected_due_to_existing_id": rejected_ids or [],
-                        "planned_inserts": int(planned_inserts),
+                        "rows_planned": int(planned_inserts),
+                        "explicit_id_blocked": True,
                     }
                 )
 
                 if planned_inserts > 0:
-                    preview_df = pd.concat([with_id_df, without_id_df], axis=0, ignore_index=True).head(20)
-                    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+                    st.dataframe(clean_df.head(20), use_container_width=True, hide_index=True)
 
                 if dry_run:
                     st.success("Dry run complete. No changes applied.")
                 else:
                     if planned_inserts == 0:
-                        st.info("Nothing to insert (all rows rejected or CSV empty after filters).")
+                        st.info("Nothing to insert (CSV empty after validation).")
                     else:
                         try:
                             if st.button("Append CSV…", type="primary", key="append_csv_open"):
@@ -1617,16 +1629,18 @@ with _tabs[4]:
                                             st.rerun()
                                     with c2:
                                         if st.button("Yes, append now", key="append_confirm"):
-                                            inserted = _execute_append_only(engine, with_id_df, without_id_df, insertable_cols)
-                                            st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
+                                            rows = clean_df.where(pd.notnull(clean_df), None).to_dict(orient="records")
+                                            inserted = _executemany_insert(engine, rows, insertable_cols)
+                                            st.success(f"Inserted {inserted} row(s).")
                                             stats2 = _recompute_missing_computed_keywords(engine)
                                             if stats2.get("updated", 0):
                                                 st.info(f"Computed keywords backfill after import: {stats2}")
                                             st.rerun()
                         except Exception:
                             if st.button("Append CSV (no modal)"):
-                                inserted = _execute_append_only(engine, with_id_df, without_id_df, insertable_cols)
-                                st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
+                                rows = clean_df.where(pd.notnull(clean_df), None).to_dict(orient="records")
+                                inserted = _executemany_insert(engine, rows, insertable_cols)
+                                st.success(f"Inserted {inserted} row(s).")
                                 stats2 = _recompute_missing_computed_keywords(engine)
                                 if stats2.get("updated", 0):
                                     st.info(f"Computed keywords backfill after import: {stats2}")
@@ -1672,6 +1686,7 @@ with _tabs[4]:
 
     # 7) Diagnostics / Debug
     st.subheader("Diagnostics / Debug")
+
     if st.button("Show Debug Info"):
         st.json(engine_info)
         with engine.begin() as conn:
@@ -1709,6 +1724,29 @@ with _tabs[4]:
             }
         )
 
+    # Replica round-trip sanity test (embedded replica write/read/delete)
+    if st.button("Replica round-trip sanity test"):
+        try:
+            guid = uuid.uuid4().hex
+            with engine.begin() as conn:
+                conn.exec_driver_sql("""
+                    CREATE TABLE IF NOT EXISTS diag_roundtrip (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        guid TEXT,
+                        ts TEXT
+                    )
+                """)
+                now = datetime.utcnow().isoformat(timespec="seconds")
+                conn.execute(sql_text("INSERT INTO diag_roundtrip(guid, ts) VALUES(:g, :t)"), {"g": guid, "t": now})
+            # Read back
+            with engine.connect() as conn:
+                cnt = conn.execute(sql_text("SELECT COUNT(*) FROM diag_roundtrip WHERE guid=:g"), {"g": guid}).scalar() or 0
+            # Cleanup
+            with engine.begin() as conn:
+                conn.execute(sql_text("DELETE FROM diag_roundtrip WHERE guid=:g"), {"g": guid})
+            st.success(f"Round-trip OK (insert/read/delete). Rows matched: {int(cnt)}")
+        except Exception as e:
+            st.error(f"Round-trip failed: {e}")
 
 if __name__ == "__main__":
     pass
