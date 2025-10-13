@@ -296,18 +296,19 @@ def backfill_computed_keywords(engine: Engine) -> int:
         return count
 
 
-# -----------------------------
-# Page config substitutes (title + width without set_page_config)
-# -----------------------------
+# ==== BEGIN: Page layout CSS (title, width, padding) ====
 page_title = _get_secret("page_title", "HCR Providers — Admin") or "HCR Providers — Admin"
 st.markdown(f"<script>document.title = {json.dumps(page_title)};</script>", unsafe_allow_html=True)
 
 page_left_padding_px = _get_secret("page_left_padding_px", "12")
-page_max_width_px = _get_secret("page_max_width_px", "2300")
+page_max_width_px   = _get_secret("page_max_width_px", "2300")
+page_top_padding_px = _get_secret("page_top_padding_px", "6")  # << add this secret
+
 st.markdown(
     f"""
     <style>
     .block-container {{
+        padding-top: {page_top_padding_px}px !important;   /* << new: tighten top gap */
         padding-left: {page_left_padding_px}px !important;
         max-width: {page_max_width_px}px !important;
     }}
@@ -315,6 +316,8 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+# ==== END: Page layout CSS (title, width, padding) ====
+
 
 engine, engine_info = build_engine()
 ensure_schema(engine)
