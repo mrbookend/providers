@@ -785,11 +785,9 @@ def page_diag(engine: Engine, info: Dict[str, Any]):
 
 
 # -----------------------------
-# ==== BEGIN DROP-IN: page_admin_taxonomy (two-column layout with explicit labels) ====
+# ==== BEGIN DROP-IN: page_admin_taxonomy (two-column layout; no page-level subheader) ====
 def page_admin_taxonomy(engine: Engine):
-    st.subheader("Category / Service Admin")
-
-    # Fetch once per render (no added overhead vs tabs)
+    # Fetch once per render
     categories = fetch_categories(engine)
     services = fetch_services(engine)
 
@@ -913,6 +911,7 @@ def page_admin_taxonomy(engine: Engine):
                     else:
                         st.warning("Service is in use by vendors; reassign or rename first.")
 # ==== END DROP-IN: page_admin_taxonomy ====
+
 
 # -----------------------------
 # Main (top tabs, no sidebar)
