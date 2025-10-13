@@ -419,16 +419,18 @@ def main():
 
     # ---------- Single-row controls: Search(40%) | CSV(15%) | XLSX(15%) | Sort(15%) | Order(15%) ----------
     c_search, c_csv, c_xlsx, c_sort, c_order = st.columns([8, 3, 3, 3, 3])
-
+    
+    # ==== BEGIN PATCH: search placeholder tweak (read-only app) ====
     with c_search:
         st.text_input(
             "Search",
-            key="q",
+            key="q",  # keep the same state key
             label_visibility="collapsed",
-            placeholder='plumb → plumber, plumbing',
+            placeholder="SEARCH     plumb → plumber, plumbing, plumbago",
             help="Case-insensitive substring match across all columns (including hidden computed_keywords).",
             autocomplete="off",
         )
+    # ==== END PATCH ====
 
     # Filter first (search applies to full DF incl. computed_keywords)
     q = (st.session_state.get("q") or "")
