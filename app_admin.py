@@ -7,7 +7,7 @@ import hmac
 import time
 import uuid
 from datetime import datetime
-from typing import List, Tuple, Dict, Iterable, Any
+from typing import List, Tuple, Dict, Iterable, Any, Optional
 
 import pandas as pd
 import streamlit as st
@@ -386,6 +386,39 @@ def _recompute_missing_computed_keywords(engine: Engine) -> Dict[str, int]:
     return {"checked": checked, "updated": updated}
 
 
+def recompute_keywords_all(engine: Engine) -> Dict[str, int]:
+    """Rebuild computed_keywords for ALL rows with a non-empty service using synonym logic."""
+    updated = 0
+    checked = 0
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with engine.begin() as conn:
+        rows = conn.execute(
+            sql_text(
+                """
+                SELECT id, category, service, business_name
+                  FROM vendors
+                 WHERE service IS NOT NULL AND TRIM(service) <> ''
+                """
+            )
+        ).mappings().all()
+        for r in rows:
+            checked += 1
+            ck = _computed_keywords_for(r["category"], r["service"], r["business_name"])
+            conn.execute(
+                sql_text(
+                    """
+                    UPDATE vendors
+                       SET computed_keywords=:ck,
+                           updated_at = COALESCE(updated_at, :now)
+                     WHERE id=:id
+                    """
+                ),
+                {"ck": ck, "id": r["id"], "now": now},
+            )
+            updated += 1
+    return {"checked": checked, "updated": updated}
+
+
 # -----------------------------
 # Quick Probes (read-only health checks)
 # -----------------------------
@@ -520,24 +553,24 @@ def _run_quick_probes(engine: Engine) -> dict[str, Any]:
 
 
 def _render_quick_probes_ui(engine: Engine) -> None:
-    with st.expander("Quick Probes (read-only health checks)"):
-        if st.button("Run quick probes", type="primary"):
-            data = _run_quick_probes(engine)
-            st.json({k: v for k, v in data.items() if not k.startswith("_")})
-            # Optional detail tables
-            for key, label in [
-                ("_dupes_rows", "Possible duplicates"),
-                ("_bad_phones_rows", "Bad phone formats"),
-                ("_bad_websites_rows", "Bad website formats"),
-                ("_orphan_categories_rows", "Orphan categories (not in library)"),
-                ("_orphan_services_rows", "Orphan services (not in library)"),
-                ("_unused_categories_rows", "Unused categories"),
-                ("_unused_services_rows", "Unused services"),
-            ]:
-                rows = data.get(key, [])
-                if isinstance(rows, list) and rows:
-                    st.write(f"**{label}** ({len(rows)})")
-                    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    # Compact, non-tab version used inside System Tools / Help
+    if st.button("Run Quick Probes", type="primary"):
+        data = _run_quick_probes(engine)
+        st.json({k: v for k, v in data.items() if not k.startswith("_")})
+        # Optional detail tables
+        for key, label in [
+            ("_dupes_rows", "Possible duplicates"),
+            ("_bad_phones_rows", "Bad phone formats"),
+            ("_bad_websites_rows", "Bad website formats"),
+            ("_orphan_categories_rows", "Orphan categories (not in library)"),
+            ("_orphan_services_rows", "Orphan services (not in library)"),
+            ("_unused_categories_rows", "Unused categories"),
+            ("_unused_services_rows", "Unused services"),
+        ]:
+            rows = data.get(key, [])
+            if isinstance(rows, list) and rows:
+                st.write(f"**{label}** ({len(rows)})")
+                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
 
 # -----------------------------
@@ -653,7 +686,7 @@ try:
 except Exception:
     pass
 
-# Startup backfill
+# Startup backfill (silent unless SHOW_COMPUTED_BACKFILL true)
 try:
     stats = _recompute_missing_computed_keywords(engine)
     if (stats.get("updated", 0) or 0) > 0 and _resolve_bool("SHOW_COMPUTED_BACKFILL", False):
@@ -662,23 +695,21 @@ except Exception as _e:
     if _resolve_bool("SHOW_COMPUTED_BACKFILL", False):
         st.warning(f"Backfill skipped: {_e}")
 
-# ---- Admin Help / Tips (full-width expander) ----
-with st.expander("Admin Help / Tips (click to expand)", expanded=False):
-    st.markdown(_resolve_str("HELP_MD", "No help available."), unsafe_allow_html=True)
-# ---- end Admin Help / Tips ----
 
+# =============================
+# Tabs
+# =============================
 _tabs = st.tabs(
     [
         "Browse Vendors",
         "Add / Edit / Delete Vendor",
         "Category Admin",
         "Service Admin",
-        "Maintenance",
-        "Debug",
+        "System Tools / Help",   # unified maintenance/help/debug/probes/import/export
     ]
 )
 
-# ---------- Browse
+# ---------- Browse Vendors
 with _tabs[0]:
     df = load_df(engine)
 
@@ -754,7 +785,7 @@ with _tabs[0]:
         mime="text/csv",
     )
 
-# ---------- Add/Edit/Delete Vendor
+# ---------- Add / Edit / Delete Vendor
 with _tabs[1]:
     st.subheader("Add Vendor")
     ADD_FORM_KEYS = [
@@ -886,7 +917,7 @@ with _tabs[1]:
                     st.error(f"Add failed: {e}")
 
     st.divider()
-    st.subheader("Edit / Delete Vendor")
+    st.subheader("Edit Vendor")  # shortened title per request
 
     EDIT_FORM_KEYS = [
         "edit_vendor_id",
@@ -1148,6 +1179,7 @@ with _tabs[1]:
                             st.error(f"Update failed: {e}")
 
         st.markdown("---")
+        st.subheader("Delete Vendor")  # new subheader moved above the selector
         sel_label_del = st.selectbox(
             "Select provider to delete (type to search)",
             options=["— Select —"] + [_fmt_vendor(i) for i in ids],
@@ -1389,14 +1421,73 @@ with _tabs[3]:
                             except Exception as e:
                                 st.error(f"Reassign+delete service failed: {e}")
 
-# ---------- Maintenance
+# ---------- System Tools / Help (Unified Maintenance)
 with _tabs[4]:
-    st.subheader("Export / Import")
+    st.header("System Tools / Help")
 
+    # =========================
+    # Data Integrity
+    # =========================
+    st.subheader("Data Integrity")
+
+    col1, col2 = st.columns([1, 0.15])
+    with col1:
+        if st.button("Recompute Keywords (ALL rows)"):
+            stats = recompute_keywords_all(engine)
+            st.success(f"Recomputed for {stats['updated']} / {stats['checked']} rows.")
+    with col2:
+        if st.button("ℹ️", key="info_recompute_all"):
+            st.info(
+                "Rebuilds the hidden computed_keywords for ALL providers using Category, Service, and Business Name, "
+                "including synonym expansion. Run after renaming categories/services or changing synonym logic."
+            )
+
+    col1, col2 = st.columns([1, 0.15])
+    with col1:
+        if st.button("Show Unique Category / Service Pairs"):
+            with engine.connect() as conn:
+                rows = conn.execute(sql_text("""
+                    SELECT
+                        TRIM(category) AS category,
+                        TRIM(service)  AS service,
+                        COUNT(*)       AS n
+                    FROM vendors
+                    GROUP BY category, service
+                    ORDER BY category COLLATE NOCASE, service COLLATE NOCASE;
+                """)).fetchall()
+            df_pairs = pd.DataFrame(rows, columns=["category", "service", "count"])
+            st.dataframe(df_pairs, hide_index=True, use_container_width=True)
+    with col2:
+        if st.button("ℹ️", key="info_pairs"):
+            st.info("Lists each distinct Category + Service pair to help spot typos or duplicates.")
+
+    st.divider()
+
+    # =========================
+    # Quick Probes
+    # =========================
+    st.subheader("Quick Probes (read-only health checks)")
+    col1, col2 = st.columns([1, 0.15])
+    with col1:
+        _render_quick_probes_ui(engine)
+    with col2:
+        if st.button("ℹ️", key="info_probes"):
+            st.info(
+                "Runs read-only checks: row counts, integrity check, index list, possible duplicates, bad phone/website "
+                "formats, orphan refs, and unused lib entries."
+            )
+
+    st.divider()
+
+    # =========================
+    # CSV Export / Restore
+    # =========================
+    st.subheader("CSV Export / Restore (Append-Only)")
+
+    # Export
     query = "SELECT * FROM vendors ORDER BY lower(business_name)"
     with engine.begin() as conn:
         full = pd.read_sql(sql_text(query), conn)
-
     export_df = full.copy()
     if "__spacer" in export_df.columns:
         export_df = export_df.drop(columns="__spacer")
@@ -1409,19 +1500,23 @@ with _tabs[4]:
         export_df["phone"] = export_df["phone"].apply(_fmt_phone)
 
     ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-    st.download_button(
-        "Export all vendors (CSV)",
-        data=export_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"providers_{ts}.csv",
-        mime="text/csv",
-    )
+    col1, col2 = st.columns([1, 0.15])
+    with col1:
+        st.download_button(
+            "Export all vendors (CSV)",
+            data=export_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"providers_{ts}.csv",
+            mime="text/csv",
+        )
+    with col2:
+        if st.button("ℹ️", key="info_export"):
+            st.info("Exports a full backup of the vendors table. Do this before any bulk changes.")
 
-    st.divider()
-    st.subheader("CSV Restore (Append-only, ID-checked)")
+    # Import (Append-only)
     st.caption("Append-only; existing IDs are rejected. Use Dry run first to validate.")
     uploaded = st.file_uploader("Upload CSV to append into `vendors`", type=["csv"], accept_multiple_files=False)
 
-    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+    col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 0.15])
     with col1:
         dry_run = st.checkbox("Dry run (validate only)", value=True)
     with col2:
@@ -1430,6 +1525,12 @@ with _tabs[4]:
         normalize_phone = st.checkbox("Normalize phone to digits", value=True)
     with col4:
         auto_id = st.checkbox("Missing `id` ➜ autoincrement", value=True)
+    with col5:
+        if st.button("ℹ️", key="info_csv"):
+            st.info(
+                "Use Dry Run to validate headers and counts. Append-only: rows with existing IDs are rejected; "
+                "blank IDs can autoincrement if enabled."
+            )
 
     def _soft_trim(s: str | None) -> str:
         s = (s or "").strip()
@@ -1537,7 +1638,6 @@ with _tabs[4]:
         return inserted
 
     with st.expander("CSV Restore (Append-only)", expanded=False):
-        st.info("Append-only; existing IDs are rejected. Use Dry run first.")
         if uploaded is not None:
             try:
                 df_in = pd.read_csv(uploaded)
@@ -1574,7 +1674,7 @@ with _tabs[4]:
                     if planned_inserts == 0:
                         st.info("Nothing to insert (all rows rejected or CSV empty after filters).")
                     else:
-                        # Modal confirmation before committing inserts (Streamlit >= 1.31)
+                        # Modal confirmation if available
                         try:
                             if st.button("Append CSV…", type="primary", key="append_csv_open"):
                                 with st.dialog("Confirm CSV Append", width="small"):
@@ -1587,104 +1687,98 @@ with _tabs[4]:
                                         if st.button("Yes, append now", key="append_confirm"):
                                             inserted = _execute_append_only(engine, with_id_df, without_id_df, insertable_cols)
                                             st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
-                                            stats = _recompute_missing_computed_keywords(engine)
-                                            if stats.get("updated", 0):
-                                                st.info(f"Computed keywords backfill after import: {stats}")
+                                            stats2 = _recompute_missing_computed_keywords(engine)
+                                            if stats2.get("updated", 0):
+                                                st.info(f"Computed keywords backfill after import: {stats2}")
                                             st.rerun()
                         except Exception:
                             # Fallback (older Streamlit): no modal, execute directly
                             if st.button("Append CSV (no modal)"):
                                 inserted = _execute_append_only(engine, with_id_df, without_id_df, insertable_cols)
                                 st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
-                                stats = _recompute_missing_computed_keywords(engine)
-                                if stats.get("updated", 0):
-                                    st.info(f"Computed keywords backfill after import: {stats}")
+                                stats2 = _recompute_missing_computed_keywords(engine)
+                                if stats2.get("updated", 0):
+                                    st.info(f"Computed keywords backfill after import: {stats2}")
                                 st.rerun()
             except Exception as e:
                 st.error(f"CSV restore failed: {e}")
+        else:
+            st.info("Upload a CSV first, then open this panel to validate/append.")
 
-    # --- Read-only Quick Probes panel (toggle via ADMIN_SHOW_PROBES in secrets) ---
-    if _resolve_bool("ADMIN_SHOW_PROBES", True):
-        st.divider()
-        _render_quick_probes_ui(engine)
-# ------------------------------------
-# ------------------------------------
-# Category / Service Analysis
-# ------------------------------------
-st.divider()
-with st.expander("Show unique Category / Service pairs"):
-    if st.button("Run category/service analysis"):
-        with engine.connect() as conn:
-            rows = conn.execute(sql_text("""
-                SELECT
-                    TRIM(category) AS category,
-                    TRIM(service)  AS service,
-                    COUNT(*)       AS n
-                FROM vendors
-                GROUP BY category, service
-                ORDER BY category COLLATE NOCASE, service COLLATE NOCASE;
-            """)).fetchall()
-        df = pd.DataFrame(rows, columns=["category", "service", "count"])
-        st.dataframe(df, hide_index=True)
+    st.divider()
 
-# ---------- Debug
+    # =========================
+    # Help & Documentation
+    # =========================
+    st.subheader("Help & Documentation")
 
-with _tabs[5]:
-    st.subheader("Status & Secrets (debug)")
-    st.json(engine_info)
+    col1, col2 = st.columns([1, 0.15])
+    with col1:
+        if st.button("Resident Help / Tips"):
+            st.markdown(_resolve_str("HELP_MD", "No help available."), unsafe_allow_html=True)
+    with col2:
+        if st.button("ℹ️", key="info_help"):
+            st.info("Shows the same Help/Tips content used in the Read-Only app (resident-facing guidance).")
 
-    with engine.begin() as conn:
-        vendors_cols = conn.execute(sql_text("PRAGMA table_info(vendors)")).fetchall()
-        categories_cols = conn.execute(sql_text("PRAGMA table_info(categories)")).fetchall()
-        services_cols = conn.execute(sql_text("PRAGMA table_info(services)")).fetchall()
+    col1, col2 = st.columns([1, 0.15])
+    with col1:
+        if st.button("Developer Help / Maintenance Manual"):
+            st.markdown(_resolve_str("DEV_HELP_MD", "No developer manual found."), unsafe_allow_html=True)
+    with col2:
+        if st.button("ℹ️", key="info_devhelp"):
+            st.info("Opens your internal developer/maintenance manual from .streamlit/secrets.toml (DEV_HELP_MD).")
 
-        idx_rows = conn.execute(sql_text("PRAGMA index_list(vendors)")).fetchall()
-        vendors_indexes = [
-            {"seq": r[0], "name": r[1], "unique": bool(r[2]), "origin": r[3], "partial": bool(r[4])} for r in idx_rows
-        ]
+    st.divider()
 
-        created_at_nulls = conn.execute(
-            sql_text("SELECT COUNT(*) FROM vendors WHERE created_at IS NULL OR created_at=''")
-        ).scalar() or 0
-        updated_at_nulls = conn.execute(
-            sql_text("SELECT COUNT(*) FROM vendors WHERE updated_at IS NULL OR updated_at=''")
-        ).scalar() or 0
+    # =========================
+    # Diagnostics / Debug
+    # =========================
+    st.subheader("Diagnostics / Debug")
 
-        counts = {
-            "vendors": conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0,
-            "categories": conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar() or 0,
-            "services": conn.execute(sql_text("SELECT COUNT(*) FROM services")).scalar() or 0,
-        }
-
-    st.subheader("DB Probe")
-    st.json(
-        {
-            "vendors_columns": [c[1] for c in vendors_cols],
-            "categories_columns": [c[1] for c in categories_cols],
-            "services_columns": [c[1] for c in services_cols],
-            "counts": counts,
-            "vendors_indexes": vendors_indexes,
-            "timestamp_nulls": {"created_at": int(created_at_nulls), "updated_at": int(updated_at_nulls)},
-        }
-    )
-
-    st.markdown("**Run quick probes**")
-    if st.button("Count rows needing computed_keywords"):
-        try:
+    col1, col2 = st.columns([1, 0.15])
+    with col1:
+        if st.button("Show Debug Info"):
+            st.json(engine_info)
             with engine.begin() as conn:
-                missing_ck = conn.execute(
-                    sql_text(
-                        """
-                        SELECT COUNT(*)
-                          FROM vendors
-                         WHERE (computed_keywords IS NULL OR computed_keywords = '')
-                           AND service IS NOT NULL AND TRIM(service) <> ''
-                        """
-                    )
+                vendors_cols = conn.execute(sql_text("PRAGMA table_info(vendors)")).fetchall()
+                categories_cols = conn.execute(sql_text("PRAGMA table_info(categories)")).fetchall()
+                services_cols = conn.execute(sql_text("PRAGMA table_info(services)")).fetchall()
+
+                idx_rows = conn.execute(sql_text("PRAGMA index_list(vendors)")).fetchall()
+                vendors_indexes = [
+                    {"seq": r[0], "name": r[1], "unique": bool(r[2]), "origin": r[3], "partial": bool(r[4])} for r in idx_rows
+                ]
+
+                created_at_nulls = conn.execute(
+                    sql_text("SELECT COUNT(*) FROM vendors WHERE created_at IS NULL OR created_at=''")
                 ).scalar() or 0
-            st.success(f"Rows with service but missing computed_keywords: {int(missing_ck)}")
-        except Exception as e:
-            st.error(f"Probe failed: {e}")
+                updated_at_nulls = conn.execute(
+                    sql_text("SELECT COUNT(*) FROM vendors WHERE updated_at IS NULL OR updated_at=''")
+                ).scalar() or 0
+
+                counts = {
+                    "vendors": conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0,
+                    "categories": conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar() or 0,
+                    "services": conn.execute(sql_text("SELECT COUNT(*) FROM services")).scalar() or 0,
+                }
+
+            st.subheader("DB Probe")
+            st.json(
+                {
+                    "vendors_columns": [c[1] for c in vendors_cols],
+                    "categories_columns": [c[1] for c in categories_cols],
+                    "services_columns": [c[1] for c in services_cols],
+                    "counts": counts,
+                    "vendors_indexes": vendors_indexes,
+                    "timestamp_nulls": {"created_at": int(created_at_nulls), "updated_at": int(updated_at_nulls)},
+                }
+            )
+    with col2:
+        if st.button("ℹ️", key="info_debug"):
+            st.info(
+                "Displays engine URL, strategy, table/index info, and timestamp/null counts. "
+                "Use for troubleshooting connectivity/schema issues."
+            )
 
 
 if __name__ == "__main__":
