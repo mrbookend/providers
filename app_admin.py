@@ -85,18 +85,26 @@ def _ckw(category: str, service: str, business_name: str, extra_keywords: str = 
 
 
 def _make_search_blob(row: dict) -> str:
-    """Concat fields (lowercased) for Browse global search, including computed_keywords."""
+    """
+    Concat fields (lowercased) for Browse global search, including computed_keywords.
+    Normalize '&'→'and' and unify hyphen/dash variants to improve matching.
+    """
     fields = [
         "business_name", "category", "service", "contact_name",
         "address", "website", "notes", "keywords", "computed_keywords",
     ]
-    tokens: List[str] = []
-    for f in fields:
-        v = (row.get(f) or "").strip()
-        if v:
-            tokens.append(v)
-    blob = " ".join(tokens).lower()
-    return re.sub(r"\s+", " ", blob)
+    parts = [(row.get(f) or "").strip() for f in fields if (row.get(f) or "").strip()]
+    blob = " ".join(parts).lower()
+
+    # Normalize '&' to 'and'
+    blob = blob.replace("&", " and ")
+
+    # Normalize dashes (ASCII '-', en/em, non-breaking hyphen, minus) to spaces
+    blob = re.sub(r"[\u002D\u2010\u2011\u2012\u2013\u2014\u2212]+", " ", blob)
+
+    # Collapse whitespace
+    blob = re.sub(r"\s+", " ", blob).strip()
+    return blob
 
 
 # -----------------------------
@@ -134,7 +142,6 @@ def build_engine() -> Tuple[Engine, Dict[str, Any]]:
         info["using_remote"] = using_remote
         return engine, info
     except Exception as e:
-        # final fallback: temp in-memory (keeps app alive for diagnostics)
         engine = create_engine("sqlite://", future=True)
         info.update({"strategy": "memory_fallback", "error": str(e), "using_remote": False})
         return engine, info
@@ -178,7 +185,6 @@ def ensure_schema(engine: Engine) -> None:
         "CREATE INDEX IF NOT EXISTS idx_vendors_ckw ON vendors(computed_keywords)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_phone ON vendors(phone)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_svc_lower ON vendors(LOWER(service))",
-        # legacy NOCASE helpers that may already exist are harmless; we don't recreate them here
     ]
     with engine.begin() as conn:
         for s in stmts:
@@ -312,11 +318,6 @@ if RUN_STARTUP_BACKFILL:
     except Exception as e:
         st.warning(f"Startup backfill skipped due to error: {e}")
 
-# Session defaults
-if "edit_id" not in st.session_state:
-    st.session_state["edit_id"] = None
-
-
 # -----------------------------
 # Browse (with Global Search)
 # -----------------------------
@@ -332,28 +333,36 @@ def page_browse(engine: Engine):
     with st.container(border=True):
         col1, col2, col3 = st.columns([2, 1, 1], vertical_alignment="bottom")
         with col1:
-            q = st.text_input("Global search (matches any word across all fields)", key="browse_query", placeholder="e.g., plumber, roof, Stone Oak")
+            q = st.text_input(
+                "Global search (matches any word across all fields)",
+                key="browse_query",
+                placeholder="e.g., plumber, roof, Stone Oak",
+            )
         with col2:
-            do_search = st.button("Search", use_container_width=True)
+            do_search = st.button("Search", use_container_width=True, key="browse_do_search")
         with col3:
-            reset = st.button("Reset", use_container_width=True)
+            reset = st.button("Reset", use_container_width=True, key="browse_reset")
+
+    # RESET: drop the key and rerun (avoids direct assignment errors)
     if reset:
-        st.session_state["browse_query"] = ""
-        q = ""
+        st.session_state.pop("browse_query", None)
+        st.rerun()
 
     # Build blobs once
     for row in data:
         row["_search_blob"] = _make_search_blob(row)
 
     filtered = data
-    if do_search and (q or "").strip():
-        q_norm = (q or "").strip().lower()
-        terms = [t for t in re.split(r"[,\s;/]+", q_norm) if t]
+    if do_search:
+        q_norm = (st.session_state.get("browse_query") or "").strip().lower()
+        if q_norm:
+            # split on spaces, commas, slashes, ASCII hyphen, and Unicode dashes
+            terms = [t for t in re.split(r"[,\s;/\-\u2010-\u2014\u2212]+", q_norm) if t]
 
-        def _match(blob: str) -> bool:
-            return all(t in blob for t in terms)
+            def _match(blob: str) -> bool:
+                return all(t in blob for t in terms)
 
-        filtered = [r for r in data if _match(r["_search_blob"])]
+            filtered = [r for r in data if _match(r["_search_blob"])]
 
     st.caption(f"{len(filtered)} of {len(data)} rows")
 
@@ -386,7 +395,7 @@ def page_add_edit(engine: Engine):
     with col_add:
         st.markdown("### Add Provider")
         with st.form("form_add", clear_on_submit=True):
-            st.markdown("<div style='height: 2px'></div>", unsafe_allow_html=True)  # spacing
+            st.markdown("<div style='height: 2px'></div>", unsafe_allow_html=True)
             add_business_name = st.text_input("Provider *", key="add_business_name")
             add_category = st.selectbox("Category *", options=[""] + categories, index=0, key="add_category", placeholder="Select category")
             add_service = st.selectbox("Service (optional)", options=[""] + services, index=0, key="add_service", placeholder="Select service")
@@ -409,7 +418,6 @@ def page_add_edit(engine: Engine):
                     errs.append("Phone must be 10 digits (or blank).")
                 if add_service and re.search(r"[,/;]", add_service):
                     errs.append("Service name must be a single service (no commas or slashes).")
-
                 if errs:
                     st.error(" • " + "\n • ".join(errs))
                 else:
@@ -431,44 +439,53 @@ def page_add_edit(engine: Engine):
     # ---- EDIT ----
     with col_edit:
         st.markdown("### Edit Provider")
-        _edit_options = [f"{v['id']:>4} — {v['business_name']}" for v in vendors]
-        with st.form("form_edit"):
-            edit_sel = st.selectbox("Select provider to edit", options=[""] + _edit_options, index=0, key="edit_selector")
-            sel_row = None
-            if edit_sel and edit_sel.strip():
-                try:
-                    sel_id = int(edit_sel.split("—", 1)[0])
-                    sel_row = next((v for v in vendors if v["id"] == sel_id), None)
-                except Exception:
-                    sel_row = None
 
-            # Always render inputs (with current values if selected), and ALWAYS render submit button
+        # Selection OUTSIDE the form so the inputs can react instantly
+        _edit_options = [f"{v['id']:>4} — {v['business_name']}" for v in vendors]
+        edit_sel = st.selectbox("Select provider to edit", options=[""] + _edit_options, index=0, key="edit_selector")
+
+        sel_row = None
+        sel_id = None
+        if edit_sel and edit_sel.strip():
+            try:
+                sel_id = int(edit_sel.split("—", 1)[0])
+                sel_row = next((v for v in vendors if v["id"] == sel_id), None)
+            except Exception:
+                sel_row = None
+
+        # If selection changed, seed the edit_* fields into session_state
+        last_sel = st.session_state.get("edit_last_sel")
+        if sel_id and sel_id != last_sel and sel_row:
+            st.session_state["edit_last_sel"] = sel_id
+            st.session_state["edit_business_name"] = sel_row.get("business_name") or ""
+            st.session_state["edit_category"] = sel_row.get("category") or ""
+            st.session_state["edit_service"] = sel_row.get("service") or ""
+            st.session_state["edit_contact_name"] = sel_row.get("contact_name") or ""
+            st.session_state["edit_phone"] = _fmt_phone(sel_row.get("phone") or "")
+            st.session_state["edit_address"] = sel_row.get("address") or ""
+            st.session_state["edit_website"] = sel_row.get("website") or ""
+            st.session_state["edit_notes"] = sel_row.get("notes") or ""
+            st.session_state["edit_keywords"] = sel_row.get("keywords") or ""
+
+        # Now render the form that always has a submit button
+        with st.form("form_edit", clear_on_submit=False):
+            # Use session_state-backed widgets (no value=...) so they reflect seeded data
             if sel_row:
                 _edit_cat_options = sorted(set(categories + ([sel_row["category"]] if sel_row.get("category") else [])))
                 _edit_svc_options = sorted(set(services + ([sel_row["service"]] if sel_row.get("service") else [])))
-                st.text_input("Provider *", key="edit_business_name", value=sel_row.get("business_name") or "")
-                st.selectbox("Category *", options=_edit_cat_options, key="edit_category", placeholder="Select category")
-                st.selectbox("Service (optional)", options=[""] + _edit_svc_options, key="edit_service")
-                st.text_input("Contact Name", key="edit_contact_name", value=sel_row.get("contact_name") or "")
-                st.text_input("Phone (10 digits or blank)", key="edit_phone", value=_fmt_phone(sel_row.get("phone") or ""))
-                st.text_area("Address", height=80, key="edit_address", value=sel_row.get("address") or "")
-                st.text_input("Website (https://…)", key="edit_website", value=sel_row.get("website") or "")
-                st.text_area("Notes", height=100, key="edit_notes", value=sel_row.get("notes") or "")
-                st.text_input("Keywords (comma separated)", key="edit_keywords", value=sel_row.get("keywords") or "")
             else:
-                # render empty/disabled inputs to keep layout stable
-                st.text_input("Provider *", key="edit_business_name", value="", disabled=True)
-                st.selectbox("Category *", options=[""], key="edit_category", disabled=True)
-                st.selectbox("Service (optional)", options=[""], key="edit_service", disabled=True)
-                st.text_input("Contact Name", key="edit_contact_name", value="", disabled=True)
-                st.text_input("Phone (10 digits or blank)", key="edit_phone", value="", disabled=True)
-                st.text_area("Address", height=80, key="edit_address", value="", disabled=True)
-                st.text_input("Website (https://…)", key="edit_website", value="", disabled=True)
-                st.text_area("Notes", height=100, key="edit_notes", value="", disabled=True)
-                st.text_input("Keywords (comma separated)", key="edit_keywords", value="", disabled=True)
-                st.info("Select a provider to edit, then click 'Save Changes'.")
+                _edit_cat_options, _edit_svc_options = ([""], [""])
 
-            # ALWAYS render the submit button (disabled if nothing selected)
+            st.text_input("Provider *", key="edit_business_name", disabled=sel_row is None)
+            st.selectbox("Category *", options=_edit_cat_options, key="edit_category", disabled=sel_row is None)
+            st.selectbox("Service (optional)", options=[""] + _edit_svc_options if sel_row else [""], key="edit_service", disabled=sel_row is None)
+            st.text_input("Contact Name", key="edit_contact_name", disabled=sel_row is None)
+            st.text_input("Phone (10 digits or blank)", key="edit_phone", disabled=sel_row is None)
+            st.text_area("Address", height=80, key="edit_address", disabled=sel_row is None)
+            st.text_input("Website (https://…)", key="edit_website", disabled=sel_row is None)
+            st.text_area("Notes", height=100, key="edit_notes", disabled=sel_row is None)
+            st.text_input("Keywords (comma separated)", key="edit_keywords", disabled=sel_row is None)
+
             edit_submit = st.form_submit_button("Save Changes", type="primary", disabled=(sel_row is None))
 
             if sel_row and edit_submit:
@@ -550,7 +567,6 @@ def _csv_restore_append(engine: Engine):
     allowed = {"business_name", "category", "service", "contact_name", "phone", "address", "website", "notes", "keywords"}
     forbidden = {"id"}
 
-    # header synonyms (lowercased, punctuation/space tolerant)
     header_map = {
         "business_name": {"business_name", "name", "provider", "company", "vendor", "business"},
         "category": {"category", "cat", "type"},
@@ -565,8 +581,8 @@ def _csv_restore_append(engine: Engine):
 
     def _norm(h: str) -> str:
         h = (h or "").strip().lower()
-        h = re.sub(r"[^\w\s]", "", h)        # drop punctuation
-        h = re.sub(r"\s+", " ", h).strip()   # collapse spaces
+        h = re.sub(r"[^\w\s]", "", h)
+        h = re.sub(r"\s+", " ", h).strip()
         return h
 
     def _canonicalize_header(raw: str) -> Optional[str]:
@@ -578,7 +594,7 @@ def _csv_restore_append(engine: Engine):
         for canon, aliases in header_map.items():
             if n in aliases:
                 return canon
-        return None  # unknown header; will be ignored
+        return None
 
     if do_it and up is not None:
         try:
@@ -587,16 +603,13 @@ def _csv_restore_append(engine: Engine):
             st.error(f"CSV read error: {e}")
             return
 
-        # Build header mapping from df_raw.columns → canonical
         col_map: Dict[str, Optional[str]] = {str(c): _canonicalize_header(str(c)) for c in df_raw.columns}
 
-        # hard block: forbidden columns present?
         if any(v == "__FORBIDDEN__" for v in col_map.values()):
             bads = [k for k, v in col_map.items() if v == "__FORBIDDEN__"]
             st.error(f"CSV contains forbidden column(s): {', '.join(bads)}. Remove them and try again.")
             return
 
-        # Construct a normalized df with only allowed canon columns; add missing as empty
         df = pd.DataFrame()
         for orig, canon in col_map.items():
             if canon and canon in allowed:
@@ -605,7 +618,6 @@ def _csv_restore_append(engine: Engine):
             if c not in df.columns:
                 df[c] = ""
 
-        # validation
         errs: List[str] = []
         for i, r in df.iterrows():
             for req in required:
@@ -635,7 +647,6 @@ def _csv_restore_append(engine: Engine):
             st.success("Dry run complete. No changes applied.")
             return
 
-        # append
         ins_rows = 0
         with engine.begin() as conn:
             for _, r in df.iterrows():
