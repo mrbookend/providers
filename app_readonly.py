@@ -542,7 +542,7 @@ def main():
 
         # ==== BEGIN PATCH: small gap above Help/Tips (spacer only) ====
         # Add a small vertical spacer between the table and the Help/Tips box
-        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
         # ==== END PATCH ====
 
     # Help/Tips expander — moved BELOW the table to free vertical space
