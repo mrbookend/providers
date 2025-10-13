@@ -107,6 +107,11 @@ def _make_search_blob(row: dict) -> str:
     return blob
 
 
+def _clear_browse_query():
+    """Reset callback for Browse search input (avoids React invariant errors)."""
+    st.session_state["browse_query"] = ""
+
+
 # -----------------------------
 # Engine / DB bootstrap
 # -----------------------------
@@ -185,6 +190,7 @@ def ensure_schema(engine: Engine) -> None:
         "CREATE INDEX IF NOT EXISTS idx_vendors_ckw ON vendors(computed_keywords)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_phone ON vendors(phone)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_svc_lower ON vendors(LOWER(service))",
+        # legacy case-insensitive helpers may already exist (cat_lower, bus_lower); not recreated here
     ]
     with engine.begin() as conn:
         for s in stmts:
@@ -198,6 +204,12 @@ def drop_redundant_plain_indexes(engine: Engine) -> None:
     with engine.begin() as conn:
         conn.execute(sql_text("DROP INDEX IF EXISTS idx_vendors_bus"))
         conn.execute(sql_text("DROP INDEX IF EXISTS idx_vendors_cat"))
+
+
+def drop_legacy_keyword_index(engine: Engine) -> None:
+    """Drop legacy index on raw 'keywords' (unused by current blob-based search)."""
+    with engine.begin() as conn:
+        conn.execute(sql_text("DROP INDEX IF EXISTS idx_vendors_kw"))
 
 
 def _row_to_dict(row) -> dict:
@@ -307,6 +319,7 @@ st.markdown(
 engine, engine_info = build_engine()
 ensure_schema(engine)
 drop_redundant_plain_indexes(engine)
+drop_legacy_keyword_index(engine)
 
 # ---- automatic, idempotent backfill on startup ----
 RUN_STARTUP_BACKFILL = _as_bool(_get_secret("RUN_STARTUP_BACKFILL", True), default=True)
@@ -317,6 +330,7 @@ if RUN_STARTUP_BACKFILL:
             st.caption(f"Startup backfill: computed_keywords filled for {n_backfilled} rows.")
     except Exception as e:
         st.warning(f"Startup backfill skipped due to error: {e}")
+
 
 # -----------------------------
 # Browse (with Global Search)
@@ -333,7 +347,7 @@ def page_browse(engine: Engine):
     with st.container(border=True):
         col1, col2, col3 = st.columns([2, 1, 1], vertical_alignment="bottom")
         with col1:
-            q = st.text_input(
+            st.text_input(
                 "Global search (matches any word across all fields)",
                 key="browse_query",
                 placeholder="e.g., plumber, roof, Stone Oak",
@@ -341,12 +355,12 @@ def page_browse(engine: Engine):
         with col2:
             do_search = st.button("Search", use_container_width=True, key="browse_do_search")
         with col3:
-            reset = st.button("Reset", use_container_width=True, key="browse_reset")
-
-    # RESET: drop the key and rerun (avoids direct assignment errors)
-    if reset:
-        st.session_state.pop("browse_query", None)
-        st.rerun()
+            st.button(
+                "Reset",
+                use_container_width=True,
+                key="browse_reset",
+                on_click=_clear_browse_query,
+            )
 
     # Build blobs once
     for row in data:
@@ -440,7 +454,7 @@ def page_add_edit(engine: Engine):
     with col_edit:
         st.markdown("### Edit Provider")
 
-        # Selection OUTSIDE the form so the inputs can react instantly
+        # Selector outside the form so selection can seed state immediately
         _edit_options = [f"{v['id']:>4} — {v['business_name']}" for v in vendors]
         edit_sel = st.selectbox("Select provider to edit", options=[""] + _edit_options, index=0, key="edit_selector")
 
@@ -469,13 +483,13 @@ def page_add_edit(engine: Engine):
 
         # Now render the form that always has a submit button
         with st.form("form_edit", clear_on_submit=False):
-            # Use session_state-backed widgets (no value=...) so they reflect seeded data
             if sel_row:
                 _edit_cat_options = sorted(set(categories + ([sel_row["category"]] if sel_row.get("category") else [])))
                 _edit_svc_options = sorted(set(services + ([sel_row["service"]] if sel_row.get("service") else [])))
             else:
                 _edit_cat_options, _edit_svc_options = ([""], [""])
 
+            # Use session_state-backed widgets (no value=...)
             st.text_input("Provider *", key="edit_business_name", disabled=sel_row is None)
             st.selectbox("Category *", options=_edit_cat_options, key="edit_category", disabled=sel_row is None)
             st.selectbox("Service (optional)", options=[""] + _edit_svc_options if sel_row else [""], key="edit_service", disabled=sel_row is None)
