@@ -42,8 +42,11 @@ def _get_secret(name: str, default: Optional[Any] = None) -> Optional[Any]:
         return default
 
 
+# ==== BEGIN PATCH 1: ISO timestamp helper ====
 def _now() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    """UTC timestamp in strict ISO format with 'T' separator."""
+    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+# ==== END PATCH 1 ====
 
 
 def _digits_only(s: str) -> str:
@@ -57,6 +60,32 @@ def _fmt_phone(s: str) -> str:
     return s or ""
 
 
+# ==== BEGIN PATCH 2: Ingress normalization + TX canonicalizer ====
+def _s(x: Optional[str]) -> str:
+    """Normalize text ingress: None -> '', strip whitespace."""
+    return (x or "").strip()
+
+_TX_PAT = re.compile(r"(?:^|[\s,])TX(?:[\s,]|$)", re.IGNORECASE)
+
+def _canon_address_tx(addr: Optional[str]) -> str:
+    """
+    Canonicalize address to include 'TX' if no state is present.
+    Conservative: if 'TX' already appears (any case), leave as-is.
+    """
+    a = _s(addr)
+    if not a:
+        return ""
+    if _TX_PAT.search(a):
+        return a
+    # Heuristic: add ', TX' if there is at least a street/city token
+    if a.endswith(","):
+        return a + " TX"
+    if re.search(r"\d", a) or "," in a or " " in a:
+        return a + ", TX"
+    return a  # too ambiguous; leave alone
+# ==== END PATCH 2 ====
+
+
 # ---- service synonyms / keyword expander ----
 _SERVICE_SYNONYMS = {
     "insurance agent": {"insurance", "broker", "policy", "auto", "home"},
@@ -65,6 +94,13 @@ _SERVICE_SYNONYMS = {
     "roofer": {"roof", "shingle", "leak"},
     "landscaper": {"landscape", "yard", "lawn", "xeriscape"},
 }
+
+# ==== BEGIN PATCH 3: Multi-service single-label whitelist ====
+_SINGLE_SLASH_SERVICE_WHITELIST = {
+    "Optometry / Eye Exam",
+    "Heating / Cooling",
+}
+# ==== END PATCH 3 ====
 
 
 def _ckw(category: str, service: str, business_name: str, extra_keywords: str = "") -> str:
@@ -84,27 +120,49 @@ def _ckw(category: str, service: str, business_name: str, extra_keywords: str = 
     return " ".join(out)
 
 
+# ==== BEGIN PATCH 4: Search blob dedupe + phone + 7to7 normalization ====
 def _make_search_blob(row: dict) -> str:
     """
     Concat fields (lowercased) for Browse global search, including computed_keywords.
-    Normalize '&'→'and' and unify hyphen/dash variants to improve matching.
+    Normalize '&'→'and', unify hyphen/dash variants, include phone (digits & formatted),
+    and de-duplicate tokens. Normalize any '7 to 7' style to '7to7'.
     """
     fields = [
         "business_name", "category", "service", "contact_name",
         "address", "website", "notes", "keywords", "computed_keywords",
     ]
     parts = [(row.get(f) or "").strip() for f in fields if (row.get(f) or "").strip()]
+
+    # include both raw digits and formatted phone in the blob
+    ph_digits = _digits_only(row.get("phone", ""))
+    if ph_digits:
+        parts.append(ph_digits)
+        if len(ph_digits) == 10:
+            parts.append(_fmt_phone(ph_digits))
+
     blob = " ".join(parts).lower()
 
     # Normalize '&' to 'and'
     blob = blob.replace("&", " and ")
 
-    # Normalize dashes (ASCII '-', en/em, non-breaking hyphen, minus) to spaces
+    # Normalize different dashes/hyphens to spaces
     blob = re.sub(r"[\u002D\u2010\u2011\u2012\u2013\u2014\u2212]+", " ", blob)
+
+    # Normalize 7-to-7 variants
+    blob = re.sub(r"\b7\s*[-–—]?\s*to\s*[-–—]?\s*7\b", "7to7", blob)
 
     # Collapse whitespace
     blob = re.sub(r"\s+", " ", blob).strip()
-    return blob
+
+    # De-duplicate tokens, keep order
+    tokens = blob.split(" ")
+    seen, out = set(), []
+    for t in tokens:
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return " ".join(out)
+# ==== END PATCH 4 ====
 
 
 def _clear_browse_query():
@@ -239,9 +297,22 @@ def list_vendors(engine: Engine) -> List[dict]:
         return [_row_to_dict(r) for r in res.mappings().all()]
 
 
+# ==== BEGIN PATCH 2 hooks: sanitize/canonicalize on write ====
+def _sanitize_row_for_write(row: dict) -> dict:
+    """Apply ingress normalization to all text fields and canonicalize address."""
+    out = dict(row)
+    for k in ("category", "service", "business_name", "contact_name", "address", "website", "notes", "keywords"):
+        out[k] = _s(out.get(k))
+    out["address"] = _canon_address_tx(out.get("address", ""))
+    # phone already normalized elsewhere to digits-only
+    return out
+# ==== END PATCH 2 hooks ====
+
+
 def insert_vendor(engine: Engine, row: dict, updated_by: str = "admin") -> int:
     row = {**row}
     row["phone"] = _digits_only(row.get("phone", ""))
+    row = _sanitize_row_for_write(row)  # PATCH 2
     row["computed_keywords"] = _ckw(row.get("category", ""), row.get("service", ""), row.get("business_name", ""), row.get("keywords", ""))
     row["created_at"] = _now()
     row["updated_at"] = _now()
@@ -259,6 +330,7 @@ def insert_vendor(engine: Engine, row: dict, updated_by: str = "admin") -> int:
 def update_vendor(engine: Engine, vid: int, row: dict, updated_by: str = "admin") -> None:
     row = {**row}
     row["phone"] = _digits_only(row.get("phone", ""))
+    row = _sanitize_row_for_write(row)  # PATCH 2
     row["computed_keywords"] = _ckw(row.get("category", ""), row.get("service", ""), row.get("business_name", ""), row.get("keywords", ""))
     row["updated_at"] = _now()
     row["updated_by"] = updated_by
@@ -294,6 +366,43 @@ def backfill_computed_keywords(engine: Engine) -> int:
             """), {"ck": ck, "id": r["id"], "ts": _now()})
             count += 1
         return count
+
+
+# ==== BEGIN PATCH 1 helper: backfill legacy space timestamps to ISO 'T' ====
+def backfill_iso_timestamps(engine: Engine) -> Dict[str, int]:
+    """
+    Convert 'YYYY-MM-DD HH:MM:SS' to 'YYYY-MM-DDTHH:MM:SS' for created_at/updated_at.
+    Returns counts changed per column.
+    """
+    res: Dict[str, int] = {"created_at": 0, "updated_at": 0}
+    with engine.begin() as conn:
+        # created_at
+        res["created_at"] = int(conn.execute(sql_text("""
+            WITH to_fix AS (
+                SELECT id, created_at FROM vendors
+                WHERE created_at IS NOT NULL
+                  AND created_at LIKE '% %:%:%'
+                  AND created_at NOT LIKE '%T%:%:%'
+            )
+            UPDATE vendors
+               SET created_at = REPLACE(created_at, ' ', 'T')
+             WHERE id IN (SELECT id FROM to_fix)
+        """)).rowcount or 0)
+
+        # updated_at
+        res["updated_at"] = int(conn.execute(sql_text("""
+            WITH to_fix AS (
+                SELECT id, updated_at FROM vendors
+                WHERE updated_at IS NOT NULL
+                  AND updated_at LIKE '% %:%:%'
+                  AND updated_at NOT LIKE '%T%:%:%'
+            )
+            UPDATE vendors
+               SET updated_at = REPLACE(updated_at, ' ', 'T')
+             WHERE id IN (SELECT id FROM to_fix)
+        """)).rowcount or 0)
+    return res
+# ==== END PATCH 1 helper ====
 
 
 # ==== BEGIN: Page layout CSS (title, width, padding) ====
@@ -432,21 +541,24 @@ def page_add_edit(engine: Engine):
                 d = _digits_only(add_phone)
                 if d and len(d) != 10:
                     errs.append("Phone must be 10 digits (or blank).")
-                if add_service and re.search(r"[,/;]", add_service):
-                    errs.append("Service name must be a single service (no commas or slashes).")
+                # PATCH 3: allow single whitelisted slash label
+                if add_service:
+                    svc_trim = (add_service or "").strip()
+                    if ("/" in svc_trim and svc_trim not in _SINGLE_SLASH_SERVICE_WHITELIST) or re.search(r"[,;]", svc_trim):
+                        errs.append("Service must be a single value (no commas; '/' allowed only for approved single-label names).")
                 if errs:
                     st.error(" • " + "\n • ".join(errs))
                 else:
                     row = dict(
-                        category=add_category.strip(),
-                        service=(add_service or "").strip() or None,
-                        business_name=add_business_name.strip(),
-                        contact_name=(add_contact_name or "").strip() or None,
+                        category=_s(add_category),
+                        service=_s(add_service),
+                        business_name=_s(add_business_name),
+                        contact_name=_s(add_contact_name),
                         phone=d,
-                        address=(add_address or "").strip() or None,
-                        website=(add_website or "").strip() or None,
-                        notes=(add_notes or "").strip() or None,
-                        keywords=(add_keywords or "").strip() or None,
+                        address=_canon_address_tx(add_address),
+                        website=_s(add_website),
+                        notes=_s(add_notes),
+                        keywords=_s(add_keywords),
                     )
                     vid = insert_vendor(engine, row)
                     st.success(f"Added provider id={vid}.")
@@ -523,22 +635,24 @@ def page_add_edit(engine: Engine):
                 d = _digits_only(eph)
                 if d and len(d) != 10:
                     errs.append("Phone must be 10 digits (or blank).")
-                if esvc and re.search(r"[,/;]", esvc):
-                    errs.append("Service name must be a single service (no commas or slashes).")
+                # PATCH 3: allow single whitelisted slash label
+                if esvc:
+                    if ("/" in esvc and esvc not in _SINGLE_SLASH_SERVICE_WHITELIST) or re.search(r"[,;]", esvc):
+                        errs.append("Service must be a single value (no commas; '/' allowed only for approved single-label names).")
 
                 if errs:
                     st.error(" • " + "\n • ".join(errs))
                 else:
                     update_vendor(engine, sel_row["id"], {
-                        "category": ecat,
-                        "service": esvc or None,
-                        "business_name": ebn,
-                        "contact_name": ecn or None,
+                        "category": _s(ecat),
+                        "service": _s(esvc),
+                        "business_name": _s(ebn),
+                        "contact_name": _s(ecn),
                         "phone": d,
-                        "address": eaddr or None,
-                        "website": eweb or None,
-                        "notes": enotes or None,
-                        "keywords": ekw or None,
+                        "address": _canon_address_tx(eaddr),
+                        "website": _s(eweb),
+                        "notes": _s(enotes),
+                        "keywords": _s(ekw),
                     })
                     st.success(f"Updated provider id={sel_row['id']}.")
                     st.rerun()
@@ -642,9 +756,10 @@ def _csv_restore_append(engine: Engine):
             d = _digits_only(r.get("phone") or "")
             if d and len(d) != 10:
                 errs.append(f"Row {i+1}: phone must be 10 digits or blank.")
-            svc = str(r.get("service") or "")
-            if svc and re.search(r"[,/;]", svc):
-                errs.append(f"Row {i+1}: service must be a single value (no commas or slashes).")
+            svc = str(r.get("service") or "").strip()
+            if svc:
+                if ("/" in svc and svc not in _SINGLE_SLASH_SERVICE_WHITELIST) or re.search(r"[,;]", svc):
+                    errs.append(f"Row {i+1}: service must be a single value (no commas; '/' allowed only for approved single-label names).")
 
         if errs:
             st.error("Validation errors:\n\n" + "\n".join(f"• {e}" for e in errs))
@@ -664,38 +779,44 @@ def _csv_restore_append(engine: Engine):
             return
 
         ins_rows = 0
+        errors: List[str] = []
         with engine.begin() as conn:
-            for _, r in df.iterrows():
-                d = _digits_only(r.get("phone") or "")
-                ins = dict(
-                    category=(r.get("category") or "").strip(),
-                    service=(r.get("service") or "").strip() or None,
-                    business_name=(r.get("business_name") or "").strip(),
-                    contact_name=(r.get("contact_name") or "").strip() or None,
-                    phone=d,
-                    address=(r.get("address") or "").strip() or None,
-                    website=(r.get("website") or "").strip() or None,
-                    notes=(r.get("notes") or "").strip() or None,
-                    keywords=(r.get("keywords") or "").strip() or None,
-                    created_at=_now(),
-                    updated_at=_now(),
-                    updated_by="csv_restore",
-                    computed_keywords=_ckw(
-                        (r.get("category") or ""),
-                        (r.get("service") or ""),
-                        (r.get("business_name") or ""),
-                        (r.get("keywords") or ""),
-                    ),
-                )
-                conn.execute(sql_text("""
-                    INSERT INTO vendors (category, service, business_name, contact_name, phone, address, website, notes, keywords,
-                                         created_at, updated_at, updated_by, computed_keywords)
-                    VALUES (:category, :service, :business_name, :contact_name, :phone, :address, :website, :notes, :keywords,
-                            :created_at, :updated_at, :updated_by, :computed_keywords)
-                """), ins)
-                ins_rows += 1
+            for idx, r in df.iterrows():
+                try:
+                    d = _digits_only(r.get("phone") or "")
+                    ins = dict(
+                        category=_s(r.get("category")),
+                        service=_s(r.get("service")),
+                        business_name=_s(r.get("business_name")),
+                        contact_name=_s(r.get("contact_name")),
+                        phone=d,
+                        address=_canon_address_tx(r.get("address")),
+                        website=_s(r.get("website")),
+                        notes=_s(r.get("notes")),
+                        keywords=_s(r.get("keywords")),
+                        created_at=_now(),
+                        updated_at=_now(),
+                        updated_by="csv_restore",
+                        computed_keywords=_ckw(
+                            _s(r.get("category")),
+                            _s(r.get("service")),
+                            _s(r.get("business_name")),
+                            _s(r.get("keywords")),
+                        ),
+                    )
+                    conn.execute(sql_text("""
+                        INSERT INTO vendors (category, service, business_name, contact_name, phone, address, website, notes, keywords,
+                                             created_at, updated_at, updated_by, computed_keywords)
+                        VALUES (:category, :service, :business_name, :contact_name, :phone, :address, :website, :notes, :keywords,
+                                :created_at, :updated_at, :updated_by, :computed_keywords)
+                    """), ins)
+                    ins_rows += 1
+                except Exception as ex:
+                    errors.append(f"Row {idx+1}: {ex}")
 
         st.success(f"Appended {ins_rows} rows.")
+        if errors:
+            st.warning("Some rows failed to append:\n\n" + "\n".join(f"• {e}" for e in errors))
         st.info("Tip: 'Recompute now' below if needed.")
 
 
@@ -741,6 +862,11 @@ def page_maintenance(engine: Engine):
         st.success(f"Recomputed {n} rows.")
     with colB.popover("What does this do?"):
         st.write("Rebuilds missing/blank **computed_keywords** from category/service/name/keywords for faster search.")
+
+    # PATCH 1: one-time ISO timestamp backfill
+    if st.button("Backfill ISO timestamps (created_at / updated_at)"):
+        res = backfill_iso_timestamps(engine)
+        st.success(f"Backfill complete — created_at: {res['created_at']}, updated_at: {res['updated_at']}")
 
     _csv_restore_append(engine)
     _quick_probes(engine)
