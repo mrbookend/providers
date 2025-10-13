@@ -29,6 +29,9 @@ from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+# ---- Page config MUST be the first Streamlit call ----
+st.set_page_config(page_title="HCR Providers — Admin", layout="wide")
+
 # ---- register libsql dialect (must be AFTER "import streamlit as st") ----
 try:
     import sqlalchemy_libsql  # noqa: F401  (ensures 'sqlite+libsql' is registered)
@@ -312,10 +315,12 @@ def backfill_computed_keywords(engine: Engine) -> int:
 
 
 # -----------------------------
-# Streamlit Page Setup
+# Streamlit Page Setup (no second set_page_config call)
 # -----------------------------
+# Page config already set at top. Read secrets now and (optionally) update tab title.
 page_title = _get_secret("page_title", "HCR Providers — Admin") or "HCR Providers — Admin"
-st.set_page_config(page_title=page_title, layout="wide")
+if page_title != "HCR Providers — Admin":
+    st.markdown(f"<script>document.title = {json.dumps(page_title)};</script>", unsafe_allow_html=True)
 
 # Optional UI tweaks from secrets
 page_left_padding_px = _get_secret("page_left_padding_px", "12")
@@ -656,43 +661,42 @@ def _csv_restore_append(engine: Engine):
 
         if dry_run:
             st.success("Dry run complete. No changes applied.")
-            return
+        else:
+            # append
+            ins_rows = 0
+            with engine.begin() as conn:
+                for _, r in df.iterrows():
+                    d = _digits_only(r.get("phone") or "")
+                    ins = dict(
+                        category=(r.get("category") or "").strip(),
+                        service=(r.get("service") or "").strip() or None,
+                        business_name=(r.get("business_name") or "").strip(),
+                        contact_name=(r.get("contact_name") or "").strip() or None,
+                        phone=d,
+                        address=(r.get("address") or "").strip() or None,
+                        website=(r.get("website") or "").strip() or None,
+                        notes=(r.get("notes") or "").strip() or None,
+                        keywords=(r.get("keywords") or "").strip() or None,
+                        created_at=_now(),
+                        updated_at=_now(),
+                        updated_by="csv_restore",
+                        computed_keywords=_ckw(
+                            (r.get("category") or ""),
+                            (r.get("service") or ""),
+                            (r.get("business_name") or ""),
+                            (r.get("keywords") or ""),
+                        ),
+                    )
+                    conn.execute(sql_text("""
+                        INSERT INTO vendors (category, service, business_name, contact_name, phone, address, website, notes, keywords,
+                                             created_at, updated_at, updated_by, computed_keywords)
+                        VALUES (:category, :service, :business_name, :contact_name, :phone, :address, :website, :notes, :keywords,
+                                :created_at, :updated_at, :updated_by, :computed_keywords)
+                    """), ins)
+                    ins_rows += 1
 
-        # append
-        ins_rows = 0
-        with engine.begin() as conn:
-            for _, r in df.iterrows():
-                d = _digits_only(r.get("phone") or "")
-                ins = dict(
-                    category=(r.get("category") or "").strip(),
-                    service=(r.get("service") or "").strip() or None,
-                    business_name=(r.get("business_name") or "").strip(),
-                    contact_name=(r.get("contact_name") or "").strip() or None,
-                    phone=d,
-                    address=(r.get("address") or "").strip() or None,
-                    website=(r.get("website") or "").strip() or None,
-                    notes=(r.get("notes") or "").strip() or None,
-                    keywords=(r.get("keywords") or "").strip() or None,
-                    created_at=_now(),
-                    updated_at=_now(),
-                    updated_by="csv_restore",
-                    computed_keywords=_ckw(
-                        (r.get("category") or ""),
-                        (r.get("service") or ""),
-                        (r.get("business_name") or ""),
-                        (r.get("keywords") or ""),
-                    ),
-                )
-                conn.execute(sql_text("""
-                    INSERT INTO vendors (category, service, business_name, contact_name, phone, address, website, notes, keywords,
-                                         created_at, updated_at, updated_by, computed_keywords)
-                    VALUES (:category, :service, :business_name, :contact_name, :phone, :address, :website, :notes, :keywords,
-                            :created_at, :updated_at, :updated_by, :computed_keywords)
-                """), ins)
-                ins_rows += 1
-
-        st.success(f"Appended {ins_rows} rows.")
-        st.info("Tip: 'Recompute now' below if needed.")
+            st.success(f"Appended {ins_rows} rows.")
+            st.info("Tip: 'Recompute now' below if needed.")
 
 
 # -----------------------------
