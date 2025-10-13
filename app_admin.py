@@ -772,7 +772,7 @@ with _tabs[0]:
 
 # ---------- Add / Edit / Delete Provider  (side-by-side Add & Edit; Delete at bottom)
 with _tabs[1]:
-    st.header("Add / Edit Provider")
+    # NOTE: Removed st.header("Add / Edit Provider") per request.
 
     # Shared state
     ADD_FORM_KEYS = [
@@ -913,6 +913,10 @@ with _tabs[1]:
         st.subheader("Add Provider")
         add_form_key = f"add_provider_form_{st.session_state['add_form_version']}"
         with st.form(add_form_key, clear_on_submit=False):
+            # Row 0: spacer to align with the Edit selectbox height
+            st.markdown("<div style='height: 70px;'></div>", unsafe_allow_html=True)
+
+            # Row 1..: inputs laid out in two columns to mirror Edit
             c1, c2 = st.columns(2)
             with c1:
                 st.text_input("Provider *", key="add_business_name")
@@ -1008,34 +1012,42 @@ with _tabs[1]:
         if df_all.empty:
             st.info("No providers yet. Add a provider on the left.")
         else:
-            st.selectbox(
-                "Select provider to edit (type to search)",
-                options=[None] + ids,
-                format_func=_fmt_provider,
-                key="edit_vendor_id",
-            )
-
-            if st.session_state["edit_vendor_id"] is not None:
-                if st.session_state["edit_last_loaded_id"] != st.session_state["edit_vendor_id"]:
-                    row = id_to_row[int(st.session_state["edit_vendor_id"])]
-                    st.session_state.update(
-                        {
-                            "edit_business_name": (row.get("business_name") or "").strip(),
-                            "edit_category": (row.get("category") or "").strip(),
-                            "edit_service": (row.get("service") or "").strip(),
-                            "edit_contact_name": (row.get("contact_name") or "").strip(),
-                            "edit_phone": (row.get("phone") or "").strip(),
-                            "edit_address": (row.get("address") or "").strip(),
-                            "edit_website": (row.get("website") or "").strip(),
-                            "edit_notes": (row.get("notes") or "").strip(),
-                            "edit_keywords": (row.get("keywords") or "").strip(),
-                            "edit_row_updated_at": row.get("updated_at") or "",
-                            "edit_last_loaded_id": st.session_state["edit_vendor_id"],
-                        }
-                    )
-
             edit_form_key = f"edit_provider_form_{st.session_state['edit_form_version']}"
             with st.form(edit_form_key, clear_on_submit=False):
+                # Row 0: the selector (now INSIDE the form to align with spacer on the left)
+                c0a, c0b = st.columns(2)
+                with c0a:
+                    st.selectbox(
+                        "Select provider to edit (type to search)",
+                        options=[None] + ids,
+                        format_func=_fmt_provider,
+                        key="edit_vendor_id",
+                    )
+                with c0b:
+                    # keep row height symmetric; optional tiny caption space
+                    st.caption("")
+
+                # If selection changed, hydrate fields
+                if st.session_state.get("edit_vendor_id") is not None:
+                    if st.session_state.get("edit_last_loaded_id") != st.session_state.get("edit_vendor_id"):
+                        row = id_to_row[int(st.session_state["edit_vendor_id"])]
+                        st.session_state.update(
+                            {
+                                "edit_business_name": (row.get("business_name") or "").strip(),
+                                "edit_category": (row.get("category") or "").strip(),
+                                "edit_service": (row.get("service") or "").strip(),
+                                "edit_contact_name": (row.get("contact_name") or "").strip(),
+                                "edit_phone": (row.get("phone") or "").strip(),
+                                "edit_address": (row.get("address") or "").strip(),
+                                "edit_website": (row.get("website") or "").strip(),
+                                "edit_notes": (row.get("notes") or "").strip(),
+                                "edit_keywords": (row.get("keywords") or "").strip(),
+                                "edit_row_updated_at": row.get("updated_at") or "",
+                                "edit_last_loaded_id": st.session_state["edit_vendor_id"],
+                            }
+                        )
+
+                # Row 1..: inputs laid out to mirror Add
                 c1, c2 = st.columns(2)
                 with c1:
                     st.text_input("Provider *", key="edit_business_name")
