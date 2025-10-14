@@ -23,17 +23,63 @@ from sqlalchemy.engine import Engine
 # ---- Streamlit page config MUST be first Streamlit call ----
 st.set_page_config(page_title="Vendors Admin", layout="wide", initial_sidebar_state="expanded")
 
-# -------- Early Boot (dialect/version, secrets, engine builder, diagnostics) --------
+# ==== BEGIN: Admin boot bundle (version banner + guards + engine + init) ====
 
-# libsql dialect version (ok if missing)
+# --- Unified libsql version + details (authoritative from package metadata) ---
+import importlib
+import importlib.metadata as _im
+_lib_file = "n/a"
 try:
-    import sqlalchemy_libsql as _lib
-    _lib_ver = getattr(_lib, "__version__", "unknown")
+    _lib_ver_display = _im.version("sqlalchemy-libsql")
 except Exception:
-    _lib = None
-    _lib_ver = "n/a"
+    try:
+        import sqlalchemy_libsql as _lib_mod
+        _lib_ver_display = getattr(_lib_mod, "__version__", "unknown")
+    except Exception:
+        _lib_ver_display = "unknown"
+try:
+    _lib_mod = importlib.import_module("sqlalchemy_libsql")
+    _lib_file = getattr(_lib_mod, "__file__", "n/a")
+except Exception:
+    pass
 
-# ==== BEGIN: Strategy + required secrets (validated) ====
+# --- Streamlit run-context guard (prevents SessionInfo errors during import) ---
+try:
+    from streamlit.runtime.scriptrunner import get_script_run_ctx as _get_ctx
+except Exception:
+    _get_ctx = None
+def _has_streamlit_ctx() -> bool:
+    try:
+        return (_get_ctx() is not None) if _get_ctx else False
+    except Exception:
+        return False
+
+# --- ENV + SHOW_DEBUG derivation (prod hides debug by default) ---
+_ENV = str(st.secrets.get("ENV", "prod")).strip().lower()
+_raw_show_debug = st.secrets.get("SHOW_DEBUG", "")
+if isinstance(_raw_show_debug, bool):
+    _SHOW_DEBUG = _raw_show_debug
+else:
+    _SHOW_DEBUG = (_ENV != "prod")
+
+# --- Version banner (sidebar) ---
+if bool(st.secrets.get("SHOW_STATUS", True)) and _has_streamlit_ctx():
+    try:
+        st.sidebar.info(
+            "Versions | "
+            f"py {sys.version.split()[0]} | "
+            f"streamlit {st.__version__} | "
+            f"pandas {pd.__version__} | "
+            f"SA {sqlalchemy.__version__} | "
+            f"libsql {_lib_ver_display} | "
+            f"requests {requests.__version__}"
+        )
+        with st.sidebar.expander("libsql details"):
+            st.write({"module_file": _lib_file, "pkg_version": _lib_ver_display})
+    except Exception as _e:
+        st.sidebar.warning(f"Version banner failed: {_e}")
+
+# --- Secrets / strategy (validated) ---
 _DB_STRATEGY   = str(st.secrets.get("DB_STRATEGY", "embedded_replica")).strip().lower()
 _TURSO_URL     = str(st.secrets.get("TURSO_DATABASE_URL", "")).strip()
 _TURSO_TOKEN   = str(st.secrets.get("TURSO_AUTH_TOKEN", "")).strip()
@@ -49,7 +95,7 @@ def _validate_sync_url(u: str) -> str:
         raise ValueError(f"Unsupported sync URL scheme: {scheme}:// (expected libsql://)")
     return u
 
-# Hard-require secrets only when we intend to sync
+# Require remote secrets only when syncing
 if _DB_STRATEGY in ("embedded_replica", "replica", "sync"):
     try:
         _validate_sync_url(_TURSO_URL)
@@ -62,90 +108,42 @@ if _DB_STRATEGY in ("embedded_replica", "replica", "sync"):
 
 # Back-compat for any remaining references
 _strategy = _DB_STRATEGY
-# ==== END: Strategy + required secrets (validated) ====
 
-
-# Helper: mask long strings for display
-def _mask(u: str | None, keep: int = 16) -> str:
+# --- URL masker: never leak tokens/paths; show scheme://host only ---
+from urllib.parse import urlparse
+def _mask_sync_url(u: str) -> str:
     if not u:
         return ""
-    return u[:keep] + "…" if len(u) > keep else u
-
-# ==== BEGIN: Version Banner (enhanced) ====
-import importlib
-import importlib.metadata as _im
-
-_lib_ver_display = _lib_ver
-_lib_file = "n/a"
-try:
-    # Prefer the package version as installed in the environment
-    _lib_ver_pkg = _im.version("sqlalchemy-libsql")
-    _lib_ver_display = _lib_ver_pkg or _lib_ver_display
-except Exception:
-    pass
-
-try:
-    _lib_mod = importlib.import_module("sqlalchemy_libsql")
-    _lib_file = getattr(_lib_mod, "__file__", "n/a")
-except Exception:
-    pass
-
-if bool(st.secrets.get("SHOW_STATUS", True)):
     try:
-        st.sidebar.info(
-            "Versions | "
-            f"py {sys.version.split()[0]} | "
-            f"streamlit {st.__version__} | "
-            f"pandas {pd.__version__} | "
-            f"SA {sqlalchemy.__version__} | "
-            f"libsql {(_lib_ver_display or 'n/a')} | "
-            f"requests {requests.__version__}"
-        )
-        with st.sidebar.expander("libsql details"):
-            st.write({"module_file": _lib_file, "pkg_version": _lib_ver_display})
-    except Exception as _e:
-        st.sidebar.warning(f"Version banner failed: {_e}")
-# ==== END: Version Banner (enhanced) ====
-# ==== BEGIN: Streamlit run-context guard ====
-try:
-    from streamlit.runtime.scriptrunner import get_script_run_ctx as _get_ctx
-except Exception:
-    _get_ctx = None
-
-def _has_streamlit_ctx() -> bool:
-    try:
-        return (_get_ctx() is not None) if _get_ctx else False
+        p = urlparse(u)
+        host = p.hostname or ""
+        return (p.scheme or "") + "://" + host
     except Exception:
-        return False
-# ==== END: Streamlit run-context guard ====
+        return (u.split("://", 1)[0] + "://") if "://" in u else ""
 
-# ==== BEGIN: Engine builder (embedded replica w/ libsql sync) ====
+# --- Canonical engine builder (embedded replica with libsql sync) ---
 def build_engine_and_probe() -> tuple[Engine, dict]:
-    # Base engine always opens the local file using libsql dialect
     engine_url = f"sqlite+libsql:///{_EMBEDDED_PATH}"
-
-    # Diagnostics payload (use unified libsql version)
     dbg = {
         "host": platform.node() or "localhost",
         "strategy": _DB_STRATEGY,
         "python": sys.version.split()[0],
         "sqlalchemy_url": engine_url,
         "embedded_path": _EMBEDDED_PATH,
-        "libsql_ver": _lib_ver_display,   # <-- fixed to use unified version
+        "libsql_ver": _lib_ver_display,           # unified version string
         "sync_url_scheme": "",
     }
 
     connect_args: Dict[str, Any] = {}
 
     if _DB_STRATEGY in ("embedded_replica", "replica", "sync"):
-        valid_sync = _validate_sync_url(_TURSO_URL)          # will raise if scheme wrong
-        dbg["sync_url_scheme"] = valid_sync.split("://", 1)[0] + "://"
+        valid_sync = _validate_sync_url(_TURSO_URL)
+        dbg["sync_url_scheme"] = _mask_sync_url(valid_sync).split("://", 1)[0] + "://"
         connect_args["sync_url"] = valid_sync
         if _TURSO_TOKEN:
             connect_args["auth_token"] = _TURSO_TOKEN
 
     elif _DB_STRATEGY == "remote_only":
-        # Direct remote, no embedded file
         engine_url = _validate_sync_url(_TURSO_URL)
         dbg["sqlalchemy_url"] = engine_url
         dbg["embedded_path"] = ""
@@ -153,123 +151,30 @@ def build_engine_and_probe() -> tuple[Engine, dict]:
         if _TURSO_TOKEN:
             connect_args["auth_token"] = _TURSO_TOKEN
 
-    else:
-        # "embedded_only": no sync
-        dbg["sync_url_scheme"] = ""
+    # else: embedded_only => no sync_url
 
     eng = create_engine(engine_url, connect_args=connect_args)
 
-    # Quick sanity check (fail fast if driver/URL is wrong)
+    # Quick sanity (fail fast if driver/URL is wrong)
     with eng.connect() as cx:
         cx.exec_driver_sql("PRAGMA journal_mode")
 
     return eng, dbg
-# ==== END: Engine builder (embedded replica w/ libsql sync) ====
 
-
-# ==== BEGIN: SINGLE canonical engine builder (drop-in) ====
-def build_engine_and_probe() -> tuple[Engine, Dict]:
-    """
-    Canonical engine builder used across the entire app.
-    Strategies:
-      - embedded_replica: local file opened via sqlite+libsql, sync via libsql:// remote
-      - embedded_only   : local file only, no sync
-      - remote_only     : direct libsql:// remote, no local file
-    """
-    # Use the validated, canonical names set earlier
-    strategy   = _DB_STRATEGY
-    embedded   = _EMBEDDED_PATH
-    url_remote = _TURSO_URL
-    token      = _TURSO_TOKEN
-
-    # Base engine: always the local file (unless remote_only)
-    engine_url = f"sqlite+libsql:///{embedded}"
-
-    dbg: Dict[str, Any] = {
-        "host": platform.node() or "localhost",
-        "strategy": strategy,
-        "python": sys.version.split()[0],
-        "sqlalchemy_url": engine_url,
-        "embedded_path": embedded,
-        "libsql_ver": (_lib_ver if isinstance(_lib_ver, str) else "unknown"),
-        "sync_url_scheme": "",
-    }
-
-    connect_args: Dict[str, Any] = {}
-
-    if strategy in ("embedded_replica", "replica", "sync"):
-        valid_sync = _validate_sync_url(url_remote)  # raises if scheme is wrong
-        dbg["sync_url_scheme"] = valid_sync.split("://", 1)[0] + "://"
-        connect_args["sync_url"] = valid_sync
-        connect_args["auth_token"] = token
-
-    elif strategy == "remote_only":
-        # Open remote directly (no embedded file)
-        engine_url = _validate_sync_url(url_remote)
-        dbg["sqlalchemy_url"] = engine_url
-        dbg["embedded_path"] = ""
-        dbg["sync_url_scheme"] = "libsql://"
-        connect_args["auth_token"] = token
-
-    elif strategy == "embedded_only":
-        # No sync; keep base engine_url
-        dbg["sync_url_scheme"] = ""
-
-    else:
-        st.warning(f"Unknown DB_STRATEGY '{strategy}', defaulting to embedded_only (no sync).")
-        dbg["strategy"] = "embedded_only"
-        dbg["sync_url_scheme"] = ""
-
-    eng = create_engine(engine_url, connect_args=connect_args)
-
-    # Quick early probe to fail fast if driver/URL is wrong
-    with eng.connect() as cx:
-        cx.exec_driver_sql("PRAGMA journal_mode")
-
-    return eng, dbg
-# ==== END: SINGLE canonical engine builder (drop-in) ====
-
-    # Create engine and prove connectivity with simple backoff (Cloud can be slow to boot)
-    try:
-        eng = create_engine(sqlalchemy_url, connect_args=connect_args)
-        last_err = None
-        for attempt in range(5):
-            try:
-                with eng.connect() as cx:
-                    cx.execute(sql_text("SELECT 1"))
-                last_err = None
-                break
-            except Exception as e:
-                last_err = e
-                time.sleep(0.6 * (attempt + 1))
-        if last_err:
-            raise last_err
-    except Exception as e:
-        st.error(f"DB init failed: {e.__class__.__name__}: {e}")
-        with st.expander("Diagnostics"):
-            st.json(dbg)
-        st.stop()
-
-    return eng, dbg
-
-# ==== BEGIN: Engine init + diagnostics (guarded) ====
+# --- Single guarded init + diagnostics (no SessionInfo errors) ---
 try:
     ENGINE, _DB_DBG = build_engine_and_probe()
 
     if _has_streamlit_ctx():
         st.sidebar.success("DB ready")
+        # Always show a simple success marker
+        st.success("App reached post-boot marker ✅")
 
-        # Stash for reuse (guarded)
-        st.session_state["ENGINE"] = ENGINE
-        st.session_state["DB_DBG"] = _DB_DBG
-
-        with st.expander("Boot diagnostics (ENGINE + secrets)"):
-            st.json(_DB_DBG)
-
-        st.success("App reached post-boot marker ✅")  # proves we got past engine init
-
-        # Optional: quick vendors count (gate with SHOW_COUNT; table may not exist yet)
-        if bool(st.secrets.get("SHOW_COUNT", True)):
+        # Optional, gated debug panel
+        if _SHOW_DEBUG:
+            with st.expander("Boot diagnostics (ENGINE + secrets)"):
+                st.json(_DB_DBG)
+            # Optional: quick vendors count (table may not exist yet)
             try:
                 with ENGINE.connect() as cx:
                     cnt = cx.exec_driver_sql("SELECT COUNT(*) FROM vendors").scalar()
@@ -286,10 +191,9 @@ except Exception as e:
         st.error(f"Database init failed: {e.__class__.__name__}: {e}")
         st.stop()
     else:
-        # Re-raise in headless contexts so CI/linters fail loud
         raise
-# ==== END: Engine init + diagnostics (guarded) ====
 
+# ==== END: Admin boot bundle (version banner + guards + engine + init) ====
 
 # ==== END: FILE TOP (imports + page_config + Early Boot) ====
 
