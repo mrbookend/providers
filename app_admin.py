@@ -119,6 +119,7 @@ def build_engine_and_probe():
 
     return eng, dbg
 
+# ==== BEGIN: Safe engine build + Post-boot smoke test ====
 # Safe engine build
 try:
     ENGINE, _DB_DBG = build_engine_and_probe()
@@ -127,7 +128,7 @@ except Exception as e:
     st.error(f"Database init failed: {e.__class__.__name__}: {e}")
     st.stop()
 
-# ==== BEGIN: Post-boot smoke test (shows on page) ====
+# Post-boot smoke test (shows on page)
 with st.expander("Boot diagnostics (ENGINE + secrets)"):
     st.json(_DB_DBG)
 
@@ -140,8 +141,7 @@ try:
     st.info(f"Vendors table row count: {cnt}")
 except Exception as e:
     st.warning(f"Quick vendors count failed: {e.__class__.__name__}: {e}")
-# ==== END: Post-boot smoke test ====
-# ==== END: Early Boot Diagnostics (status + secrets + engine) ====
+# ==== END: Safe engine build + Post-boot smoke test ====
 
 # -----------------------------
 # Helpers
