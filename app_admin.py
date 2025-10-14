@@ -59,8 +59,10 @@ if _DB_STRATEGY in ("embedded_replica", "replica", "sync"):
     if not _TURSO_TOKEN:
         st.error("Missing required secret: TURSO_AUTH_TOKEN")
         st.stop()
-# ==== END: Strategy + required secrets (validated) ====
 
+# Back-compat for any remaining references
+_strategy = _DB_STRATEGY
+# ==== END: Strategy + required secrets (validated) ====
 
 # Helper: mask long strings for display
 def _mask(u: str | None, keep: int = 16) -> str:
@@ -145,117 +147,64 @@ def build_engine_and_probe() -> tuple[Engine, dict]:
     return eng, dbg
 # ==== END: Engine builder (embedded replica w/ libsql sync) ====
 
-
 # ==== BEGIN: SINGLE canonical engine builder (drop-in) ====
 def build_engine_and_probe() -> tuple[Engine, Dict]:
     """
     Canonical engine builder used across the entire app.
-    - Strategy 'embedded_replica' requires TURSO_DATABASE_URL and TURSO_AUTH_TOKEN
-    - Otherwise falls back to plain sqlite using the same embedded path
+    Strategies:
+      - embedded_replica: local file opened via sqlite+libsql, sync via libsql:// remote
+      - embedded_only   : local file only, no sync
+      - remote_only     : direct libsql:// remote, no local file
     """
-    url_remote = st.secrets.get("TURSO_DATABASE_URL")
-    token      = st.secrets.get("TURSO_AUTH_TOKEN")
-    # Default path if not provided (works locally and on Streamlit Cloud)
-    embedded   = st.secrets.get("EMBEDDED_DB_PATH", "/mount/src/providers/vendors-embedded.db")
-    strategy   = _strategy
+    # Use the validated, canonical names set earlier
+    strategy   = _DB_STRATEGY
+    embedded   = _EMBEDDED_PATH
+    url_remote = _TURSO_URL
+    token      = _TURSO_TOKEN
 
-    # Force absolute path on Cloud (defensive)
-    if not embedded.startswith("/"):
-        embedded = "/mount/src/providers/" + embedded.lstrip("/")
+    # Base engine: always the local file (unless remote_only)
+    engine_url = f"sqlite+libsql:///{embedded}"
 
-    # Ensure embedded DB dir exists (avoid 'unable to open database file')
-    try:
-        os.makedirs(os.path.dirname(embedded), exist_ok=True)
-    except Exception as _mkerr:
-        st.warning(f"Could not ensure embedded DB dir exists: {_mkerr.__class__.__name__}: {_mkerr}")
-
-    use_replica = (strategy == "embedded_replica") and bool(url_remote and token)
-
-    if use_replica:
-        if _lib is None:
-            st.error(
-                "sqlalchemy_libsql module is not available, but strategy requires it "
-                "(embedded_replica). Check requirements and reinstall."
-            )
-            st.stop()
-        sqlalchemy_url = f"sqlite+libsql:///{embedded}"
-        # normalize sync_url (drop query params like ?secure=true)
-        sync_url = (url_remote or "").split("?", 1)[0]
-        connect_args = {"sync_url": sync_url, "auth_token": token}
-    else:
-        sqlalchemy_url = f"sqlite:///{embedded}"
-        connect_args = {}
-
-    # ==== BEGIN: dbg dict + enhanced libsql version patch (after if/else, before engine connect) ====
-    dbg = {
-        "host": platform.node(),
+    dbg: Dict[str, Any] = {
+        "host": platform.node() or "localhost",
         "strategy": strategy,
         "python": sys.version.split()[0],
-        "sqlalchemy_url": sqlalchemy_url,
+        "sqlalchemy_url": engine_url,
         "embedded_path": embedded,
-        "sync_url": _mask(url_remote),
-        "libsql_ver": _lib_ver,  # may be stale inside module; patch below fixes it
+        "libsql_ver": (_lib_ver if isinstance(_lib_ver, str) else "unknown"),
+        "sync_url_scheme": "",
     }
 
-    # Patch dbg with the actual installed package version and import path
-    import importlib
-    import importlib.metadata as _im
-    try:
-        _lib_ver_pkg = _im.version("sqlalchemy-libsql")
-    except Exception:
-        _lib_ver_pkg = None
-    try:
-        _lib_mod = importlib.import_module("sqlalchemy_libsql")
-        _lib_file = getattr(_lib_mod, "__file__", "n/a")
-    except Exception:
-        _lib_file = "n/a"
+    connect_args: Dict[str, Any] = {}
 
-    dbg["libsql_ver"] = _lib_ver_pkg or dbg.get("libsql_ver", "n/a")
-    dbg["libsql_module_file"] = _lib_file
-    # ==== END: dbg dict + enhanced libsql version patch ====
-    # ==== BEGIN: engine connect + return (append after dbg patch) ====
-    try:
-        eng = create_engine(sqlalchemy_url, connect_args=connect_args)
-        last_err = None
-        for attempt in range(5):
-            try:
-                with eng.connect() as cx:
-                    cx.execute(sql_text("SELECT 1"))
-                last_err = None
-                break
-            except Exception as e:
-                last_err = e
-                time.sleep(0.6 * (attempt + 1))
-        if last_err:
-            raise last_err
-    except Exception as e:
-        st.error(f"DB init failed: {e.__class__.__name__}: {e}")
-        with st.expander("Diagnostics"):
-            st.json(dbg)
-        st.stop()
+    if strategy in ("embedded_replica", "replica", "sync"):
+        valid_sync = _validate_sync_url(url_remote)  # raises if scheme is wrong
+        dbg["sync_url_scheme"] = valid_sync.split("://", 1)[0] + "://"
+        connect_args["sync_url"] = valid_sync
+        connect_args["auth_token"] = token
 
-    return eng, dbg
-# ==== END: SINGLE canonical engine builder (drop-in, final) ====
-    # Create engine and prove connectivity with simple backoff (Cloud can be slow to boot)
-    try:
-        eng = create_engine(sqlalchemy_url, connect_args=connect_args)
-        last_err = None
-        for attempt in range(5):
-            try:
-                with eng.connect() as cx:
-                    cx.execute(sql_text("SELECT 1"))
-                last_err = None
-                break
-            except Exception as e:
-                last_err = e
-                time.sleep(0.6 * (attempt + 1))
-        if last_err:
-            raise last_err
-    except Exception as e:
-        st.error(f"DB init failed: {e.__class__.__name__}: {e}")
-        with st.expander("Diagnostics"):
-            st.json(dbg)
-        st.stop()
+    elif strategy == "remote_only":
+        # Open remote directly (no embedded file)
+        engine_url = _validate_sync_url(url_remote)
+        dbg["sqlalchemy_url"] = engine_url
+        dbg["embedded_path"] = ""
+        dbg["sync_url_scheme"] = "libsql://"
+        connect_args["auth_token"] = token
+
+    elif strategy == "embedded_only":
+        # No sync; keep base engine_url
+        dbg["sync_url_scheme"] = ""
+
+    else:
+        st.warning(f"Unknown DB_STRATEGY '{strategy}', defaulting to embedded_only (no sync).")
+        dbg["strategy"] = "embedded_only"
+        dbg["sync_url_scheme"] = ""
+
+    eng = create_engine(engine_url, connect_args=connect_args)
+
+    # Quick early probe to fail fast if driver/URL is wrong
+    with eng.connect() as cx:
+        cx.exec_driver_sql("PRAGMA journal_mode")
 
     return eng, dbg
 # ==== END: SINGLE canonical engine builder (drop-in) ====
