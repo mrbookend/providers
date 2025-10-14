@@ -1,7 +1,9 @@
-streamlit==1.36.0
+streamlit>=1.38,<1.41
 pandas==2.2.2
-SQLAlchemy>=2.0.29,<2.1
-sqlalchemy-libsql>=0.1.0
+SQLAlchemy>=2.0.30,<2.1
+sqlalchemy-libsql>=0.2.2,<0.3
 python-magic-bin==0.4.14 ; platform_system == "Windows"
 python-magic==0.4.27 ; platform_system != "Windows"
 XlsxWriter==3.2.0
+python-dateutil>=2.9.0
+requests>=2.31.0
