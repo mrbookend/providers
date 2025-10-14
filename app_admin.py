@@ -81,9 +81,8 @@ def build_engine_and_probe():
     if not embedded.startswith("/"):
         embedded = "/mount/src/providers/" + embedded.lstrip("/")
 
-    # Ensure directory exists for embedded DB file
-    # (prevents sqlite 'unable to open database file' if parent dir is missing)
     # ==== BEGIN: Ensure embedded DB dir exists ====
+    # (prevents sqlite 'unable to open database file' if parent dir is missing)
     try:
         os.makedirs(os.path.dirname(embedded), exist_ok=True)
     except Exception as _mkerr:
@@ -128,6 +127,15 @@ def build_engine_and_probe():
 
     return eng, dbg
 # ==== END: build_engine_and_probe (drop-in) ====
+
+# ==== BEGIN: Safe engine build + Post-boot smoke test ====
+# Safe engine build
+try:
+    ENGINE, _DB_DBG = build_engine_and_probe()
+    st.sidebar.success("DB ready")
+except Exception as e:
+    st.error(f"Database init failed: {e.__class__.__name__}: {e}")
+    st.stop()
 
 # ==== BEGIN: Safe engine build + Post-boot smoke test ====
 # Safe engine build
