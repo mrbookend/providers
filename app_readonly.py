@@ -432,14 +432,17 @@ def main():
         st.error(f"Failed to load vendors: {e}")
         return
 
-    # Search runs on the full frame (so 'keywords' works), but display hides selected cols
+    # ==== BEGIN: Search input (accessibility-safe) ====
     st.text_input(
-        "",
+        "Search",  # non-empty label to satisfy accessibility; will be hidden
         key="q",
         label_visibility="collapsed",
         placeholder="Search e.g., plumb, roofing, 'Inverness', phone digits, etc.",
         help="Case-insensitive, matches partial words across all columns. Tip text is also in Help / Tips.",
     )
+    # ==== END: Search input (accessibility-safe) ====
+
+
     q = st.session_state.get("q", "")
     filtered_full = apply_global_search(df_full, q)
 
