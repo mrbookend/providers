@@ -69,7 +69,7 @@ def _mask(u: str | None, keep: int = 16) -> str:
     if not u:
         return ""
     return u[:keep] + "…" if len(u) > keep else u
-
+# ==== BEGIN: build_engine_and_probe (drop-in) ====
 def build_engine_and_probe():
     url_remote = st.secrets.get("TURSO_DATABASE_URL")
     token      = st.secrets.get("TURSO_AUTH_TOKEN")
@@ -80,6 +80,15 @@ def build_engine_and_probe():
     # Force absolute path in Cloud
     if not embedded.startswith("/"):
         embedded = "/mount/src/providers/" + embedded.lstrip("/")
+
+    # Ensure directory exists for embedded DB file
+    # (prevents sqlite 'unable to open database file' if parent dir is missing)
+    # ==== BEGIN: Ensure embedded DB dir exists ====
+    try:
+        os.makedirs(os.path.dirname(embedded), exist_ok=True)
+    except Exception as _mkerr:
+        st.warning(f"Could not ensure embedded DB dir exists: {_mkerr.__class__.__name__}: {_mkerr}")
+    # ==== END: Ensure embedded DB dir exists ====
 
     use_replica = (strategy == "embedded_replica") and bool(url_remote and token)
 
@@ -118,6 +127,7 @@ def build_engine_and_probe():
         st.stop()
 
     return eng, dbg
+# ==== END: build_engine_and_probe (drop-in) ====
 
 # ==== BEGIN: Safe engine build + Post-boot smoke test ====
 # Safe engine build
