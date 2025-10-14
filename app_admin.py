@@ -99,7 +99,6 @@ def build_engine_and_probe():
 
 ENGINE, _DB_DBG = build_engine_and_probe()
 st.sidebar.success("DB ready")
-# ==== END: Early Boot Diagnostics (status + secrets + engine) ====
 # ==== BEGIN: Post-boot smoke test (shows on page) ====
 with st.expander("Boot diagnostics (ENGINE + secrets)"):
     st.json(_DB_DBG)
