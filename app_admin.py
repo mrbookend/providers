@@ -233,33 +233,44 @@ def build_engine_and_probe() -> tuple[Engine, Dict]:
 
     return eng, dbg
 
-# ==== BEGIN: Engine init + diagnostics (call once) ====
+# ==== BEGIN: Engine init + diagnostics (guarded) ====
 try:
     ENGINE, _DB_DBG = build_engine_and_probe()
-    st.sidebar.success("DB ready")
 
-    # Stash for reuse
-    st.session_state["ENGINE"] = ENGINE
-    st.session_state["DB_DBG"] = _DB_DBG
+    if _has_streamlit_ctx():
+        st.sidebar.success("DB ready")
 
-    with st.expander("Boot diagnostics (ENGINE + secrets)"):
-        st.json(_DB_DBG)
+        # Stash for reuse (guarded)
+        st.session_state["ENGINE"] = ENGINE
+        st.session_state["DB_DBG"] = _DB_DBG
 
-    st.success("App reached post-boot marker ✅")  # proves we got past engine init
+        with st.expander("Boot diagnostics (ENGINE + secrets)"):
+            st.json(_DB_DBG)
 
-    # Optional: quick vendors count (gate with SHOW_COUNT; table may not exist yet)
-    if bool(st.secrets.get("SHOW_COUNT", True)):
-        try:
-            with ENGINE.connect() as cx:
-                cnt = cx.exec_driver_sql("SELECT COUNT(*) FROM vendors").scalar()
-            st.info(f"Vendors table row count: {cnt}")
-        except Exception as _e:
-            st.warning(f"Quick vendors count failed: {type(_e).__name__}: {_e}")
+        st.success("App reached post-boot marker ✅")  # proves we got past engine init
+
+        # Optional: quick vendors count (gate with SHOW_COUNT; table may not exist yet)
+        if bool(st.secrets.get("SHOW_COUNT", True)):
+            try:
+                with ENGINE.connect() as cx:
+                    cnt = cx.exec_driver_sql("SELECT COUNT(*) FROM vendors").scalar()
+                st.info(f"Vendors table row count: {cnt}")
+            except Exception as _e:
+                st.warning(f"Quick vendors count failed: {type(_e).__name__}: {_e}")
+    else:
+        # Headless import path: avoid touching session/UI; still validate engine
+        with ENGINE.connect() as cx:
+            cx.exec_driver_sql("SELECT 1")
 
 except Exception as e:
-    st.error(f"Database init failed: {e.__class__.__name__}: {e}")
-    st.stop()
-# ==== END: Engine init + diagnostics (call once) ====
+    if _has_streamlit_ctx():
+        st.error(f"Database init failed: {e.__class__.__name__}: {e}")
+        st.stop()
+    else:
+        # Re-raise in headless contexts so CI/linters fail loud
+        raise
+# ==== END: Engine init + diagnostics (guarded) ====
+
 
 # ==== END: FILE TOP (imports + page_config + Early Boot) ====
 
