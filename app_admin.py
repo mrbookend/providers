@@ -106,6 +106,18 @@ if bool(st.secrets.get("SHOW_STATUS", True)):
     except Exception as _e:
         st.sidebar.warning(f"Version banner failed: {_e}")
 # ==== END: Version Banner (enhanced) ====
+# ==== BEGIN: Streamlit run-context guard ====
+try:
+    from streamlit.runtime.scriptrunner import get_script_run_ctx as _get_ctx
+except Exception:
+    _get_ctx = None
+
+def _has_streamlit_ctx() -> bool:
+    try:
+        return (_get_ctx() is not None) if _get_ctx else False
+    except Exception:
+        return False
+# ==== END: Streamlit run-context guard ====
 
 # ==== BEGIN: Engine builder (embedded replica w/ libsql sync) ====
 def build_engine_and_probe() -> tuple[Engine, dict]:
