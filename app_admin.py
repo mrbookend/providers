@@ -99,7 +99,20 @@ def build_engine_and_probe():
 
 ENGINE, _DB_DBG = build_engine_and_probe()
 st.sidebar.success("DB ready")
-# ==== END: Early Boot Diagnostics (status + secrets + engine) ====
+# ==== BEGIN: Post-boot smoke test (shows on page) ====
+with st.expander("Boot diagnostics (ENGINE + secrets)"):
+    st.json(_DB_DBG)
+
+st.success("App reached post-boot marker ✅")  # proves we got past engine init
+
+# Optional: prove basic DB query works; show row count or a friendly message
+try:
+    with ENGINE.connect() as cx:
+        cnt = cx.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar_one()
+    st.info(f"Vendors table row count: {cnt}")
+except Exception as e:
+    st.warning(f"Quick vendors count failed: {e.__class__.__name__}: {e}")
+# ==== END: Post-boot smoke test ====
 
 # -----------------------------
 # Helpers
