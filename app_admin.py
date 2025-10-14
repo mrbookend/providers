@@ -47,19 +47,41 @@ def _mask(u: str | None, keep: int = 16) -> str:
         return ""
     return u[:keep] + "…" if len(u) > keep else u
 
-# One version banner (safe if SHOW_STATUS missing)
+# ==== BEGIN: Version Banner (enhanced) ====
+import importlib
+import importlib.metadata as _im
+
+_lib_ver_display = _lib_ver
+_lib_file = "n/a"
+try:
+    # Prefer the package version as installed in the environment
+    _lib_ver_pkg = _im.version("sqlalchemy-libsql")
+    _lib_ver_display = _lib_ver_pkg or _lib_ver_display
+except Exception:
+    pass
+
+try:
+    _lib_mod = importlib.import_module("sqlalchemy_libsql")
+    _lib_file = getattr(_lib_mod, "__file__", "n/a")
+except Exception:
+    pass
+
 if bool(st.secrets.get("SHOW_STATUS", True)):
     try:
         st.sidebar.info(
-            f"Versions | py {sys.version.split()[0]} | "
+            "Versions | "
+            f"py {sys.version.split()[0]} | "
             f"streamlit {st.__version__} | "
             f"pandas {pd.__version__} | "
             f"SA {sqlalchemy.__version__} | "
-            f"libsql {_lib_ver} | "
+            f"libsql {(_lib_ver_display or 'n/a')} | "
             f"requests {requests.__version__}"
         )
+        with st.sidebar.expander("libsql details"):
+            st.write({"module_file": _lib_file, "pkg_version": _lib_ver_display})
     except Exception as _e:
         st.sidebar.warning(f"Version banner failed: {_e}")
+# ==== END: Version Banner (enhanced) ====
 
 # ---- SINGLE canonical engine builder ----
 def build_engine_and_probe() -> tuple[Engine, Dict]:
