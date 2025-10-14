@@ -269,6 +269,30 @@ PAGE_TITLE = _resolve_str("page_title", "Vendors Admin") or "Vendors Admin"
 SIDEBAR_STATE = _resolve_str("sidebar_state", "expanded") or "expanded"
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
 
+# ==== BEGIN: Version Banner (place right after st.set_page_config) ====
+import sys, requests, sqlalchemy
+try:
+    import sqlalchemy_libsql
+    _libsql_ver = getattr(sqlalchemy_libsql, "__version__", "unknown")
+except Exception:
+    _libsql_ver = "n/a"
+
+# Toggle via secrets: SHOW_STATUS = true/false
+if bool(st.secrets.get("SHOW_STATUS", True)):
+    try:
+        st.sidebar.info(
+            f"Versions | py {sys.version.split()[0]} | "
+            f"streamlit {st.__version__} | "
+            f"pandas {pd.__version__} | "
+            f"SA {sqlalchemy.__version__} | "
+            f"libsql {_libsql_ver} | "
+            f"requests {requests.__version__}"
+        )
+    except Exception as _e:
+        st.sidebar.warning(f"Version banner failed: {_e}")
+# ==== END: Version Banner ====
+
+
 LEFT_PAD_PX = int(_resolve_str("page_left_padding_px", "40") or "40")
 
 st.markdown(
