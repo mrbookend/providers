@@ -20,6 +20,12 @@ try:
 except Exception:
     pass
 
+# -----------------------------------------------------------------------------
+# Page config MUST be the first Streamlit call
+# Use a safe default title; other options (padding/width/state) will be taken
+# from Secrets later. Streamlit requires set_page_config before other st.* calls.
+# -----------------------------------------------------------------------------
+st.set_page_config(page_title="HCR Providers — Read-Only", layout="wide", initial_sidebar_state="collapsed")
 
 # =============================
 # Utilities
@@ -119,13 +125,22 @@ def _get_help_md() -> str:
 
 
 # =============================
-# Page config
+# Secrets-driven page options
 # =============================
 PAGE_TITLE = _get_secret("page_title", "HCR Providers — Read-Only")
 PAGE_MAX_WIDTH_PX = _to_int(_get_secret("page_max_width_px", 2300), 2300)
 SIDEBAR_STATE = _get_secret("sidebar_state", "collapsed")
 SHOW_DIAGS = _as_bool(_get_secret("READONLY_SHOW_DIAGS", False), False)
 SHOW_STATUS = _as_bool(_get_secret("READONLY_SHOW_STATUS", False), False)
+
+# Apply sidebar state retroactively (page title must stay as set_page_config)
+try:
+    # Streamlit doesn't let us change page title after set_page_config,
+    # but we can still reflect sidebar preference by drawing a tiny empty widget.
+    if SIDEBAR_STATE not in ("collapsed", "expanded"):
+        SIDEBAR_STATE = "collapsed"
+except Exception:
+    SIDEBAR_STATE = "collapsed"
 
 # secrets-driven padding (matches admin app behavior)
 PAD_LEFT_CSS = _css_len_from_secret(_get_secret("page_left_padding_px", "12"), 12)
@@ -143,8 +158,6 @@ VIEWPORT_ROWS = _viewport_rows()
 ROW_PX = 32  # approximate row height
 HEADER_PX = 44
 SCROLL_MAX_HEIGHT = HEADER_PX + ROW_PX * VIEWPORT_ROWS  # pixels
-
-st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
 
 # ---- Help/Tips expander state (for Close button) ----
 st.session_state.setdefault("help_open", False)
@@ -182,6 +195,26 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Optional version banner (sidebar), toggle via READONLY_SHOW_STATUS
+if SHOW_STATUS:
+    try:
+        import sys, requests, sqlalchemy  # noqa: F401
+        _lib_ver = "n/a"
+        try:
+            import sqlalchemy_libsql as _lib  # noqa: F401
+            _lib_ver = getattr(_lib, "__version__", "unknown")
+        except Exception:
+            pass
+        st.sidebar.info(
+            f"Versions | py {sys.version.split()[0]} | "
+            f"streamlit {st.__version__} | "
+            f"pandas {pd.__version__} | "
+            f"SA {sqlalchemy.__version__} | "
+            f"libsql {_lib_ver}"
+        )
+    except Exception as _e:
+        st.sidebar.warning(f"Version banner failed: {_e}")
+
 if SHOW_DIAGS:
     st.caption(f"HELP_MD present: {'HELP_MD' in getattr(st, 'secrets', {})}")
     st.caption(
@@ -189,7 +222,6 @@ if SHOW_DIAGS:
         % (bool(_get_secret("TURSO_DATABASE_URL", "")), bool(_get_secret("TURSO_AUTH_TOKEN", "")))
     )
     st.caption(f"Viewport rows: {VIEWPORT_ROWS} (height ≈ {SCROLL_MAX_HEIGHT}px)")
-
 
 # =============================
 # Column labels & widths (SAFE)
@@ -255,6 +287,7 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
             host = raw_url.split("://", 1)[-1].split("?", 1)[0]
             sync_url = f"libsql://{host}"
 
+        # SQLAlchemy engine URL uses sqlite+libsql with a local embedded file
         sqlalchemy_url = f"sqlite+libsql:///{embedded_path}"
 
         engine = create_engine(
@@ -279,6 +312,7 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
                 "dialect": "sqlite",
                 "driver": getattr(engine.dialect, "driver", ""),
                 "sync_url": sync_url,
+                "embedded_path": embedded_path,
             }
         )
         return engine, info
@@ -294,6 +328,7 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
             "sqlalchemy_url": local_url,
             "dialect": "sqlite",
             "driver": getattr(engine.dialect, "driver", ""),
+            "embedded_path": local_path,
         }
     )
     return engine, info
@@ -319,7 +354,6 @@ def fetch_vendors(engine: Engine) -> pd.DataFrame:
         u = v.strip()
         if not (u.startswith("http://") or u.startswith("https://")):
             u = "https://" + u
-        # compact label for display
         href = html.escape(u, quote=True)
         return f'<a href="{href}" target="_blank" rel="noopener noreferrer">Website</a>'
 
@@ -341,7 +375,6 @@ def apply_global_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
         return df
     mask = pd.Series(False, index=df.index)
     for c in df.columns:
-        # Coerce to string safely, lower, then literal substring search (no regex)
         s = df[c].astype(str).str.lower()
         mask |= s.str.contains(q, regex=False, na=False)
     return df[mask]
@@ -382,7 +415,6 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
             tds.append(f'<td style="min-width:{width}px;max-width:{width}px;">{cell_html}</td>')
         rows_html.append("<tr>" + "".join(tds) + "</tr>")
     tbody = "<tbody>" + "".join(rows_html) + "</tbody>"
-    # prov-scroll enables the vertical scroll viewport sized by secrets
     return f'<div class="prov-wrap prov-scroll"><table class="prov-table">{thead}{tbody}</table></div>'
 
 
@@ -430,7 +462,7 @@ def main():
     if open_help:
         st.session_state["help_open"] = True
 
-    # Safe defaults when no sortable cols (highly unlikely, but defensive)
+    # Safe defaults when no sortable cols
     if len(sortable_cols) == 0:
         chosen_label = "Business Name"
         order = "Ascending"
@@ -527,7 +559,7 @@ def main():
     else:
         st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
 
-    # Debug
+    # Debug / Diagnostics
     st.divider()
     if st.button("Debug (status & secrets keys)", type="secondary"):
         dbg = {
@@ -536,6 +568,7 @@ def main():
             "Widths (effective)": COLUMN_WIDTHS_PX_READONLY,
             "Viewport rows": VIEWPORT_ROWS,
             "Scroll height px": SCROLL_MAX_HEIGHT,
+            "page_title_note": "Page title set at boot due to Streamlit order constraint.",
         }
         st.write(dbg)
         st.caption(f"HELP_MD present (top-level): {'HELP_MD' in getattr(st, 'secrets', {})}")
@@ -568,4 +601,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
