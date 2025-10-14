@@ -83,7 +83,7 @@ if bool(st.secrets.get("SHOW_STATUS", True)):
         st.sidebar.warning(f"Version banner failed: {_e}")
 # ==== END: Version Banner (enhanced) ====
 
-# ---- SINGLE canonical engine builder ----
+# ==== BEGIN: SINGLE canonical engine builder (drop-in) ====
 def build_engine_and_probe() -> tuple[Engine, Dict]:
     """
     Canonical engine builder used across the entire app.
@@ -123,6 +123,7 @@ def build_engine_and_probe() -> tuple[Engine, Dict]:
         sqlalchemy_url = f"sqlite:///{embedded}"
         connect_args = {}
 
+    # ==== BEGIN: dbg dict + enhanced libsql version patch (after if/else, before engine connect) ====
     dbg = {
         "host": platform.node(),
         "strategy": strategy,
@@ -130,8 +131,71 @@ def build_engine_and_probe() -> tuple[Engine, Dict]:
         "sqlalchemy_url": sqlalchemy_url,
         "embedded_path": embedded,
         "sync_url": _mask(url_remote),
-        "libsql_ver": _lib_ver,
+        "libsql_ver": _lib_ver,  # may be stale inside module; patch below fixes it
     }
+
+    # Patch dbg with the actual installed package version and import path
+    import importlib
+    import importlib.metadata as _im
+    try:
+        _lib_ver_pkg = _im.version("sqlalchemy-libsql")
+    except Exception:
+        _lib_ver_pkg = None
+    try:
+        _lib_mod = importlib.import_module("sqlalchemy_libsql")
+        _lib_file = getattr(_lib_mod, "__file__", "n/a")
+    except Exception:
+        _lib_file = "n/a"
+
+    dbg["libsql_ver"] = _lib_ver_pkg or dbg.get("libsql_ver", "n/a")
+    dbg["libsql_module_file"] = _lib_file
+    # ==== END: dbg dict + enhanced libsql version patch ====
+    # ==== BEGIN: engine connect + return (append after dbg patch) ====
+    try:
+        eng = create_engine(sqlalchemy_url, connect_args=connect_args)
+        last_err = None
+        for attempt in range(5):
+            try:
+                with eng.connect() as cx:
+                    cx.execute(sql_text("SELECT 1"))
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                time.sleep(0.6 * (attempt + 1))
+        if last_err:
+            raise last_err
+    except Exception as e:
+        st.error(f"DB init failed: {e.__class__.__name__}: {e}")
+        with st.expander("Diagnostics"):
+            st.json(dbg)
+        st.stop()
+
+    return eng, dbg
+# ==== END: SINGLE canonical engine builder (drop-in, final) ====
+    # Create engine and prove connectivity with simple backoff (Cloud can be slow to boot)
+    try:
+        eng = create_engine(sqlalchemy_url, connect_args=connect_args)
+        last_err = None
+        for attempt in range(5):
+            try:
+                with eng.connect() as cx:
+                    cx.execute(sql_text("SELECT 1"))
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                time.sleep(0.6 * (attempt + 1))
+        if last_err:
+            raise last_err
+    except Exception as e:
+        st.error(f"DB init failed: {e.__class__.__name__}: {e}")
+        with st.expander("Diagnostics"):
+            st.json(dbg)
+        st.stop()
+
+    return eng, dbg
+# ==== END: SINGLE canonical engine builder (drop-in) ====
 
     # Create engine and prove connectivity with simple backoff (Cloud can be slow to boot)
     try:
