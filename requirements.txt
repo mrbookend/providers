@@ -7,3 +7,4 @@ python-magic==0.4.27 ; platform_system != "Windows"
 XlsxWriter==3.2.0
 python-dateutil>=2.9.0
 requests>=2.31.0
+
