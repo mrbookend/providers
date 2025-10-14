@@ -7,5 +7,3 @@ requests>=2.31.0
 XlsxWriter==3.2.0
 python-magic-bin==0.4.14 ; platform_system == "Windows"
 python-magic==0.4.27 ; platform_system != "Windows"
-
-
