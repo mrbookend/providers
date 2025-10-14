@@ -123,37 +123,43 @@ def _has_streamlit_ctx() -> bool:
 def build_engine_and_probe() -> tuple[Engine, dict]:
     # Base engine always opens the local file using libsql dialect
     engine_url = f"sqlite+libsql:///{_EMBEDDED_PATH}"
+
+    # Diagnostics payload (use unified libsql version)
     dbg = {
         "host": platform.node() or "localhost",
         "strategy": _DB_STRATEGY,
         "python": sys.version.split()[0],
         "sqlalchemy_url": engine_url,
         "embedded_path": _EMBEDDED_PATH,
-        "libsql_ver": (_lib_ver if isinstance(_lib_ver, str) else "unknown"),
+        "libsql_ver": _lib_ver_display,   # <-- fixed to use unified version
         "sync_url_scheme": "",
     }
 
     connect_args: Dict[str, Any] = {}
 
     if _DB_STRATEGY in ("embedded_replica", "replica", "sync"):
-        valid_sync = _validate_sync_url(_TURSO_URL)
+        valid_sync = _validate_sync_url(_TURSO_URL)          # will raise if scheme wrong
         dbg["sync_url_scheme"] = valid_sync.split("://", 1)[0] + "://"
         connect_args["sync_url"] = valid_sync
-        connect_args["auth_token"] = _TURSO_TOKEN
+        if _TURSO_TOKEN:
+            connect_args["auth_token"] = _TURSO_TOKEN
+
     elif _DB_STRATEGY == "remote_only":
         # Direct remote, no embedded file
         engine_url = _validate_sync_url(_TURSO_URL)
         dbg["sqlalchemy_url"] = engine_url
         dbg["embedded_path"] = ""
         dbg["sync_url_scheme"] = "libsql://"
-        connect_args["auth_token"] = _TURSO_TOKEN
+        if _TURSO_TOKEN:
+            connect_args["auth_token"] = _TURSO_TOKEN
+
     else:
         # "embedded_only": no sync
         dbg["sync_url_scheme"] = ""
 
     eng = create_engine(engine_url, connect_args=connect_args)
 
-    # Quick sanity check (will raise early if driver/url is bad)
+    # Quick sanity check (fail fast if driver/URL is wrong)
     with eng.connect() as cx:
         cx.exec_driver_sql("PRAGMA journal_mode")
 
