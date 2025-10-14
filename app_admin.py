@@ -1,36 +1,31 @@
+# ==== BEGIN: FILE TOP (imports + page_config + Early Boot) ====
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+# -------- Imports (single source of truth) --------
 import os
+import sys
+import time
 import re
 import hmac
-import time
 import uuid
+import platform
 from datetime import datetime
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Any, Optional, Iterable
 
 import pandas as pd
+import requests
+import sqlalchemy
 import streamlit as st
 from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
 
-# ---- register libsql dialect (must be AFTER "import streamlit as st") ----
-try:
-    import sqlalchemy_libsql  # ensures 'sqlite+libsql' dialect is registered
-except Exception:
-    pass
-# ---- end dialect registration ----
+# ---- Streamlit page config MUST be first Streamlit call ----
+st.set_page_config(page_title="Vendors Admin", layout="wide", initial_sidebar_state="expanded")
 
-# ==== BEGIN: Early Boot Diagnostics (status + secrets + engine) ====
-import sys
-import platform
-import pandas as pd
-import streamlit as st
-import sqlalchemy
-import requests
-from sqlalchemy import create_engine, text as sql_text
+# -------- Early Boot (dialect/version, secrets, engine builder, diagnostics) --------
 
-# Try to register the libsql dialect; report version if present
+# libsql dialect version (ok if missing)
 try:
     import sqlalchemy_libsql as _lib
     _lib_ver = getattr(_lib, "__version__", "unknown")
@@ -38,6 +33,21 @@ except Exception:
     _lib = None
     _lib_ver = "n/a"
 
+# Strategy + required secrets
+_strategy = str(st.secrets.get("DB_STRATEGY", "embedded_replica")).strip().lower()
+_required = ["TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN"] if _strategy == "embedded_replica" else []
+_missing = [k for k in _required if not st.secrets.get(k)]
+if _missing:
+    st.error(f"Missing required secrets for strategy '{_strategy}': " + ", ".join(_missing))
+    st.stop()
+
+# Helper: mask long strings for display
+def _mask(u: str | None, keep: int = 16) -> str:
+    if not u:
+        return ""
+    return u[:keep] + "…" if len(u) > keep else u
+
+# One version banner (safe if SHOW_STATUS missing)
 if bool(st.secrets.get("SHOW_STATUS", True)):
     try:
         st.sidebar.info(
@@ -51,48 +61,32 @@ if bool(st.secrets.get("SHOW_STATUS", True)):
     except Exception as _e:
         st.sidebar.warning(f"Version banner failed: {_e}")
 
-# Strategy + required secrets
-_strategy = str(st.secrets.get("DB_STRATEGY", "embedded_replica")).strip().lower()
-
-# Only require Turso creds when we plan to sync
-_required = []
-if _strategy == "embedded_replica":
-    _required += ["TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN"]
-
-_missing = [k for k in _required if not st.secrets.get(k)]
-if _missing:
-    st.error(f"Missing required secrets for strategy '{_strategy}': " + ", ".join(_missing))
-    st.stop()
-
-# Helper: mask long strings for display
-def _mask(u: str | None, keep: int = 16) -> str:
-    if not u:
-        return ""
-    return u[:keep] + "…" if len(u) > keep else u
-# ==== BEGIN: build_engine_and_probe (drop-in) ====
-def build_engine_and_probe():
+# ---- SINGLE canonical engine builder ----
+def build_engine_and_probe() -> tuple[Engine, Dict]:
+    """
+    Canonical engine builder used across the entire app.
+    - Strategy 'embedded_replica' requires TURSO_DATABASE_URL and TURSO_AUTH_TOKEN
+    - Otherwise falls back to plain sqlite using the same embedded path
+    """
     url_remote = st.secrets.get("TURSO_DATABASE_URL")
     token      = st.secrets.get("TURSO_AUTH_TOKEN")
-    # Default path if not provided
+    # Default path if not provided (works locally and on Streamlit Cloud)
     embedded   = st.secrets.get("EMBEDDED_DB_PATH", "/mount/src/providers/vendors-embedded.db")
     strategy   = _strategy
 
-    # Force absolute path in Cloud
+    # Force absolute path on Cloud (defensive)
     if not embedded.startswith("/"):
         embedded = "/mount/src/providers/" + embedded.lstrip("/")
 
-    # ==== BEGIN: Ensure embedded DB dir exists ====
-    # (prevents sqlite 'unable to open database file' if parent dir is missing)
+    # Ensure embedded DB dir exists (avoid 'unable to open database file')
     try:
         os.makedirs(os.path.dirname(embedded), exist_ok=True)
     except Exception as _mkerr:
         st.warning(f"Could not ensure embedded DB dir exists: {_mkerr.__class__.__name__}: {_mkerr}")
-    # ==== END: Ensure embedded DB dir exists ====
 
     use_replica = (strategy == "embedded_replica") and bool(url_remote and token)
 
     if use_replica:
-        # Fail early with a helpful message if the dialect isn't available
         if _lib is None:
             st.error(
                 "sqlalchemy_libsql module is not available, but strategy requires it "
@@ -100,7 +94,9 @@ def build_engine_and_probe():
             )
             st.stop()
         sqlalchemy_url = f"sqlite+libsql:///{embedded}"
-        connect_args = {"sync_url": url_remote, "auth_token": token}
+        # normalize sync_url (drop query params like ?secure=true)
+        sync_url = (url_remote or "").split("?", 1)[0]
+        connect_args = {"sync_url": sync_url, "auth_token": token}
     else:
         sqlalchemy_url = f"sqlite:///{embedded}"
         connect_args = {}
@@ -115,10 +111,21 @@ def build_engine_and_probe():
         "libsql_ver": _lib_ver,
     }
 
+    # Create engine and prove connectivity with simple backoff (Cloud can be slow to boot)
     try:
         eng = create_engine(sqlalchemy_url, connect_args=connect_args)
-        with eng.connect() as cx:
-            cx.execute(sql_text("SELECT 1"))
+        last_err = None
+        for attempt in range(5):
+            try:
+                with eng.connect() as cx:
+                    cx.execute(sql_text("SELECT 1"))
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                time.sleep(0.6 * (attempt + 1))
+        if last_err:
+            raise last_err
     except Exception as e:
         st.error(f"DB init failed: {e.__class__.__name__}: {e}")
         with st.expander("Diagnostics"):
@@ -126,40 +133,34 @@ def build_engine_and_probe():
         st.stop()
 
     return eng, dbg
-# ==== END: build_engine_and_probe (drop-in) ====
 
-# ==== BEGIN: Safe engine build + Post-boot smoke test ====
-# Safe engine build
+# ---- Single safe engine build + diagnostics (DO NOT DUPLICATE) ----
 try:
     ENGINE, _DB_DBG = build_engine_and_probe()
     st.sidebar.success("DB ready")
+    # Stash into session for reuse
+    st.session_state["ENGINE"] = ENGINE
+    st.session_state["DB_DBG"] = _DB_DBG
 except Exception as e:
     st.error(f"Database init failed: {e.__class__.__name__}: {e}")
     st.stop()
 
-# ==== BEGIN: Safe engine build + Post-boot smoke test ====
-# Safe engine build
-try:
-    ENGINE, _DB_DBG = build_engine_and_probe()
-    st.sidebar.success("DB ready")
-except Exception as e:
-    st.error(f"Database init failed: {e.__class__.__name__}: {e}")
-    st.stop()
-
-# Post-boot smoke test (shows on page)
+# Post-boot diagnostics (visible on page)
 with st.expander("Boot diagnostics (ENGINE + secrets)"):
     st.json(_DB_DBG)
 
 st.success("App reached post-boot marker ✅")  # proves we got past engine init
 
-# Optional: prove basic DB query works; show row count or a friendly message
-try:
-    with ENGINE.connect() as cx:
-        cnt = cx.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar_one()
-    st.info(f"Vendors table row count: {cnt}")
-except Exception as e:
-    st.warning(f"Quick vendors count failed: {e.__class__.__name__}: {e}")
-# ==== END: Safe engine build + Post-boot smoke test ====
+# Optional: quick vendors count (gate with SHOW_COUNT; table may not exist yet)
+if bool(st.secrets.get("SHOW_COUNT", True)):
+    try:
+        with ENGINE.connect() as cx:
+            cnt = cx.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar_one()
+        st.info(f"Vendors table row count: {cnt}")
+    except Exception as e:
+        st.warning(f"Quick vendors count failed: {e.__class__.__name__}: {e}")
+
+# ==== END: FILE TOP (imports + page_config + Early Boot) ====
 
 # -----------------------------
 # Helpers
@@ -167,6 +168,8 @@ except Exception as e:
 def _as_bool(v, default: bool = False) -> bool:
     if v is None:
         return default
+    if isinstance(v, bool):
+        return v
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 def _get_secret(name: str, default: str | None = None) -> str | None:
@@ -267,7 +270,8 @@ def _apply_add_reset_if_needed():
         st.session_state["add_form_version"] += 1
 
 def _queue_add_form_reset():
-    st.session_state["_pending_add_reset"] = True
+    st.session_state["_pending_add_form_reset"] = True
+    st.session_state["_pending_add_reset"] = True  # keep original flag for compatibility
 
 # Edit form keys
 EDIT_FORM_KEYS = [
@@ -304,7 +308,6 @@ def _apply_edit_reset_if_needed():
     Also clear the selection (edit_vendor_id) and the selectbox key so the UI returns to “— Select —”.
     """
     if st.session_state.get("_pending_edit_reset"):
-        # Clear all edit fields AND selection
         for k in EDIT_FORM_KEYS:
             if k == "edit_vendor_id":
                 st.session_state[k] = None
@@ -312,7 +315,6 @@ def _apply_edit_reset_if_needed():
                 st.session_state[k] = None
             else:
                 st.session_state[k] = ""
-        # Also drop the legacy selectbox label key if present (from older builds)
         if "edit_provider_label" in st.session_state:
             del st.session_state["edit_provider_label"]
         st.session_state["_pending_edit_reset"] = False
@@ -334,7 +336,6 @@ def _init_delete_form_defaults():
 def _apply_delete_reset_if_needed():
     if st.session_state.get("_pending_delete_reset"):
         st.session_state["delete_vendor_id"] = None
-        # Also clear the delete selectbox UI key so it resets to sentinel
         if "delete_provider_label" in st.session_state:
             del st.session_state["delete_provider_label"]
         st.session_state["_pending_delete_reset"] = False
@@ -363,6 +364,7 @@ def _set_empty(*keys: str) -> None:
 def _reset_select(key: str, sentinel: str = "— Select —") -> None:
     st.session_state[key] = sentinel
 
+
 # ---------- Category / Service queued reset helpers ----------
 def _init_cat_defaults():
     st.session_state.setdefault("cat_form_version", 0)
@@ -370,10 +372,8 @@ def _init_cat_defaults():
 
 def _apply_cat_reset_if_needed():
     if st.session_state.get("_pending_cat_reset"):
-        # Clear text inputs
         st.session_state["cat_add"] = ""
         st.session_state["cat_rename"] = ""
-        # Reset selects by dropping keys so they render at sentinel on next run
         for k in ("cat_old", "cat_del", "cat_reassign_to"):
             if k in st.session_state:
                 del st.session_state[k]
@@ -402,36 +402,8 @@ def _queue_svc_reset():
 
 
 # -----------------------------
-# Page config & CSS
+# Page CSS (no second page_config here)
 # -----------------------------
-PAGE_TITLE = _resolve_str("page_title", "Vendors Admin") or "Vendors Admin"
-SIDEBAR_STATE = _resolve_str("sidebar_state", "expanded") or "expanded"
-st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=SIDEBAR_STATE)
-
-# ==== BEGIN: Version Banner (place right after st.set_page_config) ====
-import sys, requests, sqlalchemy
-import pandas as pd  # REQUIRED for pd.__version__
-try:
-    import sqlalchemy_libsql
-    _libsql_ver = getattr(sqlalchemy_libsql, "__version__", "unknown")
-except Exception:
-    _libsql_ver = "n/a"
-
-# Toggle via secrets: SHOW_STATUS = true/false
-if bool(st.secrets.get("SHOW_STATUS", True)):
-    try:
-        st.sidebar.info(
-            f"Versions | py {sys.version.split()[0]} | "
-            f"streamlit {st.__version__} | "
-            f"pandas {pd.__version__} | "
-            f"SA {sqlalchemy.__version__} | "
-            f"libsql {_libsql_ver} | "
-            f"requests {requests.__version__}"
-        )
-    except Exception as _e:
-        st.sidebar.warning(f"Version banner failed: {_e}")
-# ==== END: Version Banner ====
-
 LEFT_PAD_PX = int(_resolve_str("page_left_padding_px", "40") or "40")
 
 st.markdown(
@@ -449,126 +421,9 @@ st.markdown(
 
 
 # -----------------------------
-# Admin sign-in gate (deterministic toggle)
-# -----------------------------
-# Code defaults (lowest precedence) — change here if you want different code-fallbacks.
-DISABLE_ADMIN_PASSWORD_DEFAULT = True      # True = bypass, False = require password
-ADMIN_PASSWORD_DEFAULT = "admin"
-
-DISABLE_LOGIN = _resolve_bool("DISABLE_ADMIN_PASSWORD", DISABLE_ADMIN_PASSWORD_DEFAULT)
-ADMIN_PASSWORD = (_resolve_str("ADMIN_PASSWORD", ADMIN_PASSWORD_DEFAULT) or "").strip()
-
-if DISABLE_LOGIN:
-    # Bypass gate
-    pass
-else:
-    if not ADMIN_PASSWORD:
-        st.error("ADMIN_PASSWORD is not set (Secrets/Env).")
-        st.stop()
-    if "auth_ok" not in st.session_state:
-        st.session_state["auth_ok"] = False
-    if not st.session_state["auth_ok"]:
-        st.subheader("Admin sign-in")
-        pw = st.text_input("Password", type="password", key="admin_pw")
-        if st.button("Sign in"):
-            if _ct_equals((pw or "").strip(), ADMIN_PASSWORD):
-                st.session_state["auth_ok"] = True
-                st.rerun()
-            else:
-                st.error("Incorrect password.")
-        st.stop()
-
-
-# -----------------------------
-# DB helpers
+# DB helpers (schema + IO)
 # -----------------------------
 REQUIRED_VENDOR_COLUMNS: List[str] = ["business_name", "category"]  # service optional
-
-
-def build_engine() -> Tuple[Engine, Dict]:
-    """Prefer Turso/libsql embedded replica; otherwise local sqlite if FORCE_LOCAL=1."""
-    info: Dict = {}
-
-    url = (_resolve_str("TURSO_DATABASE_URL", "") or "").strip()
-    token = (_resolve_str("TURSO_AUTH_TOKEN", "") or "").strip()
-    embedded_path = os.path.abspath(_resolve_str("EMBEDDED_DB_PATH", "vendors-embedded.db") or "vendors-embedded.db")
-
-    if not url:
-        # No remote configured → plain local file DB
-        eng = create_engine(
-            "sqlite:///vendors.db",
-            pool_pre_ping=True,
-            pool_recycle=300,
-            pool_reset_on_return="commit",
-        )
-        info.update(
-            {
-                "using_remote": False,
-                "sqlalchemy_url": "sqlite:///vendors.db",
-                "dialect": eng.dialect.name,
-                "driver": getattr(eng.dialect, "driver", ""),
-            }
-        )
-        return eng, info
-
-    # Embedded replica: local file that syncs to your remote Turso DB
-    try:
-        # Normalize sync_url: embedded REQUIRES libsql:// (no sqlite+libsql, no ?secure=true)
-        raw = url
-        if raw.startswith("sqlite+libsql://"):
-            host = raw.split("://", 1)[1].split("?", 1)[0]  # drop any ?secure=true
-            sync_url = f"libsql://{host}"
-        else:
-            sync_url = raw.split("?", 1)[0]  # already libsql://...
-
-        eng = create_engine(
-            f"sqlite+libsql:///{embedded_path}",
-            connect_args={
-                "auth_token": token,
-                "sync_url": sync_url,
-            },
-            pool_pre_ping=True,
-            pool_recycle=300,
-            pool_reset_on_return="commit",
-        )
-        with eng.connect() as c:
-            c.exec_driver_sql("select 1;")
-
-        info.update(
-            {
-                "using_remote": True,
-                "strategy": "embedded_replica",
-                "sqlalchemy_url": f"sqlite+libsql:///{embedded_path}",
-                "dialect": eng.dialect.name,
-                "driver": getattr(eng.dialect, "driver", ""),
-                "sync_url": sync_url,
-            }
-        )
-        return eng, info
-
-    except Exception as e:
-        info["remote_error"] = f"{e}"
-        allow_local = _as_bool(os.getenv("FORCE_LOCAL"), False)
-        if allow_local:
-            eng = create_engine(
-                "sqlite:///vendors.db",
-                pool_pre_ping=True,
-                pool_recycle=300,
-                pool_reset_on_return="commit",
-            )
-            info.update(
-                {
-                    "using_remote": False,
-                    "sqlalchemy_url": "sqlite:///vendors.db",
-                    "dialect": eng.dialect.name,
-                    "driver": getattr(eng.dialect, "driver", ""),
-                }
-            )
-            return eng, info
-
-        st.error("Remote DB unavailable and FORCE_LOCAL is not set. Aborting to protect data.")
-        raise
-
 
 def ensure_schema(engine: Engine) -> None:
     stmts = [
@@ -604,7 +459,6 @@ def ensure_schema(engine: Engine) -> None:
         "CREATE INDEX IF NOT EXISTS idx_vendors_cat ON vendors(category)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_bus ON vendors(business_name)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_kw  ON vendors(keywords)",
-        # helpful functional indexes for case-insensitive operations used by UI
         "CREATE INDEX IF NOT EXISTS idx_vendors_bus_lower ON vendors(lower(business_name))",
         "CREATE INDEX IF NOT EXISTS idx_vendors_cat_lower ON vendors(lower(category))",
         "CREATE INDEX IF NOT EXISTS idx_vendors_svc_lower ON vendors(lower(service))",
@@ -801,20 +655,28 @@ def _execute_append_only(
 
 
 # -----------------------------
-# UI
+# SINGLE engine wiring for rest of app
 # -----------------------------
-engine, engine_info = build_engine()
+engine: Engine = ENGINE
+engine_info: Dict = _DB_DBG
+
+# Ensure schema on the single engine
 ensure_schema(engine)
 
-# Apply WAL PRAGMAs for local SQLite (not libsql driver)
+# Apply WAL PRAGMAs for local SQLite (NOT for libsql driver)
 try:
-    if not engine_info.get("using_remote", False) and engine_info.get("driver", "") != "libsql":
+    if engine.dialect.name == "sqlite" and getattr(engine.dialect, "driver", "") != "libsql":
         with engine.begin() as _conn:
             _conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
             _conn.exec_driver_sql("PRAGMA synchronous=NORMAL;")
 except Exception:
+    # Best-effort; ignore if unavailable
     pass
 
+
+# -----------------------------
+# UI
+# -----------------------------
 _tabs = st.tabs(
     [
         "Browse Vendors",
@@ -907,7 +769,7 @@ with _tabs[1]:
         with col1:
             st.text_input("Provider *", key="add_business_name")
 
-            # Category select—options include "" placeholder; we DON'T pass index when using session state
+            # Category select—options include "" placeholder; do NOT pass index when using session_state defaults
             _add_cat_options = [""] + (cats or [])
             if (st.session_state.get("add_category") or "") not in _add_cat_options:
                 st.session_state["add_category"] = ""
@@ -1138,7 +1000,6 @@ with _tabs[1]:
             key="delete_provider_label",
         )
         if sel_label_del != "— Select —":
-            # map back to id cheaply
             rev = { _fmt_vendor(i): i for i in ids }
             st.session_state["delete_vendor_id"] = int(rev.get(sel_label_del))
         else:
@@ -1620,4 +1481,3 @@ with _tabs[5]:
             "timestamp_nulls": {"created_at": int(created_at_nulls), "updated_at": int(updated_at_nulls)},
         }
     )
-
