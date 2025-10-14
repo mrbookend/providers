@@ -23,15 +23,19 @@ except Exception:
 
 # ==== BEGIN: Early Boot Diagnostics (status + secrets + engine) ====
 import sys
+import platform
 import pandas as pd
 import streamlit as st
 import sqlalchemy
+import requests
 from sqlalchemy import create_engine, text as sql_text
 
+# Try to register the libsql dialect; report version if present
 try:
     import sqlalchemy_libsql as _lib
     _lib_ver = getattr(_lib, "__version__", "unknown")
 except Exception:
+    _lib = None
     _lib_ver = "n/a"
 
 if bool(st.secrets.get("SHOW_STATUS", True)):
@@ -41,28 +45,35 @@ if bool(st.secrets.get("SHOW_STATUS", True)):
             f"streamlit {st.__version__} | "
             f"pandas {pd.__version__} | "
             f"SA {sqlalchemy.__version__} | "
-            f"libsql {_lib_ver}"
+            f"libsql {_lib_ver} | "
+            f"requests {requests.__version__}"
         )
     except Exception as _e:
-        st.sidebar.warning(f"Version banner failed: { _e }")
+        st.sidebar.warning(f"Version banner failed: {_e}")
 
+# Strategy + required secrets
 _strategy = str(st.secrets.get("DB_STRATEGY", "embedded_replica")).strip().lower()
-_required = ["EMBEDDED_DB_PATH"]
+
+# Only require Turso creds when we plan to sync
+_required = []
 if _strategy == "embedded_replica":
     _required += ["TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN"]
 
 _missing = [k for k in _required if not st.secrets.get(k)]
 if _missing:
-    st.error("Missing required secrets: " + ", ".join(_missing))
+    st.error(f"Missing required secrets for strategy '{_strategy}': " + ", ".join(_missing))
     st.stop()
 
+# Helper: mask long strings for display
 def _mask(u: str | None, keep: int = 16) -> str:
-    if not u: return ""
+    if not u:
+        return ""
     return u[:keep] + "…" if len(u) > keep else u
 
 def build_engine_and_probe():
     url_remote = st.secrets.get("TURSO_DATABASE_URL")
     token      = st.secrets.get("TURSO_AUTH_TOKEN")
+    # Default path if not provided
     embedded   = st.secrets.get("EMBEDDED_DB_PATH", "/mount/src/providers/vendors-embedded.db")
     strategy   = _strategy
 
@@ -70,15 +81,26 @@ def build_engine_and_probe():
     if not embedded.startswith("/"):
         embedded = "/mount/src/providers/" + embedded.lstrip("/")
 
-    if strategy == "sqlite_only" or not (url_remote and token):
-        sqlalchemy_url = f"sqlite:///{embedded}"
-        connect_args = {}
-    else:
+    use_replica = (strategy == "embedded_replica") and bool(url_remote and token)
+
+    if use_replica:
+        # Fail early with a helpful message if the dialect isn't available
+        if _lib is None:
+            st.error(
+                "sqlalchemy_libsql module is not available, but strategy requires it "
+                "(embedded_replica). Check requirements and reinstall."
+            )
+            st.stop()
         sqlalchemy_url = f"sqlite+libsql:///{embedded}"
         connect_args = {"sync_url": url_remote, "auth_token": token}
+    else:
+        sqlalchemy_url = f"sqlite:///{embedded}"
+        connect_args = {}
 
     dbg = {
+        "host": platform.node(),
         "strategy": strategy,
+        "python": sys.version.split()[0],
         "sqlalchemy_url": sqlalchemy_url,
         "embedded_path": embedded,
         "sync_url": _mask(url_remote),
@@ -97,8 +119,14 @@ def build_engine_and_probe():
 
     return eng, dbg
 
-ENGINE, _DB_DBG = build_engine_and_probe()
-st.sidebar.success("DB ready")
+# Safe engine build
+try:
+    ENGINE, _DB_DBG = build_engine_and_probe()
+    st.sidebar.success("DB ready")
+except Exception as e:
+    st.error(f"Database init failed: {e.__class__.__name__}: {e}")
+    st.stop()
+
 # ==== BEGIN: Post-boot smoke test (shows on page) ====
 with st.expander("Boot diagnostics (ENGINE + secrets)"):
     st.json(_DB_DBG)
@@ -113,6 +141,7 @@ try:
 except Exception as e:
     st.warning(f"Quick vendors count failed: {e.__class__.__name__}: {e}")
 # ==== END: Post-boot smoke test ====
+# ==== END: Early Boot Diagnostics (status + secrets + engine) ====
 
 # -----------------------------
 # Helpers
