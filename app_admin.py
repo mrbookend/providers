@@ -21,6 +21,85 @@ except Exception:
     pass
 # ---- end dialect registration ----
 
+# ==== BEGIN: Early Boot Diagnostics (status + secrets + engine) ====
+import sys
+import pandas as pd
+import streamlit as st
+import sqlalchemy
+from sqlalchemy import create_engine, text as sql_text
+
+try:
+    import sqlalchemy_libsql as _lib
+    _lib_ver = getattr(_lib, "__version__", "unknown")
+except Exception:
+    _lib_ver = "n/a"
+
+if bool(st.secrets.get("SHOW_STATUS", True)):
+    try:
+        st.sidebar.info(
+            f"Versions | py {sys.version.split()[0]} | "
+            f"streamlit {st.__version__} | "
+            f"pandas {pd.__version__} | "
+            f"SA {sqlalchemy.__version__} | "
+            f"libsql {_lib_ver}"
+        )
+    except Exception as _e:
+        st.sidebar.warning(f"Version banner failed: { _e }")
+
+_strategy = str(st.secrets.get("DB_STRATEGY", "embedded_replica")).strip().lower()
+_required = ["EMBEDDED_DB_PATH"]
+if _strategy == "embedded_replica":
+    _required += ["TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN"]
+
+_missing = [k for k in _required if not st.secrets.get(k)]
+if _missing:
+    st.error("Missing required secrets: " + ", ".join(_missing))
+    st.stop()
+
+def _mask(u: str | None, keep: int = 16) -> str:
+    if not u: return ""
+    return u[:keep] + "…" if len(u) > keep else u
+
+def build_engine_and_probe():
+    url_remote = st.secrets.get("TURSO_DATABASE_URL")
+    token      = st.secrets.get("TURSO_AUTH_TOKEN")
+    embedded   = st.secrets.get("EMBEDDED_DB_PATH", "/mount/src/providers/vendors-embedded.db")
+    strategy   = _strategy
+
+    # Force absolute path in Cloud
+    if not embedded.startswith("/"):
+        embedded = "/mount/src/providers/" + embedded.lstrip("/")
+
+    if strategy == "sqlite_only" or not (url_remote and token):
+        sqlalchemy_url = f"sqlite:///{embedded}"
+        connect_args = {}
+    else:
+        sqlalchemy_url = f"sqlite+libsql:///{embedded}"
+        connect_args = {"sync_url": url_remote, "auth_token": token}
+
+    dbg = {
+        "strategy": strategy,
+        "sqlalchemy_url": sqlalchemy_url,
+        "embedded_path": embedded,
+        "sync_url": _mask(url_remote),
+        "libsql_ver": _lib_ver,
+    }
+
+    try:
+        eng = create_engine(sqlalchemy_url, connect_args=connect_args)
+        with eng.connect() as cx:
+            cx.execute(sql_text("SELECT 1"))
+    except Exception as e:
+        st.error(f"DB init failed: {e.__class__.__name__}: {e}")
+        with st.expander("Diagnostics"):
+            st.json(dbg)
+        st.stop()
+
+    return eng, dbg
+
+ENGINE, _DB_DBG = build_engine_and_probe()
+st.sidebar.success("DB ready")
+# ==== END: Early Boot Diagnostics (status + secrets + engine) ====
 
 # -----------------------------
 # Helpers
