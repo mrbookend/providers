@@ -124,6 +124,8 @@ def _mask_sync_url(u: str) -> str:
 # --- Canonical engine builder (embedded replica with libsql sync) ---
 def build_engine_and_probe() -> tuple[Engine, dict]:
     engine_url = f"sqlite+libsql:///{_EMBEDDED_PATH}"
+
+    # Diagnostics payload (use unified libsql version)
     dbg = {
         "host": platform.node() or "localhost",
         "strategy": _DB_STRATEGY,
@@ -1516,3 +1518,4 @@ with _tabs[5]:
             "timestamp_nulls": {"created_at": int(created_at_nulls), "updated_at": int(updated_at_nulls)},
         }
     )
+
