@@ -1,15 +1,11 @@
-# Core runtime
-streamlit>=1.38,<1.41          # fix typo; keep your upper pin
+streamlit>=1.38,<1.41
 pandas==2.2.2
-sqlalchemy>=2.0.30,<2.1        # use lowercase; ensure >=2.0.30
-sqlalchemy-libsql>=0.2.2,<0.3  # bump from 0.2.0 to ≥0.2.2
-
-# Utilities
+sqlalchemy>=2.0.30,<2.1
+sqlalchemy-libsql==0.2.0
 python-dateutil>=2.9.0
 requests>=2.31.0
 XlsxWriter==3.2.0
-
-# cross-platform libmagic
 python-magic-bin==0.4.14 ; platform_system == "Windows"
-python-magic==0.4.27     ; platform_system != "Windows"
+python-magic==0.4.27 ; platform_system != "Windows"
+
 
