@@ -33,13 +33,34 @@ except Exception:
     _lib = None
     _lib_ver = "n/a"
 
-# Strategy + required secrets
-_strategy = str(st.secrets.get("DB_STRATEGY", "embedded_replica")).strip().lower()
-_required = ["TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN"] if _strategy == "embedded_replica" else []
-_missing = [k for k in _required if not st.secrets.get(k)]
-if _missing:
-    st.error(f"Missing required secrets for strategy '{_strategy}': " + ", ".join(_missing))
-    st.stop()
+# ==== BEGIN: Strategy + required secrets (validated) ====
+_DB_STRATEGY   = str(st.secrets.get("DB_STRATEGY", "embedded_replica")).strip().lower()
+_TURSO_URL     = str(st.secrets.get("TURSO_DATABASE_URL", "")).strip()
+_TURSO_TOKEN   = str(st.secrets.get("TURSO_AUTH_TOKEN", "")).strip()
+_EMBEDDED_PATH = str(st.secrets.get("EMBEDDED_DB_PATH", "/mount/src/providers/vendors-embedded.db")).strip()
+
+def _validate_sync_url(u: str) -> str:
+    if not u:
+        raise ValueError("TURSO_DATABASE_URL is empty; expected libsql://<host>")
+    if u.startswith("sqlite+libsql://"):
+        raise ValueError("TURSO_DATABASE_URL must start with libsql:// (not sqlite+libsql://)")
+    scheme = u.split("://", 1)[0].lower()
+    if scheme != "libsql":
+        raise ValueError(f"Unsupported sync URL scheme: {scheme}:// (expected libsql://)")
+    return u
+
+# Hard-require secrets only when we intend to sync
+if _DB_STRATEGY in ("embedded_replica", "replica", "sync"):
+    try:
+        _validate_sync_url(_TURSO_URL)
+    except Exception as _e:
+        st.error(f"Bad TURSO_DATABASE_URL: {type(_e).__name__}: {_e}")
+        st.stop()
+    if not _TURSO_TOKEN:
+        st.error("Missing required secret: TURSO_AUTH_TOKEN")
+        st.stop()
+# ==== END: Strategy + required secrets (validated) ====
+
 
 # Helper: mask long strings for display
 def _mask(u: str | None, keep: int = 16) -> str:
@@ -82,6 +103,48 @@ if bool(st.secrets.get("SHOW_STATUS", True)):
     except Exception as _e:
         st.sidebar.warning(f"Version banner failed: {_e}")
 # ==== END: Version Banner (enhanced) ====
+
+# ==== BEGIN: Engine builder (embedded replica w/ libsql sync) ====
+def build_engine_and_probe() -> tuple[Engine, dict]:
+    # Base engine always opens the local file using libsql dialect
+    engine_url = f"sqlite+libsql:///{_EMBEDDED_PATH}"
+    dbg = {
+        "host": platform.node() or "localhost",
+        "strategy": _DB_STRATEGY,
+        "python": sys.version.split()[0],
+        "sqlalchemy_url": engine_url,
+        "embedded_path": _EMBEDDED_PATH,
+        "libsql_ver": (_lib_ver if isinstance(_lib_ver, str) else "unknown"),
+        "sync_url_scheme": "",
+    }
+
+    connect_args: Dict[str, Any] = {}
+
+    if _DB_STRATEGY in ("embedded_replica", "replica", "sync"):
+        valid_sync = _validate_sync_url(_TURSO_URL)
+        dbg["sync_url_scheme"] = valid_sync.split("://", 1)[0] + "://"
+        connect_args["sync_url"] = valid_sync
+        connect_args["auth_token"] = _TURSO_TOKEN
+    elif _DB_STRATEGY == "remote_only":
+        # Direct remote, no embedded file
+        engine_url = _validate_sync_url(_TURSO_URL)
+        dbg["sqlalchemy_url"] = engine_url
+        dbg["embedded_path"] = ""
+        dbg["sync_url_scheme"] = "libsql://"
+        connect_args["auth_token"] = _TURSO_TOKEN
+    else:
+        # "embedded_only": no sync
+        dbg["sync_url_scheme"] = ""
+
+    eng = create_engine(engine_url, connect_args=connect_args)
+
+    # Quick sanity check (will raise early if driver/url is bad)
+    with eng.connect() as cx:
+        cx.exec_driver_sql("PRAGMA journal_mode")
+
+    return eng, dbg
+# ==== END: Engine builder (embedded replica w/ libsql sync) ====
+
 
 # ==== BEGIN: SINGLE canonical engine builder (drop-in) ====
 def build_engine_and_probe() -> tuple[Engine, Dict]:
@@ -220,31 +283,33 @@ def build_engine_and_probe() -> tuple[Engine, Dict]:
 
     return eng, dbg
 
-# ---- Single safe engine build + diagnostics (DO NOT DUPLICATE) ----
+# ==== BEGIN: Engine init + diagnostics (call once) ====
 try:
     ENGINE, _DB_DBG = build_engine_and_probe()
     st.sidebar.success("DB ready")
-    # Stash into session for reuse
+
+    # Stash for reuse
     st.session_state["ENGINE"] = ENGINE
     st.session_state["DB_DBG"] = _DB_DBG
+
+    with st.expander("Boot diagnostics (ENGINE + secrets)"):
+        st.json(_DB_DBG)
+
+    st.success("App reached post-boot marker ✅")  # proves we got past engine init
+
+    # Optional: quick vendors count (gate with SHOW_COUNT; table may not exist yet)
+    if bool(st.secrets.get("SHOW_COUNT", True)):
+        try:
+            with ENGINE.connect() as cx:
+                cnt = cx.exec_driver_sql("SELECT COUNT(*) FROM vendors").scalar()
+            st.info(f"Vendors table row count: {cnt}")
+        except Exception as _e:
+            st.warning(f"Quick vendors count failed: {type(_e).__name__}: {_e}")
+
 except Exception as e:
     st.error(f"Database init failed: {e.__class__.__name__}: {e}")
     st.stop()
-
-# Post-boot diagnostics (visible on page)
-with st.expander("Boot diagnostics (ENGINE + secrets)"):
-    st.json(_DB_DBG)
-
-st.success("App reached post-boot marker ✅")  # proves we got past engine init
-
-# Optional: quick vendors count (gate with SHOW_COUNT; table may not exist yet)
-if bool(st.secrets.get("SHOW_COUNT", True)):
-    try:
-        with ENGINE.connect() as cx:
-            cnt = cx.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar_one()
-        st.info(f"Vendors table row count: {cnt}")
-    except Exception as e:
-        st.warning(f"Quick vendors count failed: {e.__class__.__name__}: {e}")
+# ==== END: Engine init + diagnostics (call once) ====
 
 # ==== END: FILE TOP (imports + page_config + Early Boot) ====
 
