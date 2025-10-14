@@ -20,12 +20,25 @@ try:
 except Exception:
     pass
 
-# -----------------------------------------------------------------------------
-# Page config MUST be the first Streamlit call
-# Use a safe default title; other options (padding/width/state) will be taken
-# from Secrets later. Streamlit requires set_page_config before other st.* calls.
-# -----------------------------------------------------------------------------
-st.set_page_config(page_title="HCR Providers — Read-Only", layout="wide", initial_sidebar_state="collapsed")
+# ==== BEGIN: Boot-time page title from Secrets ====
+
+def _safe_title(v, default="HCR Providers — Read-Only"):
+    try:
+        s = str(v).strip()
+        return re.sub(r"[\x00-\x1f]+", "", s) or default
+    except Exception:
+        return default
+try:
+    _title_secret = st.secrets.get("page_title", "HCR Providers — Read-Only")
+except Exception:
+    _title_secret = "HCR Providers — Read-Only"
+
+st.set_page_config(
+    page_title=_safe_title(_title_secret),
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
+# ==== END: Boot-time page title from Secrets ====
 
 # =============================
 # Utilities
