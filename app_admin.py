@@ -64,6 +64,7 @@ if _DB_STRATEGY in ("embedded_replica", "replica", "sync"):
 _strategy = _DB_STRATEGY
 # ==== END: Strategy + required secrets (validated) ====
 
+
 # Helper: mask long strings for display
 def _mask(u: str | None, keep: int = 16) -> str:
     if not u:
