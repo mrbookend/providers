@@ -271,6 +271,7 @@ st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=S
 
 # ==== BEGIN: Version Banner (place right after st.set_page_config) ====
 import sys, requests, sqlalchemy
+import pandas as pd  # REQUIRED for pd.__version__
 try:
     import sqlalchemy_libsql
     _libsql_ver = getattr(sqlalchemy_libsql, "__version__", "unknown")
@@ -291,7 +292,6 @@ if bool(st.secrets.get("SHOW_STATUS", True)):
     except Exception as _e:
         st.sidebar.warning(f"Version banner failed: {_e}")
 # ==== END: Version Banner ====
-
 
 LEFT_PAD_PX = int(_resolve_str("page_left_padding_px", "40") or "40")
 
