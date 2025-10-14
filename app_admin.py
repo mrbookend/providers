@@ -271,13 +271,14 @@ st.set_page_config(page_title=PAGE_TITLE, layout="wide", initial_sidebar_state=S
 
 # ==== BEGIN: Version Banner (place right after st.set_page_config) ====
 import sys, requests, sqlalchemy
-import pandas as pd  # <-- REQUIRED for pd.__version__
+import pandas as pd  # REQUIRED for pd.__version__
 try:
     import sqlalchemy_libsql
     _libsql_ver = getattr(sqlalchemy_libsql, "__version__", "unknown")
 except Exception:
     _libsql_ver = "n/a"
 
+# Toggle via secrets: SHOW_STATUS = true/false
 if bool(st.secrets.get("SHOW_STATUS", True)):
     try:
         st.sidebar.info(
