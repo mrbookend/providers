@@ -790,7 +790,6 @@ def delete_service_with_reassign(engine: Engine, tgt: str, repl: str) -> None:
         conn.execute(sql_text("UPDATE vendors SET service=:repl WHERE service=:tgt"), {"repl": repl, "tgt": tgt})
         conn.execute(sql_text("DELETE FROM services WHERE name=:tgt"), {"tgt": tgt})
 
-
 # Ensure schema on boot
 ensure_schema(ENGINE)
 
