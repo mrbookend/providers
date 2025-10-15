@@ -599,7 +599,7 @@ def main():
     RENDER_MAX_ROWS = int(_to_int(_get_secret("READONLY_RENDER_MAX_ROWS", 1000), 1000))
     df_render = df_disp_sorted.head(RENDER_MAX_ROWS)
     capped = len(df_disp_sorted) > RENDER_MAX_ROWS
-    render_note = "" if not capped else f" (showing first {len(df_render)} of {len(df_disp_sorted)})"
+    render_note = "" if not capped else f" (showing first {len[df_render]} of {len(df_disp_sorted)})"  # noqa: E231
     # ==== END ====
 
     # Downloads (use sorted view)
@@ -659,22 +659,19 @@ def main():
     with st.expander("Help / Tips", expanded=False):
         st.markdown(_get_help_md(), unsafe_allow_html=True)
 
-    # ---- Table ----
+    # ---- Table / Empty state ----
     if df_render.empty:
-        st.info("No matching providers. Tip: try fewer words.")
-
-    # ---- Quick Stats ----
-    with st.expander("Quick Stats", expanded=False):
-        try:
-            nrows, ncols = df_render.shape
-            st.write({
-                "rows_displayed": int(nrows),
-                "columns": int(ncols),
-                "unique_categories": int(df_render["category"].nunique() if "category" in df_render else 0),
-                "unique_services": int(df_render["service"].nunique() if "service" in df_render else 0),
-            })
-        except Exception as _e:
-            st.caption(f"Stats unavailable: {_e}")
+        st.info("No matching providers. Tip: try fewer words or clear the URL ?q= parameter.")
+        if st.button("Reset search", type="secondary"):
+            st.session_state["q"] = ""
+            try:
+                if hasattr(st, "query_params"):
+                    st.query_params["q"] = ""
+            except Exception:
+                pass
+            st.rerun()
+    else:
+        st.markdown(_build_table_html(df_render, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
 
     # ---- Diagnostics ----
     if SHOW_DIAGS:
