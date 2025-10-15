@@ -561,60 +561,39 @@ def main():
         st.info("No provider rows to display yet.")
         return
 
-# ==== BEGIN: Search row (input + Clear button on same line; rerun-safe) ====
-# Initialize from query param once (if present and no session value yet)
-if "q" not in st.session_state:
+    # ==== BEGIN: Search row (NO Clear button; rerun-safe; no top-level writes) ====
+    # Seed default from ?q= only for first render; do NOT write to session_state here
+    qp_q = ""
     try:
-        qp = getattr(st, "query_params", {})
-        if isinstance(qp, dict) and qp.get("q"):
-            st.session_state["q"] = str(qp.get("q"))
+        if hasattr(st, "query_params"):
+            qp_q = str(st.query_params.get("q") or "")
+    except Exception:
+        qp_q = ""
+
+    q = st.text_input(
+        "Search",
+        key="q",
+        value=st.session_state.get("q", qp_q),
+        label_visibility="collapsed",
+        placeholder="Search e.g., plumb, roofing, \"Inverness\", phone digits…",
+        help="Case-insensitive; keyword hits appear first; matches across all columns. URL ?q= stays in sync.",
+    )
+
+    # Keep ?q= synchronized while typing (only update if changed to avoid rerun loops)
+    try:
+        if hasattr(st, "query_params"):
+            existing_q = ""
+            try:
+                # st.query_params behaves like a dict in 1.40
+                existing_q = (st.query_params.get("q") or "")
+            except Exception:
+                existing_q = ""
+            desired_q = st.session_state.get("q", "")
+            if existing_q != desired_q:
+                st.query_params["q"] = desired_q
     except Exception:
         pass
-
-c_search, c_clearbtn = st.columns([12, 2])
-with c_search:
-    st.text_input(
-        "Search",  # accessible label; collapsed in UI
-        key="q",
-        label_visibility="collapsed",
-        placeholder="Search e.g., plumb, roofing, 'Inverness', phone digits, etc.",
-        help="Case-insensitive; keyword hits appear first; matches across all columns.",
-    )
-with c_clearbtn:
-    if st.button("Clear", type="secondary", use_container_width=True):
-        st.session_state["q"] = ""
-        try:
-            if hasattr(st, "query_params"):
-                st.query_params["q"] = ""
-        except Exception:
-            pass
-        st.rerun()
-
-q = st.session_state.get("q", "")
-
-# Keep ?q= synchronized while typing (best effort; safe if unsupported)
-try:
-    if hasattr(st, "query_params"):
-        st.query_params["q"] = q or ""
-except Exception:
-    pass
-# ==== END: Search row ====
-
-q = st.session_state.get("q", "")
-
-# Keep ?q= synchronized while typing (only update if changed to avoid rerun loop)
-try:
-    if hasattr(st, "query_params"):
-        existing_q = ""
-        try:
-            existing_q = st.query_params.get("q") or ""
-        except Exception:
-            existing_q = ""
-        desired_q = q or ""
-        if existing_q != desired_q:
-            st.query_params["q"] = desired_q
-except Exception:
-    pass
+    # ==== END: Search row ====
 
     # ---- Filtering (prioritize computed_keywords if enabled) ----
     if READONLY_PRIORITIZE_CKW:
@@ -739,7 +718,7 @@ except Exception:
 
     # ---- Scrollable full table ----
     if df_render.empty:
-        st.info("No matching providers. Tip: try fewer words or click Clear to reset the search.")
+        st.info("No matching providers. Tip: try fewer words.")
     else:
         st.markdown(_build_table_html(df_render, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
 
