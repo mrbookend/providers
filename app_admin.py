@@ -29,6 +29,10 @@ st.set_page_config(page_title="Vendors Admin", layout="wide", initial_sidebar_st
 import importlib
 import importlib.metadata as _im
 _lib_file = "n/a"
+import importlib
+import importlib.metadata as _im
+
+_lib_file = "n/a"
 try:
     _lib_ver_display = _im.version("sqlalchemy-libsql")
 except Exception:
@@ -41,6 +45,8 @@ try:
     _lib_mod = importlib.import_module("sqlalchemy_libsql")
     _lib_file = getattr(_lib_mod, "__file__", "n/a")
 except Exception:
+    pass
+
     pass
 
 # --- Streamlit run-context guard (prevents SessionInfo errors during import) ---
@@ -1520,4 +1526,30 @@ if _SHOW_DEBUG:
                 "timestamp_nulls": {"created_at": int(created_at_nulls), "updated_at": int(updated_at_nulls)},
             }
         )
+
+        # --- Null timestamp counts (quick sanity) ---
+        created_at_nulls = conn.execute(
+            sql_text("SELECT COUNT(*) FROM vendors WHERE created_at IS NULL OR created_at=''")
+        ).scalar() or 0
+        updated_at_nulls = conn.execute(
+            sql_text("SELECT COUNT(*) FROM vendors WHERE updated_at IS NULL OR updated_at=''")
+        ).scalar() or 0
+
+        counts = {
+            "vendors": conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0,
+            "categories": conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar() or 0,
+            "services": conn.execute(sql_text("SELECT COUNT(*) FROM services")).scalar() or 0,
+        }
+
+    st.subheader("DB Probe")
+    st.json(
+        {
+            "vendors_columns": [c[1] for c in vendors_cols],
+            "categories_columns": [c[1] for c in categories_cols],
+            "services_columns": [c[1] for c in services_cols],
+            "counts": counts,
+            "vendors_indexes": vendors_indexes,
+            "timestamp_nulls": {"created_at": int(created_at_nulls), "updated_at": int(updated_at_nulls)},
+        }
+    )
 
