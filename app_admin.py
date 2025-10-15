@@ -1543,6 +1543,136 @@ with _tabs[4]:
             except Exception as e:
                 st.error(f"Integrity test failed: {type(e).__name__}: {e}")
     # ==== END: Maintenance ▸ Integrity Self-Test ====
+# -- Helper: resolve the current CKW version (prefers DB meta; falls back to secret or default) --
+def _ckw_current_version() -> str:
+    ver = None
+    try:
+        with ENGINE.begin() as cx:
+            cx.exec_driver_sql(
+                "CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL DEFAULT '')"
+            )
+            row = cx.execute(sql_text("SELECT v FROM meta WHERE k='CKW_VERSION'")).fetchone()
+            if row and str(row[0]).strip():
+                ver = str(row[0]).strip()
+    except Exception:
+        pass
+    if not ver:
+        try:
+            ver = str(st.secrets.get("CKW_VERSION", "")).strip()
+        except Exception:
+            ver = ""
+    return ver or "2025-10-15"
+
+CURRENT_VER = _ckw_current_version()
+
+# Optional: create an index that speeds up the sweep query (noop if already there)
+try:
+    _exec_with_retry(ENGINE, "CREATE INDEX IF NOT EXISTS idx_vendors_ckw_status ON vendors(ckw_locked, ckw_version)")
+except Exception:
+    pass
+
+# -- Cheap feature detection: prefer build_computed_keywords if present; else use _kw_from_row_fast --
+_has_builder = "build_computed_keywords" in globals()
+
+colA, colB = st.columns([1, 1])
+with colA:
+    limit = st.number_input("Batch size per commit", min_value=50, max_value=1000, value=300, step=50)
+with colB:
+    run_btn = st.button("Recompute all (unlocked & stale)", type="primary")
+
+if run_btn:
+    try:
+        # Pull the minimal fields needed for compute
+        with ENGINE.connect() as cx:
+            rows = cx.execute(
+                sql_text(
+                    """
+                    SELECT id, category, service, business_name
+                      FROM vendors
+                     WHERE IFNULL(ckw_locked,0)=0
+                       AND (
+                             ckw_version IS NULL OR ckw_version <> :ver
+                             OR computed_keywords IS NULL OR TRIM(computed_keywords) = ''
+                           )
+                    """
+                ),
+                {"ver": CURRENT_VER},
+            ).fetchall()
+
+        total = len(rows)
+        if total == 0:
+            st.success("All rows are up-to-date (no unlocked & stale records).")
+        else:
+            st.write(f"Found **{total}** row(s) to update…")
+            done = 0
+            batch: list[dict] = []
+
+            # Progress bar for UX; avoid flooding the UI
+            pbar = st.progress(0)
+
+            for r in rows:
+                rid = int(r[0]); cat = r[1] or ""; svc = r[2] or ""; bn = r[3] or ""
+                if _has_builder:
+                    ckw = build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
+                else:
+                    # Fallback uses the legacy fast builder if the new one isn’t present
+                    ckw = _kw_from_row_fast({"category": cat, "service": svc, "business_name": bn})
+
+                batch.append({"id": rid, "ckw": ckw, "ver": CURRENT_VER})
+
+                if len(batch) >= int(limit):
+                    _exec_with_retry(
+                        ENGINE,
+                        "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id",
+                        batch,
+                    )
+                    done += len(batch)
+                    batch.clear()
+                    pbar.progress(min(done / total, 1.0))
+
+            # Flush tail
+            if batch:
+                _exec_with_retry(
+                    ENGINE,
+                    "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id",
+                    batch,
+                )
+                done += len(batch)
+                pbar.progress(1.0)
+
+            st.success(f"Recomputed keywords for {done} row(s).")
+    except Exception as e:
+        st.error(f"Bulk recompute failed: {type(e).__name__}: {e}")
+
+st.divider()
+# (Optional) Tiny convenience: bump version in DB so future recomputes target new logic automatically.
+bump = st.button("Bump CKW version (DB meta)", help="Increases CKW_VERSION in the meta table; does not recompute by itself.")
+if bump:
+    try:
+        old = CURRENT_VER
+        # naive bump: append or increment a .X suffix
+        import re as _re
+        m = _re.match(r"^(.*?)(?:\.(\d+))?$", old)
+        if m:
+            base = (m.group(1) or old) or "2025-10-15"
+            inc = int(m.group(2) or "0") + 1
+            new_ver = f"{base}.{inc}"
+        else:
+            new_ver = f"{old}.1"
+        with ENGINE.begin() as cx:
+            cx.exec_driver_sql(
+                "CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL DEFAULT '')"
+            )
+            cx.execute(
+                sql_text(
+                    "INSERT INTO meta(k,v) VALUES('CKW_VERSION', :v) "
+                    "ON CONFLICT(k) DO UPDATE SET v=excluded.v"
+                ),
+                {"v": new_ver},
+            )
+        st.success(f"CKW_VERSION bumped: {old} → {new_ver}")
+    except Exception as e:
+        st.error(f"Version bump failed: {type(e).__name__}: {e}")
 
     # ====== Computed Keywords tools (F) ======
     st.subheader("Computed Keywords")
