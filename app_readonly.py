@@ -548,17 +548,15 @@ def main():
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
     df_disp_all = filtered_full[disp_cols]
 
-    # ----- Controls Row: Help (left) + Downloads/Sort/Clear (right) -----
+    # ----- Controls Row: Downloads/Sort/Clear -----
     # Exclude 'website' from sort choices (HTML anchors)
     sortable_cols = [c for c in disp_cols if c != "website"]
     sort_labels = [_label_for(c) for c in sortable_cols]
 
-    c_help, c_spacer, c_csv, c_xlsx, c_sort, c_order, c_clear = st.columns([2, 6, 2, 2, 2, 2, 1])
+    # ==== BEGIN: Controls Row (no Help button) ====
+    c_csv, c_xlsx, c_sort, c_order, c_clear = st.columns([2, 2, 2, 2, 1])
+    # ==== END: Controls Row (no Help button) ====
 
-    with c_help:
-        open_help = st.button("Help / Tips", type="primary", use_container_width=True)
-    if open_help:
-        st.session_state["help_open"] = True
 
     with c_clear:
         if st.button("×", help="Clear search", type="secondary", use_container_width=True):
@@ -626,7 +624,6 @@ def main():
             use_container_width=True,
             disabled=csv_df.empty,
         )
-
     # Prepare XLSX with plain URLs
     excel_df = df_disp_sorted.copy()
     if "website" in excel_df.columns and "website_url" in filtered_full.columns and not excel_df.empty:
@@ -653,14 +650,10 @@ def main():
     # Always show tiny result count caption (keeps users oriented)
     st.caption(f"{len(df_disp_sorted)} result(s). Viewport rows: {VIEWPORT_ROWS}")
 
-    # -------- Help / Tips expander (controlled by session_state + Close button) --------
-    def _close_help():
-        st.session_state["help_open"] = False
-
-    with st.expander("Provider Help / Tips", expanded=st.session_state.get("help_open", False)):
+    # ==== BEGIN: Help / Tips (expander only) ====
+    with st.expander("Help / Tips", expanded=False):
         st.markdown(_get_help_md(), unsafe_allow_html=True)
-        st.divider()
-        st.button("Close", type="secondary", on_click=_close_help)
+    # ==== END: Help / Tips (expander only) ====
 
     # ---------------- Scrollable full table (admin-style viewport) ----------------
     if df_disp_sorted.empty:
