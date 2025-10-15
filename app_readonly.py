@@ -600,13 +600,22 @@ except Exception:
     pass
 # ==== END: Search row ====
 
+q = st.session_state.get("q", "")
 
-    # Keep ?q= synchronized while typing (best effort; safe if unsupported)
-    try:
-        if hasattr(st, "query_params"):
-            st.query_params["q"] = q or ""
-    except Exception:
-        pass
+# Keep ?q= synchronized while typing (only update if changed to avoid rerun loop)
+try:
+    if hasattr(st, "query_params"):
+        existing_q = ""
+        try:
+            # st.query_params behaves like a dict in Streamlit 1.40
+            existing_q = st.query_params.get("q") or ""
+        except Exception:
+            existing_q = ""
+        desired_q = q or ""
+        if existing_q != desired_q:
+            st.query_params["q"] = desired_q
+except Exception:
+    pass
 
     # ---- Filtering (prioritize computed_keywords if enabled) ----
     if READONLY_PRIORITIZE_CKW:
