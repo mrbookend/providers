@@ -555,14 +555,14 @@ with c_clearbtn:
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
     df_disp_all = filtered_full[disp_cols]
 
-    # ----- Controls Row: Downloads/Sort/Clear -----
+    # ----- Controls Row: Downloads/Sort -----
     # Exclude 'website' from sort choices (HTML anchors)
     sortable_cols = [c for c in disp_cols if c != "website"]
     sort_labels = [_label_for(c) for c in sortable_cols]
-# ==== BEGIN: Controls Row (no Help, no Clear — Clear moved next to Search) ====
-c_csv, c_xlsx, c_sort, c_order = st.columns([2, 2, 2, 2])
-# ==== END: Controls Row (no Help, no Clear — Clear moved next to Search) ====
 
+    # ==== BEGIN: Controls Row (no Help, no Clear — Clear moved next to Search) ====
+    c_csv, c_xlsx, c_sort, c_order = st.columns([2, 2, 2, 2])
+    # ==== END: Controls Row (no Help, no Clear — Clear moved next to Search) ====
 
     # Safe defaults when no sortable cols
     if len(sortable_cols) == 0:
