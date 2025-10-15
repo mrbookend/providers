@@ -55,3 +55,6 @@ vendors-embedded.db
 *.db-shm
 *.db-wal
 .streamlit/secrets.toml
+
+# Local backups
+app_admin_backup_*.py
