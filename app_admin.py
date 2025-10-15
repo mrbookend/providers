@@ -174,22 +174,52 @@ try:
     ENGINE, _DB_DBG = build_engine_and_probe()
 
     if _has_streamlit_ctx():
-        st.sidebar.success("DB ready")
-        # Always show a simple success marker
-        
-        # Optional, gated debug panel
+        # Sidebar notice only when debugging (keeps sidebar hidden in prod)
+        if _SHOW_DEBUG:
+            st.sidebar.success("DB ready")
+
+        # Optional: boot diagnostics + quick COUNT (debug-only)
         if _SHOW_DEBUG:
             with st.expander("Boot diagnostics (ENGINE + secrets)"):
                 st.json(_DB_DBG)
-            # Optional: quick vendors count (table may not exist yet)
-            try:
-                with ENGINE.connect() as cx:
-                    cnt = cx.exec_driver_sql("SELECT COUNT(*) FROM vendors").scalar()
-                st.info(f"Vendors table row count: {cnt}")
-            except Exception as _e:
-                st.warning(f"Quick vendors count failed: {type(_e).__name__}: {_e}")
+
+            if bool(st.secrets.get("SHOW_COUNT", True)):
+                try:
+                    with ENGINE.connect() as cx:
+                        cnt = cx.exec_driver_sql("SELECT COUNT(*) FROM vendors").scalar()
+                    st.info(f"Vendors table row count: {int(cnt or 0)}")
+                except Exception as _e:
+                    st.warning(f"Quick vendors count failed: {type(_e).__name__}: {_e}")
+
+        # Success marker only when debugging
+        if _SHOW_DEBUG:
+            st.success("App reached post-boot marker ✅")
+
+        # Stash for reuse (UI context only)
+        st.session_state["ENGINE"] = ENGINE
+        st.session_state["DB_DBG"]  = _DB_DBG
+
+        if _SHOW_DEBUG:
+            with st.expander("Boot diagnostics (ENGINE + secrets)"):
+                st.json(_DB_DBG)
+
+            if bool(st.secrets.get("SHOW_COUNT", True)):
+                try:
+                    with ENGINE.connect() as cx:
+                        cnt = cx.exec_driver_sql("SELECT COUNT(*) FROM vendors").scalar()
+                    st.info(f"Vendors table row count: {int(cnt or 0)}")
+                except Exception as _e:
+                    st.warning(f"Quick vendors count failed: {type(_e).__name__}: {_e}")
+
+        # Success banner hidden in prod; show only when debugging
+        if _SHOW_DEBUG:
+            st.success("App reached post-boot marker ✅")
+
+        # Stash for reuse (UI context only)
+        st.session_state["ENGINE"] = ENGINE
+        st.session_state["DB_DBG"] = _DB_DBG
     else:
-        # Headless import path: avoid touching session/UI; still validate engine
+        # Headless import path: validate engine without touching UI/session
         with ENGINE.connect() as cx:
             cx.exec_driver_sql("SELECT 1")
 
@@ -198,7 +228,10 @@ except Exception as e:
         st.error(f"Database init failed: {e.__class__.__name__}: {e}")
         st.stop()
     else:
+        # Re-raise in headless contexts so CI/linters fail loud
         raise
+# --- End: Single guarded init + diagnostics ---
+
 
 # ==== END: Admin boot bundle (version banner + guards + engine + init) ====
 
