@@ -13,6 +13,8 @@ import platform
 from datetime import datetime
 from typing import List, Tuple, Dict, Any, Optional, Iterable
 
+import math
+import json
 import pandas as pd
 import requests
 import sqlalchemy
@@ -220,7 +222,7 @@ def _as_bool(v, default: bool = False) -> bool:
         return v
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
-def _get_secret(name: str, default: str | None = None) -> str | None:
+def _get_secret(name: str, default: str | None = None) -> str | dict | None:
     """Prefer Streamlit secrets, fallback to environment, then default."""
     try:
         if name in st.secrets:
@@ -237,6 +239,28 @@ def _resolve_bool(name: str, code_default: bool) -> bool:
 def _resolve_str(name: str, code_default: str | None) -> str | None:
     v = _get_secret(name, None)
     return v if v is not None else code_default
+
+def _resolve_json(name: str, code_default: dict | None = None) -> dict:
+    raw = _get_secret(name, None)
+    if raw is None:
+        return code_default or {}
+    if isinstance(raw, dict):
+        return raw
+    # try JSON then TOML (py3.11 tomllib)
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    try:
+        import tomllib as _toml  # py311+
+    except Exception:
+        _toml = None
+    if _toml:
+        try:
+            return _toml.loads(raw)
+        except Exception:
+            pass
+    return code_default or {}
 
 def _ct_equals(a: str, b: str) -> bool:
     """Constant-time string compare for secrets."""
@@ -293,8 +317,118 @@ def _fetch_with_retry(engine: Engine, sql: str, params: Dict | None = None, *, t
             raise
 
 
-# ---------- Form state helpers (Add / Edit / Delete) ----------
-# Add form keys
+# -----------------------------
+# Computed Keywords (rules + TF-IDF lite)
+# -----------------------------
+CKW_RULES: dict = _resolve_json("CKW_RULES", {})  # supports TOML table or JSON string
+
+_STOPWORDS = {
+    "the","and","inc","llc","ltd","co","corp","company","services","service","of","for","to","in","on","at","a","an"
+}
+
+def _canon_tokenize(text: str) -> list[str]:
+    if not text:
+        return []
+    # normalize punctuation -> space, lower, split, filter short/stopwords
+    s = re.sub(r"[^\w]+", " ", text, flags=re.UNICODE).lower()
+    toks = [t.strip() for t in s.split() if t.strip()]
+    return [t for t in toks if len(t) > 2 and t not in _STOPWORDS]
+
+def _rules_for_pair(rules: dict, category: str, service: str) -> list[str]:
+    cat = (category or "").strip().lower()
+    svc = (service or "").strip().lower()
+    out: list[str] = []
+    if not isinstance(rules, dict):
+        return out
+    # Exact pair first, then category-only, then global defaults
+    if cat and svc and cat in rules and isinstance(rules[cat], dict):
+        svcd = rules[cat].get(svc)
+        if isinstance(svcd, list):
+            out.extend([str(x).strip().lower() for x in svcd if str(x).strip()])
+    if cat in rules and isinstance(rules[cat], list):
+        out.extend([str(x).strip().lower() for x in rules[cat] if str(x).strip()])
+    if "_global" in rules and isinstance(rules["_global"], list):
+        out.extend([str(x).strip().lower() for x in rules["_global"] if str(x).strip()])
+    # dedupe preserve order
+    seen = set()
+    uniq = []
+    for t in out:
+        if t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    return uniq
+
+def _join_kw(terms: list[str], max_terms: int = 16) -> str:
+    # unique, preserve order; cap term count
+    seen = set()
+    out = []
+    for t in terms:
+        tt = t.strip().lower()
+        if not tt or tt in seen:
+            continue
+        seen.add(tt)
+        out.append(tt)
+        if len(out) >= max_terms:
+            break
+    return ", ".join(out)
+
+def _kw_from_row_fast(row: dict) -> str:
+    """Near-zero-cost compute for hot path (Add/Edit)."""
+    seeds = _rules_for_pair(CKW_RULES, row.get("category") or "", row.get("service") or "")
+    explicit = [t.strip().lower() for t in (row.get("keywords") or "").split(",") if t.strip()]
+    # add a few tokens from key fields (no corpus math)
+    base = " ".join([
+        str(row.get("business_name") or ""),
+        str(row.get("notes") or ""),
+        str(row.get("service") or ""),
+        str(row.get("category") or ""),
+        str(row.get("address") or ""),
+    ])
+    toks = _canon_tokenize(base)
+    # prefer seeds + explicit first; then tokens
+    terms = seeds + explicit + toks
+    return _join_kw(terms)
+
+def _tfidf_terms_for_group(df_group: pd.DataFrame, top_k: int = 8) -> list[str]:
+    """Compute light TF-IDF over a group (category, service)."""
+    docs: list[list[str]] = []
+    for _, r in df_group.iterrows():
+        txt = " ".join([
+            str(r.get("business_name") or ""),
+            str(r.get("notes") or ""),
+            str(r.get("keywords") or ""),
+            str(r.get("address") or ""),
+        ])
+        docs.append(_canon_tokenize(txt))
+    if not docs:
+        return []
+
+    # DF: document frequency
+    dfreq: Dict[str, int] = {}
+    for d in docs:
+        for t in set(d):
+            dfreq[t] = dfreq.get(t, 0) + 1
+
+    N = len(docs)
+    # term frequency per corpus
+    tf: Dict[str, int] = {}
+    for d in docs:
+        for t in d:
+            tf[t] = tf.get(t, 0) + 1
+
+    # tf-idf score (sum over corpus)
+    scores: Dict[str, float] = {}
+    for t, tfc in tf.items():
+        idf = math.log((N + 1) / (1 + dfreq.get(t, 1))) + 1.0
+        scores[t] = float(tfc) * idf
+
+    # top-k non-stopwords
+    ordered = sorted(((t, s) for t, s in scores.items() if t not in _STOPWORDS), key=lambda x: x[1], reverse=True)
+    return [t for (t, _) in ordered[:top_k]]
+
+# -----------------------------
+# Form state helpers (Add / Edit / Delete)
+# -----------------------------
 ADD_FORM_KEYS = [
     "add_business_name", "add_category", "add_service", "add_contact_name",
     "add_phone", "add_address", "add_website", "add_notes", "add_keywords",
@@ -321,7 +455,6 @@ def _queue_add_form_reset():
     st.session_state["_pending_add_form_reset"] = True
     st.session_state["_pending_add_reset"] = True  # keep original flag for compatibility
 
-# Edit form keys
 EDIT_FORM_KEYS = [
     "edit_vendor_id", "edit_business_name", "edit_category", "edit_service",
     "edit_contact_name", "edit_phone", "edit_address", "edit_website",
@@ -371,7 +504,6 @@ def _apply_edit_reset_if_needed():
 def _queue_edit_form_reset():
     st.session_state["_pending_edit_reset"] = True
 
-# Delete form keys
 DELETE_FORM_KEYS = ["delete_vendor_id"]
 
 def _init_delete_form_defaults():
@@ -492,6 +624,7 @@ def ensure_schema(engine: Engine) -> None:
           website TEXT,
           notes TEXT,
           keywords TEXT,
+          computed_keywords TEXT,
           created_at TEXT,
           updated_at TEXT,
           updated_by TEXT
@@ -513,11 +646,12 @@ def ensure_schema(engine: Engine) -> None:
         """,
     ]
 
-    # Note: include a plain index on service to speed cascades
+    # Note: include an index on computed_keywords and service/category helpers
     index_ddls = [
         "CREATE INDEX IF NOT EXISTS idx_vendors_cat ON vendors(category)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_bus ON vendors(business_name)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_kw  ON vendors(keywords)",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_ckw ON vendors(computed_keywords)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_bus_lower ON vendors(lower(business_name))",
         "CREATE INDEX IF NOT EXISTS idx_vendors_cat_lower ON vendors(lower(category))",
         "CREATE INDEX IF NOT EXISTS idx_vendors_svc_lower ON vendors(lower(service))",
@@ -536,7 +670,7 @@ def ensure_schema(engine: Engine) -> None:
                     f"TABLE DDL failed: {e.__class__.__name__}: {e}\n--- SQL ---\n{stmt}\n"
                 ) from e
 
-        # --- 2) Indexes: best-effort (warn, do not abort app) ---
+        # --- 2) Indexes (first pass): best-effort (warn, do not abort app) ---
         for s in index_ddls:
             stmt = s.strip()
             try:
@@ -559,8 +693,15 @@ def ensure_schema(engine: Engine) -> None:
             except Exception as e:
                 if '_SHOW_DEBUG' in globals() and _SHOW_DEBUG and '_has_streamlit_ctx' in globals() and _has_streamlit_ctx():
                     st.warning(f"ALTER skipped: {table}.{col}: {e.__class__.__name__}: {e}")
-        # Example (disabled):
-        # _add_column_if_missing("vendors", "computed_keywords TEXT")
+
+        # ensure computed_keywords exists even on old DBs
+        _add_column_if_missing("vendors", "computed_keywords TEXT")
+        # retry index if it failed before column existed
+        try:
+            conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS idx_vendors_ckw ON vendors(computed_keywords)")
+        except Exception as e:
+            if '_SHOW_DEBUG' in globals() and _SHOW_DEBUG and '_has_streamlit_ctx' in globals() and _has_streamlit_ctx():
+                st.warning(f"Index (ckw) create skipped: {type(e).__name__}: {e}")
 
 
 def _normalize_phone(val: str | None) -> str:
@@ -599,6 +740,7 @@ def load_df(engine: Engine) -> pd.DataFrame:
         "website",
         "notes",
         "keywords",
+        "computed_keywords",
         "service",
         "created_at",
         "updated_at",
@@ -611,8 +753,10 @@ def load_df(engine: Engine) -> pd.DataFrame:
     return df
 
 
-def list_names(engine: Engine, table: str) -> list[str]:
-    with engine.begin() as conn:
+# ---- cached taxonomy lookups (no Engine arg; safe to cache) ----
+@st.cache_data(ttl=30, show_spinner=False)
+def list_names(table: str) -> list[str]:
+    with ENGINE.begin() as conn:
         rows = conn.execute(sql_text(f"SELECT name FROM {table} ORDER BY lower(name)")).fetchall()
     return [r[0] for r in rows]
 
@@ -646,6 +790,8 @@ def delete_service_with_reassign(engine: Engine, tgt: str, repl: str) -> None:
         conn.execute(sql_text("UPDATE vendors SET service=:repl WHERE service=:tgt"), {"repl": repl, "tgt": tgt})
         conn.execute(sql_text("DELETE FROM services WHERE name=:tgt"), {"tgt": tgt})
 
+# Ensure schema on boot
+ensure_schema(ENGINE)
 
 # -----------------------------
 # UI
@@ -670,7 +816,7 @@ with _tabs[0]:
     if "_blob" not in df.columns:
         parts = [
             df.get(c, pd.Series("", index=df.index)).astype(str)
-            for c in ["business_name", "category", "service", "contact_name", "phone", "address", "website", "notes", "keywords"]
+            for c in ["business_name", "category", "service", "contact_name", "phone", "address", "website", "notes", "keywords", "computed_keywords"]
         ]
         df["_blob"] = pd.concat(parts, axis=1).agg(" ".join, axis=1).str.lower()
 
@@ -702,6 +848,7 @@ with _tabs[0]:
         "website",
         "notes",
         "keywords",
+        "computed_keywords",
     ]
 
     vdf = filtered[view_cols].rename(columns={"phone_fmt": "phone"})
@@ -715,7 +862,8 @@ with _tabs[0]:
             "business_name": st.column_config.TextColumn("Provider"),
             "website": st.column_config.LinkColumn("website"),
             "notes": st.column_config.TextColumn(width=420),
-            "keywords": st.column_config.TextColumn(width=300),
+            "keywords": st.column_config.TextColumn(width=260),
+            "computed_keywords": st.column_config.TextColumn(width=260),
         },
     )
 
@@ -734,8 +882,8 @@ with _tabs[1]:
     _init_add_form_defaults()
     _apply_add_reset_if_needed()  # apply queued reset BEFORE creating widgets
 
-    cats = list_names(ENGINE, "categories")
-    servs = list_names(ENGINE, "services")
+    cats = list_names("categories")
+    servs = list_names("services")
 
     add_form_key = f"add_vendor_form_{st.session_state['add_form_version']}"
     with st.form(add_form_key, clear_on_submit=False):
@@ -773,7 +921,7 @@ with _tabs[1]:
 
         business_name = (st.session_state["add_business_name"] or "").strip()
         category      = (st.session_state["add_category"] or "").strip()
-        service       = (st.session_state["add_service"] or "").strip()
+        service       = (st.session_state["add_service"] or "").strip(" /;,")
         contact_name  = (st.session_state["add_contact_name"] or "").strip()
         phone_norm    = _normalize_phone(st.session_state["add_phone"])
         address       = (st.session_state["add_address"] or "").strip()
@@ -789,13 +937,21 @@ with _tabs[1]:
         else:
             try:
                 now = datetime.utcnow().isoformat(timespec="seconds")
+                ckw = _kw_from_row_fast({
+                    "business_name": business_name,
+                    "category": category,
+                    "service": service,
+                    "notes": notes,
+                    "address": address,
+                    "keywords": keywords,
+                })
                 _exec_with_retry(
                     ENGINE,
                     """
                     INSERT INTO vendors(category, service, business_name, contact_name, phone, address,
-                                        website, notes, keywords, created_at, updated_at, updated_by)
+                                        website, notes, keywords, computed_keywords, created_at, updated_at, updated_by)
                     VALUES(:category, NULLIF(:service, ''), :business_name, :contact_name, :phone, :address,
-                           :website, :notes, :keywords, :now, :now, :user)
+                           :website, :notes, :keywords, :computed_keywords, :now, :now, :user)
                     """,
                     {
                         "category": category,
@@ -807,6 +963,7 @@ with _tabs[1]:
                         "website": website,
                         "notes": notes,
                         "keywords": keywords,
+                        "computed_keywords": ckw,
                         "now": now,
                         "user": os.getenv("USER", "admin"),
                     },
@@ -881,8 +1038,8 @@ with _tabs[1]:
             with col1:
                 st.text_input("Provider *", key="edit_business_name")
 
-                cats = list_names(ENGINE, "categories")
-                servs = list_names(ENGINE, "services")
+                cats = list_names("categories")
+                servs = list_names("services")
 
                 _edit_cat_options = [""] + (cats or [])
                 if (st.session_state.get("edit_category") or "") not in _edit_cat_options:
@@ -916,6 +1073,7 @@ with _tabs[1]:
             else:
                 bn  = (st.session_state["edit_business_name"] or "").strip()
                 cat = (st.session_state["edit_category"] or "").strip()
+                svc = (st.session_state["edit_service"] or "").strip(" /;,")
                 phone_norm = _normalize_phone(st.session_state["edit_phone"])
                 if phone_norm and len(phone_norm) != 10:
                     st.error("Phone must be 10 digits or blank.")
@@ -925,6 +1083,15 @@ with _tabs[1]:
                     try:
                         prev_updated = st.session_state.get("edit_row_updated_at") or ""
                         now = datetime.utcnow().isoformat(timespec="seconds")
+                        # recompute per-row fast
+                        ckw = _kw_from_row_fast({
+                            "business_name": bn,
+                            "category": cat,
+                            "service": svc,
+                            "notes": (st.session_state["edit_notes"] or "").strip(),
+                            "address": (st.session_state["edit_address"] or "").strip(),
+                            "keywords": (st.session_state["edit_keywords"] or "").strip(),
+                        })
                         res = _exec_with_retry(ENGINE, """
                             UPDATE vendors
                                SET category=:category,
@@ -936,12 +1103,13 @@ with _tabs[1]:
                                    website=:website,
                                    notes=:notes,
                                    keywords=:keywords,
+                                   computed_keywords=:ckw,
                                    updated_at=:now,
                                    updated_by=:user
                              WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
                         """, {
                             "category": cat,
-                            "service": (st.session_state["edit_service"] or "").strip(),
+                            "service": svc,
                             "business_name": bn,
                             "contact_name": (st.session_state["edit_contact_name"] or "").strip(),
                             "phone": phone_norm,
@@ -949,6 +1117,7 @@ with _tabs[1]:
                             "website": _sanitize_url(st.session_state["edit_website"]),
                             "notes": (st.session_state["edit_notes"] or "").strip(),
                             "keywords": (st.session_state["edit_keywords"] or "").strip(),
+                            "ckw": ckw,
                             "now": now, "user": os.getenv("USER", "admin"),
                             "id": int(vid),
                             "prev_updated": prev_updated,
@@ -1019,7 +1188,7 @@ with _tabs[2]:
     _init_cat_defaults()
     _apply_cat_reset_if_needed()
 
-    cats = list_names(ENGINE, "categories")
+    cats = list_names("categories")
     cat_opts = ["— Select —"] + cats  # sentinel first
 
     colA, colB = st.columns(2)
@@ -1032,6 +1201,7 @@ with _tabs[2]:
             else:
                 try:
                     _exec_with_retry(ENGINE, "INSERT OR IGNORE INTO categories(name) VALUES(:n)", {"n": new_cat.strip()})
+                    list_names.clear()
                     st.success("Added (or already existed).")
                     _queue_cat_reset()
                     st.rerun()
@@ -1050,6 +1220,7 @@ with _tabs[2]:
                 else:
                     try:
                         rename_category_and_cascade(ENGINE, old, new.strip())
+                        list_names.clear()
                         st.success("Renamed and reassigned.")
                         _queue_cat_reset()
                         st.rerun()
@@ -1069,6 +1240,7 @@ with _tabs[2]:
                     if st.button("Delete category (no usage)", key="cat_del_btn"):
                         try:
                             _exec_with_retry(ENGINE, "DELETE FROM categories WHERE name=:n", {"n": tgt})
+                            list_names.clear()
                             st.success("Deleted.")
                             _queue_cat_reset()
                             st.rerun()
@@ -1083,6 +1255,7 @@ with _tabs[2]:
                         else:
                             try:
                                 delete_category_with_reassign(ENGINE, tgt, repl)
+                                list_names.clear()
                                 st.success("Reassigned and deleted.")
                                 _queue_cat_reset()
                                 st.rerun()
@@ -1095,7 +1268,7 @@ with _tabs[3]:
     _init_svc_defaults()
     _apply_svc_reset_if_needed()
 
-    servs = list_names(ENGINE, "services")
+    servs = list_names("services")
     svc_opts = ["— Select —"] + servs  # sentinel first
 
     colA, colB = st.columns(2)
@@ -1108,6 +1281,7 @@ with _tabs[3]:
             else:
                 try:
                     _exec_with_retry(ENGINE, "INSERT OR IGNORE INTO services(name) VALUES(:n)", {"n": new_s.strip()})
+                    list_names.clear()
                     st.success("Added (or already existed).")
                     _queue_svc_reset()
                     st.rerun()
@@ -1126,6 +1300,7 @@ with _tabs[3]:
                 else:
                     try:
                         rename_service_and_cascade(ENGINE, old, new.strip())
+                        list_names.clear()
                         st.success(f"Renamed service: {old} → {new.strip()}")
                         _queue_svc_reset()
                         st.rerun()
@@ -1145,6 +1320,7 @@ with _tabs[3]:
                     if st.button("Delete service (no usage)", key="svc_del_btn"):
                         try:
                             _exec_with_retry(ENGINE, "DELETE FROM services WHERE name=:n", {"n": tgt})
+                            list_names.clear()
                             st.success("Deleted.")
                             _queue_svc_reset()
                             st.rerun()
@@ -1159,6 +1335,7 @@ with _tabs[3]:
                         else:
                             try:
                                 delete_service_with_reassign(ENGINE, tgt, repl)
+                                list_names.clear()
                                 st.success("Reassigned and deleted.")
                                 _queue_svc_reset()
                                 st.rerun()
@@ -1167,8 +1344,68 @@ with _tabs[3]:
 
 # ---------- Maintenance
 with _tabs[4]:
-    st.caption("One-click cleanups for legacy data.")
+    st.caption("One-click cleanups and keyword recompute tools.")
 
+    # ====== Computed Keywords tools ======
+    st.subheader("Computed Keywords")
+
+    col_ckw1, col_ckw2 = st.columns(2)
+    with col_ckw1:
+        if st.button("Recompute MISSING only"):
+            try:
+                with ENGINE.begin() as conn:
+                    df_miss = pd.read_sql(
+                        sql_text("SELECT * FROM vendors WHERE computed_keywords IS NULL OR computed_keywords=''"),
+                        conn
+                    )
+                if df_miss.empty:
+                    st.info("No rows missing computed keywords.")
+                else:
+                    updates = []
+                    for _, r in df_miss.iterrows():
+                        row = r.to_dict()
+                        ckw = _kw_from_row_fast(row)
+                        updates.append({"ckw": ckw, "id": int(row["id"])})
+                    with ENGINE.begin() as conn:
+                        conn.execute(sql_text("UPDATE vendors SET computed_keywords=:ckw WHERE id=:id"), updates)
+                    st.success(f"Computed keywords filled for {len(updates)} row(s).")
+            except Exception as e:
+                st.error(f"Recompute (missing) failed: {e}")
+
+    with col_ckw2:
+        if st.button("Force recompute ALL (rules + TF-IDF)"):
+            try:
+                with ENGINE.begin() as conn:
+                    df_all = pd.read_sql(sql_text("SELECT * FROM vendors"), conn)
+                if df_all.empty:
+                    st.info("No rows to recompute.")
+                else:
+                    # Group by (category, service) and compute TF-IDF per group
+                    updates = []
+                    grouped = df_all.groupby([df_all["category"].fillna(""), df_all["service"].fillna("")], dropna=False)
+                    tfidf_map: Dict[Tuple[str,str], list[str]] = {}
+                    for (cat, svc), g in grouped:
+                        tfidf_map[(str(cat), str(svc))] = _tfidf_terms_for_group(g)
+
+                    for _, r in df_all.iterrows():
+                        row = r.to_dict()
+                        cat = row.get("category") or ""
+                        svc = row.get("service") or ""
+                        seeds = _rules_for_pair(CKW_RULES, cat, svc)
+                        explicit = [t.strip().lower() for t in (row.get("keywords") or "").split(",") if t.strip()]
+                        tf_terms = tfidf_map.get((str(cat), str(svc)), [])
+                        terms = seeds + explicit + tf_terms
+                        ckw = _join_kw(terms)
+                        updates.append({"ckw": ckw, "id": int(row["id"])})
+
+                    with ENGINE.begin() as conn:
+                        conn.execute(sql_text("UPDATE vendors SET computed_keywords=:ckw WHERE id=:id"), updates)
+
+                    st.success(f"Recomputed keywords for {len(updates)} row(s).")
+            except Exception as e:
+                st.error(f"Recompute (all) failed: {e}")
+
+    st.divider()
     st.subheader("Export / Import")
 
     # Export full, untruncated CSV of all columns/rows
@@ -1202,59 +1439,63 @@ with _tabs[4]:
             mime="text/csv",
         )
 
-    # CSV Restore UI (Append-only, ID-checked)
-    with st.expander("CSV Restore (Append-only, ID-checked)", expanded=False):
-        st.caption(
-            "WARNING: This tool only **appends** rows. "
-            "Rows whose `id` already exists are **rejected**. No updates, no deletes."
-        )
-        uploaded = st.file_uploader("Upload CSV to append into `vendors`", type=["csv"], accept_multiple_files=False)
+    # CSV Restore UI (Append-only, ID-checked) — guarded if helpers absent
+    have_csv_helpers = all(name in globals() for name in ("_prepare_csv_for_append", "_execute_append_only"))
+    if have_csv_helpers:
+        with st.expander("CSV Restore (Append-only, ID-checked)", expanded=False):
+            st.caption(
+                "WARNING: This tool only **appends** rows. "
+                "Rows whose `id` already exists are **rejected**. No updates, no deletes."
+            )
+            uploaded = st.file_uploader("Upload CSV to append into `vendors`", type=["csv"], accept_multiple_files=False)
 
-        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
-        with col1:
-            dry_run = st.checkbox("Dry run (validate only)", value=True)
-        with col2:
-            trim_strings = st.checkbox("Trim strings", value=True)
-        with col3:
-            normalize_phone = st.checkbox("Normalize phone to digits", value=True)
-        with col4:
-            auto_id = st.checkbox("Missing `id` ➜ autoincrement", value=True)
+            col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+            with col1:
+                dry_run = st.checkbox("Dry run (validate only)", value=True)
+            with col2:
+                trim_strings = st.checkbox("Trim strings", value=True)
+            with col3:
+                normalize_phone = st.checkbox("Normalize phone to digits", value=True)
+            with col4:
+                auto_id = st.checkbox("Missing `id` ➜ autoincrement", value=True)
 
-        if uploaded is not None:
-            try:
-                df_in = pd.read_csv(uploaded)
-                with_id_df, without_id_df, rejected_ids, insertable_cols = _prepare_csv_for_append(
-                    ENGINE,
-                    df_in,
-                    normalize_phone=normalize_phone,
-                    trim_strings=trim_strings,
-                    treat_missing_id_as_autoincrement=auto_id,
-                )
+            if uploaded is not None:
+                try:
+                    df_in = pd.read_csv(uploaded)
+                    with_id_df, without_id_df, rejected_ids, insertable_cols = _prepare_csv_for_append(
+                        ENGINE,
+                        df_in,
+                        normalize_phone=normalize_phone,
+                        trim_strings=trim_strings,
+                        treat_missing_id_as_autoincrement=auto_id,
+                    )
 
-                planned_inserts = len(with_id_df) + len(without_id_df)
+                    planned_inserts = len(with_id_df) + len(without_id_df)
 
-                st.write("**Validation summary**")
-                st.write(
-                    {
-                        "csv_rows": int(len(df_in)),
-                        "insertable_columns": insertable_cols,
-                        "rows_with_explicit_id": int(len(with_id_df)),
-                        "rows_autoincrement_id": int(len(without_id_df)),
-                        "rows_rejected_due_to_existing_id": rejected_ids,
-                        "planned_inserts": int(planned_inserts),
-                    }
-                )
+                    st.write("**Validation summary**")
+                    st.write(
+                        {
+                            "csv_rows": int(len(df_in)),
+                            "insertable_columns": insertable_cols,
+                            "rows_with_explicit_id": int(len(with_id_df)),
+                            "rows_autoincrement_id": int(len(without_id_df)),
+                            "rows_rejected_due_to_existing_id": rejected_ids,
+                            "planned_inserts": int(planned_inserts),
+                        }
+                    )
 
-                if dry_run:
-                    st.success("Dry run complete. No changes applied.")
-                else:
-                    if planned_inserts == 0:
-                        st.info("Nothing to insert (all rows rejected or CSV empty after filters).")
+                    if dry_run:
+                        st.success("Dry run complete. No changes applied.")
                     else:
-                        inserted = _execute_append_only(ENGINE, with_id_df, without_id_df, insertable_cols)
-                        st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
-            except Exception as e:
-                st.error(f"CSV restore failed: {e}")
+                        if planned_inserts == 0:
+                            st.info("Nothing to insert (all rows rejected or CSV empty after filters).")
+                        else:
+                            inserted = _execute_append_only(ENGINE, with_id_df, without_id_df, insertable_cols)
+                            st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
+                except Exception as e:
+                    st.error(f"CSV restore failed: {e}")
+    else:
+        st.info("CSV Restore is disabled in this build (helpers not bundled).")
 
     st.divider()
     st.subheader("Data cleanup")
