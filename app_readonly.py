@@ -21,7 +21,6 @@ except Exception:
     pass
 
 # ==== BEGIN: Boot-time page title from Secrets ====
-
 def _safe_title(v, default="HCR Providers — Read-Only"):
     try:
         s = str(v).strip()
@@ -37,7 +36,7 @@ except Exception:
 st.set_page_config(
     page_title=_safe_title(_title_secret),
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="collapsed",
 )
 # ==== END: Boot-time page title from Secrets ====
 
@@ -55,14 +54,12 @@ def _get_secret(name: str, default: Optional[str | int | dict | bool] = None):
         return os.getenv(name, default)  # env fallback for strings
     return default
 
-
 def _as_bool(v: Optional[str | bool], default: bool = False) -> bool:
     if isinstance(v, bool):
         return v
     if v is None:
         return default
     return str(v).strip().lower() in ("1", "true", "yes", "on")
-
 
 def _to_int(v, default: int) -> int:
     """Coerce to int; tolerate '200px', ' 180 ', floats, etc."""
@@ -84,7 +81,6 @@ def _to_int(v, default: int) -> int:
     except Exception:
         return default
 
-
 def _css_len_from_secret(v: str | int | None, fallback_px: int) -> str:
     """
     Accepts e.g. "0", "20", "18px", "1rem", "0.5em".
@@ -101,7 +97,6 @@ def _css_len_from_secret(v: str | int | None, fallback_px: int) -> str:
             return s
         return f"{s}px"
     return f"{fallback_px}px"
-
 
 def _get_help_md() -> str:
     """Prefer top-level HELP_MD; if missing, also look under widths; else fallback."""
@@ -137,7 +132,6 @@ def _get_help_md() -> str:
         """
     ).strip()
 
-
 # =============================
 # Secrets-driven page options
 # =============================
@@ -146,6 +140,12 @@ PAGE_MAX_WIDTH_PX = _to_int(_get_secret("page_max_width_px", 2300), 2300)
 SIDEBAR_STATE = _get_secret("sidebar_state", "collapsed")
 SHOW_DIAGS = _as_bool(_get_secret("READONLY_SHOW_DIAGS", False), False)
 SHOW_STATUS = _as_bool(_get_secret("READONLY_SHOW_STATUS", False), False)
+
+# Prioritized-search toggle (enabled by default; can turn off in secrets)
+READONLY_PRIORITIZE_CKW = _as_bool(_get_secret("READONLY_PRIORITIZE_CKW", "true"), True)
+
+# Cache TTL (seconds) for vendor list
+READONLY_CACHE_TTL = _to_int(_get_secret("READONLY_CACHE_TTL", 60), 60)
 
 # Apply sidebar state retroactively (page title must stay as set_page_config)
 try:
@@ -167,7 +167,7 @@ def _viewport_rows() -> int:
     return n
 
 VIEWPORT_ROWS = _viewport_rows()
-ROW_PX = 32  # approximate row height
+ROW_PX = 32   # approximate row height
 HEADER_PX = 44
 SCROLL_MAX_HEIGHT = HEADER_PX + ROW_PX * VIEWPORT_ROWS  # pixels
 
@@ -254,7 +254,13 @@ _DEFAULT_WIDTHS = {
     "website": 160,
     "notes": 220,
     "keywords": 90,
-    "computed_keywords": 140,
+    # hidden columns still need sane widths if ever revealed
+    "computed_keywords": 160,
+    "created_at": 120,
+    "updated_at": 120,
+    "updated_by": 120,
+    # internal-only (not displayed) but keep a default in case surfaced
+    "website_url": 180,
 }
 
 # Only accept known width keys; ignore accidental extras (e.g., HELP_MD)
@@ -276,8 +282,15 @@ for k, v in list(COLUMN_WIDTHS_PX_READONLY.items()):
 STICKY_FIRST_COL: bool = False
 
 # Hide these in display; still searchable
-HIDE_IN_DISPLAY = {"id", "keywords", "created_at", "updated_at", "updated_by", "computed_keywords"}
-
+HIDE_IN_DISPLAY = {
+    "id",
+    "keywords",
+    "computed_keywords",
+    "created_at",
+    "updated_at",
+    "updated_by",
+    "website_url",  # internal plain URL used for search/export
+}
 
 # =============================
 # Database engine
@@ -352,73 +365,119 @@ def build_engine() -> Tuple[Engine, Dict[str, str]]:
     )
     return engine, info
 
-
 # =============================
 # Data access
 # =============================
 VENDOR_COLS = [
-    "id", "category", "service", "business_name", "contact_name", "phone",
-    "address", "website", "notes", "keywords", "created_at", "updated_at",
-    "updated_by", "computed_keywords",
+    "id",
+    "category",
+    "service",
+    "business_name",
+    "contact_name",
+    "phone",
+    "address",
+    "website",
+    "notes",
+    "keywords",
+    "computed_keywords",  # used for prioritized search; hidden from display
+    "created_at",
+    "updated_at",
+    "updated_by",
 ]
 
-@st.cache_data(ttl=15, show_spinner=False)
-def fetch_vendors(engine: Engine) -> pd.DataFrame:
+@st.cache_data(ttl=READONLY_CACHE_TTL, show_spinner=False)
+def fetch_vendors(_engine: Engine) -> pd.DataFrame:
+    """
+    Load vendors; cached briefly to reduce DB hits.
+    Leading underscore on _engine tells Streamlit not to hash the Engine object.
+    """
     sql = "SELECT " + ", ".join(VENDOR_COLS) + " FROM vendors ORDER BY lower(business_name)"
-    with engine.connect() as conn:  # read-only, no txn
+    with _engine.connect() as conn:  # read-only; no transaction
         df = pd.read_sql(sql_text(sql), conn)
 
-    def _mk_anchor(v: str) -> str:
-        if not isinstance(v, str) or not v.strip():
+    def _normalize_url(v: str) -> str:
+        s = (v or "").strip()
+        if not s:
             return ""
-        u = v.strip()
-        if not (u.startswith("http://") or u.startswith("https://")):
-            u = "https://" + u
-        href = html.escape(u, quote=True)
-        return f'<a href="{href}" target="_blank" rel="noopener noreferrer nofollow">Website</a>'
+        if not (s.startswith("http://") or s.startswith("https://")):
+            s = "https://" + s
+        return s
 
+    # Build a plain URL column for search/export; render anchor for UI
     if "website" in df.columns:
-        df["website"] = df["website"].fillna("").astype(str).map(_mk_anchor)
+        df["website"] = df["website"].fillna("").astype(str)
+        df["website_url"] = df["website"].map(_normalize_url)
+        df["website"] = df["website_url"].map(
+            lambda u: f'<a href="{html.escape(u, quote=True)}" target="_blank" rel="noopener noreferrer">Website</a>'
+            if u else ""
+        )
 
+    # Coerce common text columns to string (but keep id/timestamps as-is)
     for c in df.columns:
         if c not in ("id", "created_at", "updated_at"):
             df[c] = df[c].fillna("").astype(str)
     return df
 
-
 # =============================
 # Filtering
 # =============================
-def _filter_and_rank(df: pd.DataFrame, query: str) -> pd.DataFrame:
+def apply_global_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
+    """Vectorized contains-any across all columns (case-insensitive)."""
+    q = (query or "").strip().lower()
+    if not q:
+        return df
+    if df.empty:
+        return df
+    # Lowercase, string view of all columns
+    hay = df.astype(str).apply(lambda s: s.str.lower(), axis=0)
+    # contains per-column, reduce with any(axis=1)
+    mask = hay.apply(lambda s: s.str.contains(q, regex=False, na=False), axis=0).any(axis=1)
+    return df[mask]
+
+def _filter_and_rank_by_query(df: pd.DataFrame, query: str) -> pd.DataFrame:
     """
-    Prioritize rows that match computed_keywords; then other matches.
-    Case-insensitive substring match; stable sort by business_name for tie-break.
+    Prioritize rows that match in computed_keywords, then other matches.
+    Case-insensitive substring match. Falls back gracefully if column is missing.
     """
     q = (query or "").strip().lower()
     if not q:
         return df
+    if df.empty:
+        return df
 
+    # Safe access / fallbacks
     ckw = df.get("computed_keywords", pd.Series([""] * len(df), index=df.index)).astype(str).str.lower()
     other = pd.concat(
-        [df[c].astype(str) for c in df.columns if c != "computed_keywords"],
-        axis=1
-    ).agg(" ".join, axis=1).str.lower()
+        [
+            df.get("business_name", ""),
+            df.get("category", ""),
+            df.get("service", ""),
+            df.get("contact_name", ""),
+            df.get("phone", ""),
+            df.get("address", ""),
+            df.get("website_url", ""),  # search plain URL, not HTML anchor
+            df.get("notes", ""),
+            df.get("keywords", ""),
+        ],
+        axis=1,
+    ).astype(str).agg(" ".join, axis=1).str.lower()
 
     hit_ckw = ckw.str.contains(q, regex=False, na=False)
     hit_oth = other.str.contains(q, regex=False, na=False)
     any_hit = hit_ckw | hit_oth
 
-    out = df.loc[any_hit].copy()
-    out["_rank_ckw"] = (~hit_ckw.loc[out.index]).astype(int)  # 0=ckw hit first
-    # Case-insensitive tie-break on business_name if present
-    if "business_name" in out.columns:
-        keyfunc = (lambda s: s.str.lower()) if pd.api.types.is_string_dtype(out["business_name"]) else None
-        out.sort_values(by=["_rank_ckw", "business_name"], kind="mergesort", inplace=True, key=keyfunc)
-    else:
-        out.sort_values(by=["_rank_ckw"], kind="mergesort", inplace=True)
-    out.drop(columns=["_rank_ckw"], inplace=True, errors="ignore")
-    return out
+    dfm = df.loc[any_hit].copy()
+    dfm["_rank_ckw"] = (~hit_ckw.loc[dfm.index]).astype(int)  # 0 for ckw hit, 1 otherwise
 
+    # Deterministic tie-break: business_name (case-insensitive), fallback empty string
+    dfm["__bn"] = dfm.get("business_name", "").astype(str).str.lower()
+    dfm.sort_values(
+        by=["_rank_ckw", "__bn"],
+        kind="mergesort",
+        inplace=True,
+    )
+    dfm.drop(columns=["_rank_ckw", "__bn"], inplace=True, errors="ignore")
+    return dfm
 
 # =============================
 # Rendering
@@ -426,13 +485,11 @@ def _filter_and_rank(df: pd.DataFrame, query: str) -> pd.DataFrame:
 def _label_for(col_key: str) -> str:
     return READONLY_COLUMN_LABELS.get(col_key, col_key.replace("_", " ").title())
 
-
 def _rename_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, str]]:
     mapping = {k: _label_for(k) for k in df.columns}
     df2 = df.rename(columns={k: mapping[k] for k in df.columns})
     rev = {v: k for k, v in mapping.items()}
     return df2, rev
-
 
 def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
     df_disp, rev = _rename_columns(df)
@@ -440,9 +497,7 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
     for col in df_disp.columns:
         orig = rev[col]
         width = COLUMN_WIDTHS_PX_READONLY.get(orig, 140)
-        headers.append(
-            f'<th style="min-width:{width}px;max-width:{width}px;">{html.escape(col)}</th>'
-        )
+        headers.append(f'<th style="min-width:{width}px;max-width:{width}px;">{html.escape(col)}</th>')
     thead = "<thead><tr>" + "".join(headers) + "</tr></thead>"
 
     rows_html: List[str] = []
@@ -453,14 +508,13 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
             val = row[col]
             width = COLUMN_WIDTHS_PX_READONLY.get(orig, 140)
             if orig == "website":
-                cell_html = val
+                cell_html = val  # already an <a> anchor
             else:
                 cell_html = html.escape(str(val) if val is not None else "")
             tds.append(f'<td style="min-width:{width}px;max-width:{width}px;">{cell_html}</td>')
         rows_html.append("<tr>" + "".join(tds) + "</tr>")
     tbody = "<tbody>" + "".join(rows_html) + "</tbody>"
     return f'<div class="prov-wrap prov-scroll"><table class="prov-table">{thead}{tbody}</table></div>'
-
 
 # =============================
 # Main UI
@@ -487,7 +541,11 @@ def main():
     # ==== END: Search input (accessibility-safe) ====
 
     q = st.session_state.get("q", "")
-    filtered_full = _filter_and_rank(df_full, q)
+
+    if READONLY_PRIORITIZE_CKW:
+        filtered_full = _filter_and_rank_by_query(df_full, q)
+    else:
+        filtered_full = apply_global_search(df_full, q)
 
     # Columns we show (hide internal columns)
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
@@ -540,7 +598,7 @@ def main():
             by=sort_col,
             ascending=ascending,
             kind="mergesort",
-            key=keyfunc
+            key=keyfunc,
         )
     else:
         df_disp_sorted = df_disp_all.copy()
@@ -550,8 +608,9 @@ def main():
 
     # Prepare CSV with plain URLs (no HTML anchors)
     csv_df = df_disp_sorted.copy()
-    if "website" in csv_df.columns and not csv_df.empty:
-        csv_df["website"] = csv_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
+    if "website" in csv_df.columns and "website_url" in filtered_full.columns and not csv_df.empty:
+        # Replace display anchor with plain URL for export
+        csv_df["website"] = filtered_full.loc[csv_df.index, "website_url"].fillna("").astype(str)
     csv_buf = io.StringIO()
     if not csv_df.empty:
         csv_df.to_csv(csv_buf, index=False)
@@ -566,11 +625,10 @@ def main():
             disabled=csv_df.empty,
         )
 
-    # Prepare XLSX with plain URLs (already converting)
+    # Prepare XLSX with plain URLs
     excel_df = df_disp_sorted.copy()
-    if "website" in excel_df.columns and not excel_df.empty:
-        # Convert anchor to plain URL for Excel export
-        excel_df["website"] = excel_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
+    if "website" in excel_df.columns and "website_url" in filtered_full.columns and not excel_df.empty:
+        excel_df["website"] = filtered_full.loc[excel_df.index, "website_url"].fillna("").astype(str)
 
     xlsx_buf = io.BytesIO()
     if not excel_df.empty:
@@ -592,7 +650,11 @@ def main():
 
     # Optional status line (toggle via Secrets)
     if SHOW_STATUS:
-        st.caption(f"{len(df_disp_sorted)} matching provider(s). Viewport rows: {VIEWPORT_ROWS}")
+        st.caption(
+            f"{len(df_disp_sorted)} matching provider(s). "
+            f"Viewport rows: {VIEWPORT_ROWS}. "
+            f"Prioritized search: {'on' if READONLY_PRIORITIZE_CKW else 'off'}."
+        )
 
     # -------- Help / Tips expander (controlled by session_state + Close button) --------
     def _close_help():
@@ -647,7 +709,6 @@ def main():
             st.write(probe)
         except Exception as e:
             st.write({"db_probe_error": str(e)})
-
 
 if __name__ == "__main__":
     main()
