@@ -561,8 +561,27 @@ def main():
         st.info("No provider rows to display yet.")
         return
 
-    # ---- Search row (input + Clear button on same line) ----
-    def _clear_search():
+# ==== BEGIN: Search row (input + Clear button on same line; rerun-safe) ====
+# Initialize from query param once (if present and no session value yet)
+if "q" not in st.session_state:
+    try:
+        qp = getattr(st, "query_params", {})
+        if isinstance(qp, dict) and qp.get("q"):
+            st.session_state["q"] = str(qp.get("q"))
+    except Exception:
+        pass
+
+c_search, c_clearbtn = st.columns([12, 2])
+with c_search:
+    st.text_input(
+        "Search",  # accessible label; collapsed in UI
+        key="q",
+        label_visibility="collapsed",
+        placeholder="Search e.g., plumb, roofing, 'Inverness', phone digits, etc.",
+        help="Case-insensitive; keyword hits appear first; matches across all columns.",
+    )
+with c_clearbtn:
+    if st.button("Clear", type="secondary", use_container_width=True):
         st.session_state["q"] = ""
         try:
             if hasattr(st, "query_params"):
@@ -571,28 +590,16 @@ def main():
             pass
         st.rerun()
 
-    # Initialize from query param once (if present and no session value yet)
-    if "q" not in st.session_state:
-        try:
-            qp = getattr(st, "query_params", {})
-            if isinstance(qp, dict) and qp.get("q"):
-                st.session_state["q"] = str(qp.get("q"))
-        except Exception:
-            pass
+q = st.session_state.get("q", "")
 
-    c_search, c_clearbtn = st.columns([12, 2])
-    with c_search:
-        st.text_input(
-            "Search",  # accessible label; collapsed in UI
-            key="q",
-            label_visibility="collapsed",
-            placeholder="Search e.g., plumb, roofing, 'Inverness', phone digits, etc.",
-            help="Case-insensitive; keyword hits appear first; matches across all columns.",
-        )
-    with c_clearbtn:
-        st.button("Clear", type="secondary", use_container_width=True, on_click=_clear_search)
+# Keep ?q= synchronized while typing (best effort; safe if unsupported)
+try:
+    if hasattr(st, "query_params"):
+        st.query_params["q"] = q or ""
+except Exception:
+    pass
+# ==== END: Search row ====
 
-    q = st.session_state.get("q", "")
 
     # Keep ?q= synchronized while typing (best effort; safe if unsupported)
     try:
