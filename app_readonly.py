@@ -668,7 +668,7 @@ def main():
     else:
         st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
 
-    # ---- Quick Stats (lightweight, always available) ----
+    # ==== BEGIN: Quick Stats (read-only) ====
     with st.expander("Quick Stats", expanded=False):
         try:
             nrows, ncols = df_disp_sorted.shape
@@ -680,6 +680,7 @@ def main():
             })
         except Exception as _e:
             st.caption(f"Stats unavailable: {_e}")
+    # ==== END: Quick Stats (read-only) ====
 
     # Debug / Diagnostics (shown only when explicitly enabled)
     if SHOW_DIAGS:
