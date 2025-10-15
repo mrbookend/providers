@@ -681,7 +681,7 @@ def rename_service_and_cascade(engine: Engine, old: str, new: str) -> None:
     with engine.begin() as conn:
         conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new})
         conn.execute(sql_text("UPDATE vendors SET service=:new WHERE service=:old"), {"new": new, "old": old})
-        conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"name": old})
+        conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"old": old})
 
 def delete_service_with_reassign(engine: Engine, tgt: str, repl: str) -> None:
     with engine.begin() as conn:
@@ -1046,7 +1046,7 @@ with _tabs[1]:
             st.text_input("Phone (10 digits or blank)", key="add_phone")
         with col2:
             st.text_area("Address", height=80, key="add_address")
-                        st.text_input("Website (https://…)", key="add_website")
+            st.text_input("Website (https://…)", key="add_website")
             st.text_area("Notes", height=100, key="add_notes")
             st.text_input("Keywords (comma separated)", key="add_keywords")
 
@@ -1094,7 +1094,6 @@ with _tabs[1]:
                 # === NEW: compute once per Save using rule-driven builder (D) ===
                 suggested_ckw = build_computed_keywords(category, service, business_name, CKW_MAX_TERMS)
                 ckw_final = suggested_ckw
-                ckw_locked = 0  # auto-generated on Add
 
                 _exec_with_retry(
                     ENGINE,
@@ -1216,7 +1215,7 @@ with _tabs[1]:
                 st.text_area("Notes", height=100, key="edit_notes")
                 st.text_input("Keywords (comma separated)", key="edit_keywords")
 
-                                # ==== BEGIN: CKW Edit (manual lock + suggest) ====
+                # ==== BEGIN: CKW Edit (manual lock + suggest) ====
                 st.caption("Computed keywords are used for search in the read-only app.")
                 current_row = id_to_row.get(int(st.session_state["edit_vendor_id"])) if st.session_state["edit_vendor_id"] else {}
                 ckw_db = (current_row.get("computed_keywords") or "") if current_row else ""
@@ -1271,10 +1270,8 @@ with _tabs[1]:
                         prev_updated = st.session_state.get("edit_row_updated_at") or ""
                         now = datetime.utcnow().isoformat(timespec="seconds")
 
-                        # Decide lock: if user edited away from suggestion, lock; else auto (0)
-                        ckw_current_val = (st.session_state.get("edit_computed_keywords") or "").strip()
-                        suggested_now   = st.session_state.get("_ckw_suggest") or build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
-                        ckw_locked_val  = 1 if (ckw_current_val and ckw_current_val.strip() != suggested_now.strip()) else 0
+                        # Suggested now (used if user left field blank)
+                        suggested_now = st.session_state.get("_ckw_suggest") or build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
 
                         res = _exec_with_retry(ENGINE, """
                             UPDATE vendors
@@ -1292,7 +1289,8 @@ with _tabs[1]:
                                    ckw_version=:ckw_version,
                                    updated_at=:now,
                                    updated_by=:user
-                             WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
+                             WHERE id=:id
+                               AND COALESCE(updated_at,'') = COALESCE(:prev_updated,'')
                         """, {
                             "category": cat,
                             "service": svc,
@@ -1357,7 +1355,8 @@ with _tabs[1]:
                     prev_updated = (row.iloc[0]["updated_at"] if not row.empty else "") or ""
                     res = _exec_with_retry(ENGINE, """
                         DELETE FROM vendors
-                         WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
+                         WHERE id=:id
+                           AND COALESCE(updated_at,'') = COALESCE(:prev_updated,'')
                     """, {"id": int(vid), "prev_updated": prev_updated})
                     rowcount = res.rowcount or 0
 
@@ -1571,186 +1570,115 @@ with _tabs[4]:
             except Exception as e:
                 st.error(f"Integrity test failed: {type(e).__name__}: {e}")
     # ==== END: Maintenance ▸ Integrity Self-Test ====
-# -- Helper: resolve the current CKW version (prefers DB meta; falls back to secret or default) --
-def _ckw_current_version() -> str:
-    ver = None
+
+    # -- Helper: resolve the current CKW version (prefers DB meta; falls back to secret or default) --
+    def _ckw_current_version() -> str:
+        ver = None
+        try:
+            with ENGINE.begin() as cx:
+                cx.exec_driver_sql("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL DEFAULT '')")
+                row = cx.execute(sql_text("SELECT v FROM meta WHERE k='CKW_VERSION'")).fetchone()
+                if row and str(row[0]).strip():
+                    ver = str(row[0]).strip()
+        except Exception:
+            pass
+        if not ver:
+            try:
+                ver = str(st.secrets.get("CKW_VERSION", "")).strip()
+            except Exception:
+                ver = ""
+        return ver or "2025-10-15"
+
+    CURRENT_VER = _ckw_current_version()
     try:
-        with ENGINE.begin() as cx:
-            cx.exec_driver_sql(
-                "CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL DEFAULT '')"
-            )
-            row = cx.execute(sql_text("SELECT v FROM meta WHERE k='CKW_VERSION'")).fetchone()
-            if row and str(row[0]).strip():
-                ver = str(row[0]).strip()
+        _exec_with_retry(ENGINE, "CREATE INDEX IF NOT EXISTS idx_vendors_ckw_status ON vendors(ckw_locked, ckw_version)")
     except Exception:
         pass
-    if not ver:
-        try:
-            ver = str(st.secrets.get("CKW_VERSION", "")).strip()
-        except Exception:
-            ver = ""
-    return ver or "2025-10-15"
 
-CURRENT_VER = _ckw_current_version()
-try:
-    _exec_with_retry(ENGINE, "CREATE INDEX IF NOT EXISTS idx_vendors_ckw_status ON vendors(ckw_locked, ckw_version)")
-except Exception:
-    pass
-
-# ---- CKW controls: recompute + bump version (all outside any button blocks) ----
-st.subheader("Computed Keywords")
-
-c1, c2, c3 = st.columns([1, 1, 1])
-with c1:
-    batch_sz = st.number_input("Batch size", min_value=50, max_value=1000, value=300, step=50)
-with c2:
-    run_stale = st.button("Recompute unlocked & stale", type="primary", use_container_width=True)
-with c3:
-    run_all = st.button("Recompute ALL unlocked", type="secondary", use_container_width=True)
-
-def _rows_for_stale(engine: Engine, ver: str) -> list[tuple]:
-    with engine.connect() as cx:
-        return cx.execute(sql_text("""
-            SELECT id, category, service, business_name
-              FROM vendors
-             WHERE IFNULL(ckw_locked,0)=0
-               AND (ckw_version IS NULL OR ckw_version <> :ver
-                    OR computed_keywords IS NULL OR TRIM(computed_keywords) = '')
-        """), {"ver": ver}).fetchall()
-
-def _rows_for_all_unlocked(engine: Engine) -> list[tuple]:
-    with engine.connect() as cx:
-        return cx.execute(sql_text("""
-            SELECT id, category, service, business_name
-              FROM vendors
-             WHERE IFNULL(ckw_locked,0)=0
-        """)).fetchall()
-
-def _do_recompute(rows: list[tuple], label: str, batch: int):
-    total = len(rows)
-    if total == 0:
-        st.success(f"No rows to update for: {label}.")
-        return
-    st.write(f"{label}: **{total}** row(s) to update…")
-    done = 0
-    todo: list[dict] = []
-    pbar = st.progress(0)
-    for r in rows:
-        rid, cat, svc, bn = int(r[0]), (r[1] or ""), (r[2] or ""), (r[3] or "")
-        ckw = build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
-        todo.append({"id": rid, "ckw": ckw, "ver": CURRENT_VER})
-        if len(todo) >= int(batch):
-            _exec_with_retry(ENGINE, "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id", todo)
-            done += len(todo)
-            todo.clear()
-            pbar.progress(min(done / total, 1.0))
-    if todo:
-        _exec_with_retry(ENGINE, "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id", todo)
-        done += len(todo)
-        pbar.progress(1.0)
-    st.success(f"{label}: updated {done} row(s).")
-
-if run_stale:
-    try:
-        _do_recompute(_rows_for_stale(ENGINE, CURRENT_VER), "Unlocked & stale", batch_sz)
-    except Exception as e:
-        st.error(f"Recompute (stale) failed: {type(e).__name__}: {e}")
-
-if run_all:
-    try:
-        _do_recompute(_rows_for_all_unlocked(ENGINE), "ALL unlocked", batch_sz)
-    except Exception as e:
-        st.error(f"Recompute (all) failed: {type(e).__name__}: {e}")
-
-st.divider()
-bump = st.button("Bump CKW version (DB meta)", help="Increases CKW_VERSION in the meta table; does not recompute by itself.")
-if bump:
-    try:
-        old = CURRENT_VER
-        import re as _re
-        m = _re.match(r"^(.*?)(?:\.(\d+))?$", old)
-        base = (m.group(1) if m else old) or "2025-10-15"
-        inc = int(m.group(2) or "0") + 1
-        new_ver = f"{base}.{inc}"
-        with ENGINE.begin() as cx:
-            cx.exec_driver_sql("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL DEFAULT '')")
-            cx.execute(sql_text(
-                "INSERT INTO meta(k,v) VALUES('CKW_VERSION', :v) "
-                "ON CONFLICT(k) DO UPDATE SET v=excluded.v"
-            ), {"v": new_ver})
-        st.success(f"CKW_VERSION bumped: {old} → {new_ver}")
-    except Exception as e:
-        st.error(f"Version bump failed: {type(e).__name__}: {e}")
-
-st.divider()
-# (Optional) Tiny convenience: bump version in DB so future recomputes target new logic automatically.
-bump = st.button("Bump CKW version (DB meta)", help="Increases CKW_VERSION in the meta table; does not recompute by itself.")
-if bump:
-    try:
-        old = CURRENT_VER
-        # naive bump: append or increment a .X suffix
-        import re as _re
-        m = _re.match(r"^(.*?)(?:\.(\d+))?$", old)
-        if m:
-            base = (m.group(1) or old) or "2025-10-15"
-            inc = int(m.group(2) or "0") + 1
-            new_ver = f"{base}.{inc}"
-        else:
-            new_ver = f"{old}.1"
-        with ENGINE.begin() as cx:
-            cx.exec_driver_sql(
-                "CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL DEFAULT '')"
-            )
-            cx.execute(
-                sql_text(
-                    "INSERT INTO meta(k,v) VALUES('CKW_VERSION', :v) "
-                    "ON CONFLICT(k) DO UPDATE SET v=excluded.v"
-                ),
-                {"v": new_ver},
-            )
-        st.success(f"CKW_VERSION bumped: {old} → {new_ver}")
-    except Exception as e:
-        st.error(f"Version bump failed: {type(e).__name__}: {e}")
-
-    # ====== Computed Keywords tools (F) ======
+    # ---- CKW controls: recompute + bump version (all outside any button blocks) ----
     st.subheader("Computed Keywords")
 
-    with st.expander("Recompute (versioned, unlocked only)", expanded=False):
-        st.write("Recompute for rows where (ckw_locked=0) and (ckw_version != CKW_VERSION or empty).")
-        do_run = st.button("Recompute all (unlocked & stale)")
-        if do_run:
-            try:
-                with ENGINE.connect() as cx:
-                    rows = cx.execute(sql_text("""
-                        SELECT id, category, service, business_name
-                        FROM vendors
-                        WHERE IFNULL(ckw_locked,0)=0
-                          AND (ckw_version IS NULL OR ckw_version <> :v OR computed_keywords IS NULL OR TRIM(computed_keywords)='')
-                    """), {"v": CKW_VERSION}).fetchall()
-                total = len(rows)
-                if total == 0:
-                    st.success("No rows need recompute.")
-                else:
-                    batch, done = [], 0
-                    for r in rows:
-                        ckw = build_computed_keywords(r.service, r.service, r.business_name, CKW_MAX_TERMS)  # service twice? No—fix:
-                        # Correct build:
-                        ckw = build_computed_keywords(r.category, r.service, r.business_name, CKW_MAX_TERMS)
-                        batch.append({"id": r.id, "ckw": ckw, "ver": CKW_VERSION})
-                        if len(batch) >= 300:
-                            _exec_with_retry(ENGINE,
-                                "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id",
-                                batch)
-                            done += len(batch); batch.clear()
-                            st.write(f"Updated {done}/{total}…")
-                    if batch:
-                        _exec_with_retry(ENGINE,
-                            "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id",
-                            batch)
-                        done += len(batch)
-                    st.success(f"Recomputed {done} row(s).")
-            except Exception as e:
-                st.error(f"Bulk recompute failed: {e.__class__.__name__}: {e}")
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        batch_sz = st.number_input("Batch size", min_value=50, max_value=1000, value=300, step=50)
+    with c2:
+        run_stale = st.button("Recompute unlocked & stale", type="primary", use_container_width=True)
+    with c3:
+        run_all = st.button("Recompute ALL unlocked", type="secondary", use_container_width=True)
+
+    def _rows_for_stale(engine: Engine, ver: str) -> list[tuple]:
+        with engine.connect() as cx:
+            return cx.execute(sql_text("""
+                SELECT id, category, service, business_name
+                  FROM vendors
+                 WHERE IFNULL(ckw_locked,0)=0
+                   AND (ckw_version IS NULL OR ckw_version <> :ver
+                        OR computed_keywords IS NULL OR TRIM(computed_keywords) = '')
+            """), {"ver": ver}).fetchall()
+
+    def _rows_for_all_unlocked(engine: Engine) -> list[tuple]:
+        with engine.connect() as cx:
+            return cx.execute(sql_text("""
+                SELECT id, category, service, business_name
+                  FROM vendors
+                 WHERE IFNULL(ckw_locked,0)=0
+            """)).fetchall()
+
+    def _do_recompute(rows: list[tuple], label: str, batch: int):
+        total = len(rows)
+        if total == 0:
+            st.success(f"No rows to update for: {label}.")
+            return
+        st.write(f"{label}: **{total}** row(s) to update…")
+        done = 0
+        todo: list[dict] = []
+        pbar = st.progress(0)
+        for r in rows:
+            rid, cat, svc, bn = int(r[0]), (r[1] or ""), (r[2] or ""), (r[3] or "")
+            ckw = build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
+            todo.append({"id": rid, "ckw": ckw, "ver": CURRENT_VER})
+            if len(todo) >= int(batch):
+                _exec_with_retry(ENGINE, "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id", todo)
+                done += len(todo)
+                todo.clear()
+                pbar.progress(min(done / total, 1.0))
+        if todo:
+            _exec_with_retry(ENGINE, "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id", todo)
+            done += len(todo)
+            pbar.progress(1.0)
+        st.success(f"{label}: updated {done} row(s).")
+
+    if run_stale:
+        try:
+            _do_recompute(_rows_for_stale(ENGINE, CURRENT_VER), "Unlocked & stale", batch_sz)
+        except Exception as e:
+            st.error(f"Recompute (stale) failed: {type(e).__name__}: {e}")
+
+    if run_all:
+        try:
+            _do_recompute(_rows_for_all_unlocked(ENGINE), "ALL unlocked", batch_sz)
+        except Exception as e:
+            st.error(f"Recompute (all) failed: {type(e).__name__}: {e}")
+
+    st.divider()
+    bump = st.button("Bump CKW version (DB meta)", help="Increases CKW_VERSION in the meta table; does not recompute by itself.")
+    if bump:
+        try:
+            old = CURRENT_VER
+            import re as _re
+            m = _re.match(r"^(.*?)(?:\.(\d+))?$", old)
+            base = (m.group(1) if m else old) or "2025-10-15"
+            inc = int(m.group(2) or "0") + 1
+            new_ver = f"{base}.{inc}"
+            with ENGINE.begin() as cx:
+                cx.exec_driver_sql("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL DEFAULT '')")
+                cx.execute(sql_text(
+                    "INSERT INTO meta(k,v) VALUES('CKW_VERSION', :v) "
+                    "ON CONFLICT(k) DO UPDATE SET v=excluded.v"
+                ), {"v": new_ver})
+            st.success(f"CKW_VERSION bumped: {old} → {new_ver}")
+        except Exception as e:
+            st.error(f"Version bump failed: {type(e).__name__}: {e}")
 
     st.divider()
     st.subheader("Export / Import")
@@ -1882,7 +1810,7 @@ if bump:
             )
             exists = conn.execute(
                 sql_text("SELECT COUNT(*) AS c FROM vendors WHERE business_name=:n"),
-                {"n": probe_name}
+                {"n": str(probe_name)}
             ).scalar() or 0
             trans.rollback()
             conn.close()
