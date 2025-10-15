@@ -799,7 +799,7 @@ def load_df(engine: Engine) -> pd.DataFrame:
     return df
 
 # ---- cached taxonomy lookups (no Engine arg; safe to cache) ----
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def list_names(table: str) -> list[str]:
     with ENGINE.connect() as conn:  # read-only
         rows = conn.execute(sql_text(f"SELECT name FROM {table} ORDER BY lower(name)")).fetchall()
@@ -1532,6 +1532,52 @@ with _tabs[3]:
 # ---------- Maintenance
 with _tabs[4]:
     st.caption("One-click cleanups and keyword recompute tools.")
+
+    # ==== BEGIN: Maintenance ▸ Integrity Self-Test (drop-in block) ====
+    with st.expander("Integrity Self-Test", expanded=False):
+        st.caption("Runs PRAGMA checks and basic counts. Read-only; safe anytime.")
+        if st.button("Run checks", type="primary"):
+            results: Dict[str, Any] = {}
+            try:
+                with ENGINE.connect() as cx:  # read-only ops
+                    # 1) Quick structural sanity
+                    quick = cx.exec_driver_sql("PRAGMA quick_check").scalar()
+                    results["quick_check"] = quick
+
+                    # 2) Full integrity (heavier, still safe)
+                    integ = cx.exec_driver_sql("PRAGMA integrity_check").scalar()
+                    results["integrity_check"] = integ
+
+                    # 3) Table counts
+                    counts = {}
+                    for tbl in ("vendors", "categories", "services"):
+                        try:
+                            c = cx.exec_driver_sql(f"SELECT COUNT(*) FROM {tbl}").scalar()
+                            counts[tbl] = int(c or 0)
+                        except Exception as e:
+                            counts[tbl] = f"error: {type(e).__name__}: {e}"
+                    results["counts"] = counts
+
+                    # 4) Index presence (spot missing performance indexes)
+                    ix = cx.exec_driver_sql("PRAGMA index_list('vendors')").mappings().all()
+                    results["vendors_indexes"] = [
+                        {"seq": int(r.get("seq", 0)), "name": r.get("name"), "unique": bool(r.get("unique", 0))}
+                        for r in ix
+                    ]
+
+                # Render summary
+                ok = (str(results.get("quick_check", "")).lower() == "ok") and (
+                    str(results.get("integrity_check", "")).lower() == "ok"
+                )
+                (st.success if ok else st.error)(
+                    f"Integrity {'OK' if ok else 'issues detected'} — see details below."
+                )
+                st.json(results)
+
+            except Exception as e:
+                st.error(f"Integrity test failed: {type(e).__name__}: {e}")
+    # ==== END: Maintenance ▸ Integrity Self-Test (drop-in block) ====
+
 
     # ====== Computed Keywords tools ======
     st.subheader("Computed Keywords")
