@@ -272,6 +272,15 @@ def _ct_equals(a: str, b: str) -> bool:
     """Constant-time string compare for secrets."""
     return hmac.compare_digest((a or ""), (b or ""))
 
+def _updated_by() -> str:
+    """Single source of truth for updated_by stamps."""
+    try:
+        v = str(st.secrets.get("ADMIN_USER", "")).strip()
+    except Exception:
+        v = ""
+    if v:
+        return v
+    return os.getenv("USER", "admin")
 
 # -----------------------------
 # Hrana/libSQL transient error retry
@@ -280,10 +289,11 @@ def _is_hrana_stale_stream_error(err: Exception) -> bool:
     s = str(err).lower()
     return ("hrana" in s and "404" in s and "stream not found" in s) or ("stream not found" in s)
 
-def _exec_with_retry(engine: Engine, sql: str, params: Dict | None = None, *, tries: int = 2):
+def _exec_with_retry(engine: Engine, sql: str, params: Dict | Iterable[Dict] | None = None, *, tries: int = 2):
     """
     Execute a write (INSERT/UPDATE/DELETE) with a one-time retry on Hrana 'stream not found'.
-    Returns the result proxy so you can read .rowcount.
+    Accepts a single params dict or a list of dicts for executemany.
+    Returns the result proxy of the final attempt.
     """
     attempt = 0
     while True:
@@ -466,7 +476,12 @@ def _filter_and_rank_by_query(df: pd.DataFrame, query: str) -> pd.DataFrame:
 
     # Rank: hits in computed_keywords come first; then by business_name for stability
     dfm["_rank_ckw"] = (~hit_ckw.loc[dfm.index]).astype(int)  # 0 for ckw hit, 1 otherwise
-    dfm.sort_values(by=["_rank_ckw", "business_name"], inplace=True, kind="mergesort")
+    dfm.sort_values(
+        by=["_rank_ckw", "business_name"],
+        key=lambda s: s.astype(str),  # ensure stable sorting even if dtype/object mix
+        inplace=True,
+        kind="mergesort",
+    )
     dfm.drop(columns=["_rank_ckw"], inplace=True, errors="ignore")
     return dfm
 # ==== END: helper – priority search using computed_keywords first ====
@@ -649,11 +664,11 @@ st.markdown(
 # -----------------------------
 REQUIRED_VENDOR_COLUMNS: List[str] = ["business_name", "category"]  # service optional
 
-# ==== BEGIN: ensure_schema per-statement retry (drop-in replacement) ====
+# ==== BEGIN: ensure_schema per-statement retry (corrected to call retry helper with Engine) ====
 def ensure_schema(engine: Engine) -> None:
     """
     Create/upgrade schema with per-statement retry to tolerate transient Hrana drops.
-    Each DDL/DML runs in its own short transaction via engine.begin(), guarded by _exec_with_retry.
+    Each DDL/DML runs independently via _exec_with_retry(engine, ...).
     Idempotent: safe to run on every boot.
     """
     # DDL statements (idempotent)
@@ -704,7 +719,7 @@ def ensure_schema(engine: Engine) -> None:
 
     # Optional one-time fixes (idempotent backfills/sanitizers)
     fixes: list[str] = [
-        # backfill timestamps if blanks (keep ISO yyyy-mm-ddTHH:MM:SSZ or your chosen format)
+        # backfill timestamps if blanks
         """
         UPDATE vendors
            SET created_at = COALESCE(NULLIF(created_at, ''), updated_at, strftime('%Y-%m-%dT%H:%M:%SZ','now')),
@@ -731,14 +746,12 @@ def ensure_schema(engine: Engine) -> None:
 
     # Run DDLs with per-statement retry
     for stmt in ddls:
-        with engine.begin() as cx:
-            _exec_with_retry(cx, sql_text(stmt))
+        _exec_with_retry(engine, stmt)
 
     # Run fixes with per-statement retry
     for stmt in fixes:
-        with engine.begin() as cx:
-            _exec_with_retry(cx, sql_text(stmt))
-# ==== END: ensure_schema per-statement retry (drop-in replacement) ====
+        _exec_with_retry(engine, stmt)
+# ==== END: ensure_schema per-statement retry (corrected) ====
 
 def _normalize_phone(val: str | None) -> str:
     if not val:
@@ -763,7 +776,7 @@ def _sanitize_url(url: str | None) -> str:
     return url
 
 def load_df(engine: Engine) -> pd.DataFrame:
-    with engine.begin() as conn:
+    with engine.connect() as conn:  # read-only
         df = pd.read_sql(sql_text("SELECT * FROM vendors ORDER BY lower(business_name)"), conn)
 
     for col in [
@@ -788,12 +801,12 @@ def load_df(engine: Engine) -> pd.DataFrame:
 # ---- cached taxonomy lookups (no Engine arg; safe to cache) ----
 @st.cache_data(ttl=30, show_spinner=False)
 def list_names(table: str) -> list[str]:
-    with ENGINE.begin() as conn:
+    with ENGINE.connect() as conn:  # read-only
         rows = conn.execute(sql_text(f"SELECT name FROM {table} ORDER BY lower(name)")).fetchall()
     return [r[0] for r in rows]
 
 def usage_count(engine: Engine, col: str, name: str) -> int:
-    with engine.begin() as conn:
+    with engine.connect() as conn:  # read-only
         cnt = conn.execute(sql_text(f"SELECT COUNT(*) FROM vendors WHERE {col} = :n"), {"n": name}).scalar()
     return int(cnt or 0)
 
@@ -827,7 +840,7 @@ ensure_schema(ENGINE)
 # CSV Restore helpers (append-only, ID-checked)
 # -----------------------------
 def _table_columns(engine: Engine, table: str) -> list[str]:
-    with engine.begin() as conn:
+    with engine.connect() as conn:  # read-only
         rows = conn.execute(sql_text(f"PRAGMA table_info({table})")).fetchall()
     return [str(r[1]) for r in rows]
 
@@ -836,7 +849,7 @@ def _existing_ids(engine: Engine, table: str, ids: list[int]) -> set[int]:
         return set()
     out: set[int] = set()
     CHUNK = 900
-    with engine.begin() as conn:
+    with engine.connect() as conn:  # read-only
         for i in range(0, len(ids), CHUNK):
             chunk = ids[i:i+CHUNK]
             q = f"SELECT id FROM {table} WHERE id IN ({','.join([':i'+str(j) for j in range(len(chunk))])})"
@@ -920,7 +933,7 @@ def _prepare_csv_for_append(
         if "updated_at" in d.columns:
             d["updated_at"] = d["updated_at"].replace({None: "", "": None}).fillna(now)
         if "updated_by" in d.columns:
-            d["updated_by"] = d["updated_by"].replace({None: "", "": None}).fillna(os.getenv("USER", "admin"))
+            d["updated_by"] = d["updated_by"].replace({None: "", "": None}).fillna(_updated_by())
 
     return with_id_df, without_id_df, rejected_ids, insertable_cols
 
@@ -946,7 +959,7 @@ def _execute_append_only(
         if "updated_at" in cols and not r.get("updated_at"):
             r["updated_at"] = now
         if "updated_by" in cols and not r.get("updated_by"):
-            r["updated_by"] = os.getenv("USER", "admin")
+            r["updated_by"] = _updated_by()
         if "service" in cols and isinstance(r.get("service"), str) and r["service"].strip() == "":
             r["service"] = None
         return r
@@ -956,8 +969,7 @@ def _execute_append_only(
         ph = ", ".join([f":{c}" for c in cols_explicit])
         cols_sql = ", ".join(cols_explicit)
         sql = f"INSERT INTO vendors({cols_sql}) VALUES({ph})"
-        with engine.begin() as conn:
-            conn.execute(sql_text(sql), rows)
+        _exec_with_retry(engine, sql, rows)
         total += len(rows)
 
     if not without_id_df.empty:
@@ -965,8 +977,7 @@ def _execute_append_only(
         ph = ", ".join([f":{c}" for c in cols_auto])
         cols_sql = ", ".join(cols_auto)
         sql = f"INSERT INTO vendors({cols_sql}) VALUES({ph})"
-        with engine.begin() as conn:
-            conn.execute(sql_text(sql), rows)
+        _exec_with_retry(engine, sql, rows)
         total += len(rows)
 
     return total
@@ -999,6 +1010,11 @@ with _tabs[0]:
             label_visibility="collapsed",
             key="q",
         )
+    # Keep ?q= in the URL for shareable links (best-effort)
+    try:
+        st.query_params["q"] = st.session_state.get("q", "")
+    except Exception:
+        pass
 
     # Prefer matches in computed_keywords first, then other fields
     filtered = _filter_and_rank_by_query(df, (st.session_state.get("q") or ""))
@@ -1131,7 +1147,7 @@ with _tabs[1]:
                         "keywords": keywords,
                         "computed_keywords": ckw,
                         "now": now,
-                        "user": os.getenv("USER", "admin"),
+                        "user": _updated_by(),
                     },
                 )
                 st.session_state["add_last_done"] = add_nonce
@@ -1285,7 +1301,7 @@ with _tabs[1]:
                             "notes": (st.session_state["edit_notes"] or "").strip(),
                             "keywords": (st.session_state["edit_keywords"] or "").strip(),
                             "ckw": ckw,
-                            "now": now, "user": os.getenv("USER", "admin"),
+                            "now": now, "user": _updated_by(),
                             "id": int(vid),
                             "prev_updated": prev_updated,
                         })
@@ -1524,7 +1540,7 @@ with _tabs[4]:
     with col_ckw1:
         if st.button("Recompute MISSING only"):
             try:
-                with ENGINE.begin() as conn:
+                with ENGINE.connect() as conn:  # read-only
                     df_miss = pd.read_sql(
                         sql_text("SELECT * FROM vendors WHERE computed_keywords IS NULL OR computed_keywords=''"),
                         conn
@@ -1537,8 +1553,11 @@ with _tabs[4]:
                         row = r.to_dict()
                         ckw = _kw_from_row_fast(row)
                         updates.append({"ckw": ckw, "id": int(row["id"])})
-                    with ENGINE.begin() as conn:
-                        conn.execute(sql_text("UPDATE vendors SET computed_keywords=:ckw WHERE id=:id"), updates)
+                    _exec_with_retry(
+                        ENGINE,
+                        "UPDATE vendors SET computed_keywords=:ckw WHERE id=:id",
+                        updates,
+                    )
                     st.success(f"Computed keywords filled for {len(updates)} row(s).")
             except Exception as e:
                 st.error(f"Recompute (missing) failed: {e}")
@@ -1546,7 +1565,7 @@ with _tabs[4]:
     with col_ckw2:
         if st.button("Force recompute ALL (rules + TF-IDF)"):
             try:
-                with ENGINE.begin() as conn:
+                with ENGINE.connect() as conn:  # read-only
                     df_all = pd.read_sql(sql_text("SELECT * FROM vendors"), conn)
                 if df_all.empty:
                     st.info("No rows to recompute.")
@@ -1569,8 +1588,11 @@ with _tabs[4]:
                         ckw = _join_kw(terms)
                         updates.append({"ckw": ckw, "id": int(row["id"])})
 
-                    with ENGINE.begin() as conn:
-                        conn.execute(sql_text("UPDATE vendors SET computed_keywords=:ckw WHERE id=:id"), updates)
+                    _exec_with_retry(
+                        ENGINE,
+                        "UPDATE vendors SET computed_keywords=:ckw WHERE id=:id",
+                        updates,
+                    )
 
                     st.success(f"Recomputed keywords for {len(updates)} row(s).")
             except Exception as e:
@@ -1581,7 +1603,7 @@ with _tabs[4]:
 
     # Export full, untruncated CSV of all columns/rows
     query = "SELECT * FROM vendors ORDER BY lower(business_name)"
-    with ENGINE.begin() as conn:
+    with ENGINE.connect() as conn:  # read-only
         full = pd.read_sql(sql_text(query), conn)
 
     # Dual exports: full dataset — formatted phones and digits-only
@@ -1704,7 +1726,7 @@ with _tabs[4]:
                     }),
                     "created_at": now,
                     "updated_at": now,
-                    "updated_by": os.getenv("USER", "admin"),
+                    "updated_by": _updated_by(),
                 }
             )
             # verify visibility inside the same txn
@@ -1743,61 +1765,64 @@ with _tabs[4]:
 
         changed_vendors = 0
         try:
-            with ENGINE.begin() as conn:
-                # --- vendors table ---
+            with ENGINE.connect() as conn:  # read for list; writes use retry below
                 rows = conn.execute(sql_text("SELECT * FROM vendors")).fetchall()
-                for r in rows:
-                    row = dict(r._mapping) if hasattr(r, "_mapping") else dict(r)
-                    pid = int(row["id"])
+            for r in rows:
+                row = dict(r._mapping) if hasattr(r, "_mapping") else dict(r)
+                pid = int(row["id"])
 
-                    vals = {c: to_title(row.get(c)) for c in TEXT_COLS_TO_TITLE}
-                    vals["website"] = _sanitize_url((row.get("website") or "").strip())
-                    vals["phone"] = _normalize_phone(row.get("phone") or "")
-                    vals["id"] = pid
+                vals = {c: to_title(row.get(c)) for c in TEXT_COLS_TO_TITLE}
+                vals["website"] = _sanitize_url((row.get("website") or "").strip())
+                vals["phone"] = _normalize_phone(row.get("phone") or "")
+                vals["id"] = pid
 
-                    conn.execute(
-                        sql_text(
-                            """
-                            UPDATE vendors
-                               SET category=:category,
-                                   service=NULLIF(:service,''),
-                                   business_name=:business_name,
-                                   contact_name=:contact_name,
-                                   phone=:phone,
-                                   address=:address,
-                                   website=:website,
-                                   notes=:notes,
-                                   keywords=:keywords
-                             WHERE id=:id
-                            """
-                        ),
-                        vals,
-                    )
-                    changed_vendors += 1
+                _exec_with_retry(
+                    ENGINE,
+                    """
+                    UPDATE vendors
+                       SET category=:category,
+                           service=NULLIF(:service,''),
+                           business_name=:business_name,
+                           contact_name=:contact_name,
+                           phone=:phone,
+                           address=:address,
+                           website=:website,
+                           notes=:notes,
+                           keywords=:keywords
+                     WHERE id=:id
+                    """,
+                    vals,
+                )
+                changed_vendors += 1
 
-                # --- categories table: retitle + reconcile duplicates by case ---
+            # --- categories table: retitle + reconcile duplicates by case ---
+            with ENGINE.connect() as conn:
                 cat_rows = conn.execute(sql_text("SELECT name FROM categories")).fetchall()
-                for (old_name,) in cat_rows:
-                    new_name = to_title(old_name)
-                    if new_name != old_name:
-                        conn.execute(sql_text("INSERT OR IGNORE INTO categories(name) VALUES(:n)"), {"n": new_name})
-                        conn.execute(
-                            sql_text("UPDATE vendors SET category=:new WHERE category=:old"),
-                            {"new": new_name, "old": old_name},
-                        )
-                        conn.execute(sql_text("DELETE FROM categories WHERE name=:old"), {"old": old_name})
+            for (old_name,) in cat_rows:
+                new_name = to_title(old_name)
+                if new_name != old_name:
+                    _exec_with_retry(ENGINE, "INSERT OR IGNORE INTO categories(name) VALUES(:n)", {"n": new_name})
+                    _exec_with_retry(
+                        ENGINE,
+                        "UPDATE vendors SET category=:new WHERE category=:old",
+                        {"new": new_name, "old": old_name},
+                    )
+                    _exec_with_retry(ENGINE, "DELETE FROM categories WHERE name=:old", {"old": old_name})
 
-                # --- services table: retitle + reconcile duplicates by case ---
+            # --- services table: retitle + reconcile duplicates by case ---
+            with ENGINE.connect() as conn:
                 svc_rows = conn.execute(sql_text("SELECT name FROM services")).fetchall()
-                for (old_name,) in svc_rows:
-                    new_name = to_title(old_name)
-                    if new_name != old_name:
-                        conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new_name})
-                        conn.execute(
-                            sql_text("UPDATE vendors SET service=:new WHERE service=:old"),
-                            {"new": new_name, "old": old_name},
-                        )
-                        conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"old": old_name})
+            for (old_name,) in svc_rows:
+                new_name = to_title(old_name)
+                if new_name != old_name:
+                    _exec_with_retry(ENGINE, "INSERT OR IGNORE INTO services(name) VALUES(:n)", {"n": new_name})
+                    _exec_with_retry(
+                        ENGINE,
+                        "UPDATE vendors SET service=:new WHERE service=:old",
+                        {"new": new_name, "old": old_name},
+                    )
+                    _exec_with_retry(ENGINE, "DELETE FROM services WHERE name=:old", {"old": old_name})
+
             st.success(f"Providers normalized: {changed_vendors}. Categories/services retitled and reconciled.")
             # Refresh lookups and UI so dropdowns don't keep stale case-sensitive options
             list_names.clear()
@@ -1811,17 +1836,15 @@ with _tabs[4]:
     if st.button("Backfill created_at/updated_at when missing"):
         try:
             now = datetime.utcnow().isoformat(timespec="seconds")
-            with ENGINE.begin() as conn:
-                conn.execute(
-                    sql_text(
-                        """
-                        UPDATE vendors
-                           SET created_at = CASE WHEN created_at IS NULL OR created_at = '' THEN :now ELSE created_at END,
-                               updated_at = CASE WHEN updated_at IS NULL OR updated_at = '' THEN :now ELSE updated_at END
-                        """
-                    ),
-                    {"now": now},
-                )
+            _exec_with_retry(
+                ENGINE,
+                """
+                UPDATE vendors
+                   SET created_at = CASE WHEN created_at IS NULL OR created_at = '' THEN :now ELSE created_at END,
+                       updated_at = CASE WHEN updated_at IS NULL OR updated_at = '' THEN :now ELSE updated_at END
+                """,
+                {"now": now},
+            )
             st.success("Backfill complete.")
         except Exception as e:
             st.error(f"Backfill failed: {e}")
@@ -1830,7 +1853,7 @@ with _tabs[4]:
     if st.button("Trim whitespace in text fields (safe)"):
         try:
             changed = 0
-            with ENGINE.begin() as conn:
+            with ENGINE.connect() as conn:
                 rows = conn.execute(
                     sql_text(
                         """
@@ -1840,48 +1863,65 @@ with _tabs[4]:
                     )
                 ).fetchall()
 
-                def clean_soft(s: str | None) -> str:
-                    s = (s or "").strip()
-                    # collapse runs of spaces/tabs only; KEEP line breaks
-                    s = re.sub(r"[ \t]+", " ", s)
-                    return s
+            def clean_soft(s: str | None) -> str:
+                s = (s or "").strip()
+                # collapse runs of spaces/tabs only; KEEP line breaks
+                s = re.sub(r"[ \t]+", " ", s)
+                return s
 
-                for r in rows:
-                    pid = int(r[0])
-                    vals = {
-                        "category": clean_soft(r[1]),
-                        "service": clean_soft(r[2]),
-                        "business_name": clean_soft(r[3]),
-                        "contact_name": clean_soft(r[4]),
-                        "address": clean_soft(r[5]),
-                        "website": _sanitize_url(clean_soft(r[6])),
-                        "notes": clean_soft(r[7]),  # preserves newlines
-                        "keywords": clean_soft(r[8]),
-                        "phone": r[9],  # leave phone unchanged here
-                        "id": pid,
-                    }
-                    conn.execute(
-                        sql_text(
-                            """
-                            UPDATE vendors
-                               SET category=:category,
-                                   service=NULLIF(:service,''),
-                                   business_name=:business_name,
-                                   contact_name=:contact_name,
-                                   phone=:phone,
-                                   address=:address,
-                                   website=:website,
-                                   notes=:notes,
-                                   keywords=:keywords
-                             WHERE id=:id
-                            """
-                        ),
-                        vals,
-                    )
-                    changed += 1
+            for r in rows:
+                pid = int(r[0])
+                vals = {
+                    "category": clean_soft(r[1]),
+                    "service": clean_soft(r[2]),
+                    "business_name": clean_soft(r[3]),
+                    "contact_name": clean_soft(r[4]),
+                    "address": clean_soft(r[5]),
+                    "website": _sanitize_url(clean_soft(r[6])),
+                    "notes": clean_soft(r[7]),  # preserves newlines
+                    "keywords": clean_soft(r[8]),
+                    "phone": r[9],  # leave phone unchanged here
+                    "id": pid,
+                }
+                _exec_with_retry(
+                    ENGINE,
+                    """
+                    UPDATE vendors
+                       SET category=:category,
+                           service=NULLIF(:service,''),
+                           business_name=:business_name,
+                           contact_name=:contact_name,
+                           phone=:phone,
+                           address=:address,
+                           website=:website,
+                           notes=:notes,
+                           keywords=:keywords
+                     WHERE id=:id
+                    """,
+                    vals,
+                )
+                changed += 1
             st.success(f"Whitespace trimmed on {changed} row(s).")
         except Exception as e:
             st.error(f"Trim failed: {e}")
+
+    # Optional storage maintenance
+    with st.expander("Storage maintenance (optional)"):
+        c1, c2 = st.columns(2)
+        if c1.button("ANALYZE"):
+            try:
+                with ENGINE.connect() as cx:
+                    cx.exec_driver_sql("ANALYZE")
+                st.success("ANALYZE completed.")
+            except Exception as e:
+                st.error(f"ANALYZE failed: {e}")
+        if c2.button("VACUUM"):
+            try:
+                with ENGINE.connect() as cx:
+                    cx.exec_driver_sql("VACUUM")
+                st.success("VACUUM completed.")
+            except Exception as e:
+                st.error(f"VACUUM failed: {e}")
 
 # ---------- Debug (only when enabled)
 if _SHOW_DEBUG:
@@ -1890,7 +1930,7 @@ if _SHOW_DEBUG:
         st.subheader("Status & Secrets (debug)")
         st.json(engine_info)
 
-        with ENGINE.begin() as conn:
+        with ENGINE.connect() as conn:  # read-only
             vendors_cols = conn.execute(sql_text("PRAGMA table_info(vendors)")).fetchall()
             categories_cols = conn.execute(sql_text("PRAGMA table_info(categories)")).fetchall()
             services_cols = conn.execute(sql_text("PRAGMA table_info(services)")).fetchall()
