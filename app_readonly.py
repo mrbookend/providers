@@ -181,6 +181,7 @@ st.markdown(
         max-width: {PAGE_MAX_WIDTH_PX}px;
         padding-left: {PAD_LEFT_CSS};
       }}
+      div[data-testid="stDataFrame"] table {{ white-space: nowrap; }}  /* harmless if not used */
       .prov-table td, .prov-table th {{
         white-space: normal;
         word-break: break-word;
@@ -666,6 +667,20 @@ def main():
         st.info("No matching providers. Tip: try fewer words or click × to clear the search.")
     else:
         st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
+
+    # ==== BEGIN: Quick Stats (read-only) ====
+    with st.expander("Quick Stats", expanded=False):
+        try:
+            nrows, ncols = df_disp_sorted.shape
+            st.write({
+                "rows_displayed": int(nrows),
+                "columns": int(ncols),
+                "unique_categories": int(df_disp_sorted["category"].nunique() if "category" in df_disp_sorted else 0),
+                "unique_services": int(df_disp_sorted["service"].nunique() if "service" in df_disp_sorted else 0),
+            })
+        except Exception as _e:
+            st.caption(f"Stats unavailable: {_e}")
+    # ==== END: Quick Stats (read-only) ====
 
     # Debug / Diagnostics (shown only when explicitly enabled)
     if SHOW_DIAGS:
