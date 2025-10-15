@@ -607,7 +607,6 @@ try:
     if hasattr(st, "query_params"):
         existing_q = ""
         try:
-            # st.query_params behaves like a dict in Streamlit 1.40
             existing_q = st.query_params.get("q") or ""
         except Exception:
             existing_q = ""
