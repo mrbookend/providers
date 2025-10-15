@@ -171,8 +171,7 @@ ROW_PX = 32   # approximate row height
 HEADER_PX = 44
 SCROLL_MAX_HEIGHT = HEADER_PX + ROW_PX * VIEWPORT_ROWS  # pixels
 
-# ---- Help/Tips expander state (for Close button) ----
-st.session_state.setdefault("help_open", False)
+# (Removed: top-level st.session_state.setdefault(...) — must not touch session at module scope)
 
 st.markdown(
     f"""
@@ -550,6 +549,10 @@ def main():
     if info.get("strategy") == "local_fallback":
         st.warning("Turso credentials not found. Running on local SQLite fallback (`./vendors.db`).")
 
+    # ---- Safe session defaults (must be inside main) ----
+    if "help_open" not in st.session_state:
+        st.session_state["help_open"] = False
+
     # ---- Load vendors (guarded) ----
     try:
         df_full = fetch_vendors(engine)
@@ -561,40 +564,39 @@ def main():
         st.info("No provider rows to display yet.")
         return
 
-   # ==== BEGIN: Search row (NO Clear button; rerun-safe; no top-level writes) ====
-# Seed default from ?q= only for first render; do NOT write to session_state here
-qp_q = ""
-try:
-    if hasattr(st, "query_params"):
-        qp_q = str(st.query_params.get("q") or "")
-except Exception:
+    # ==== BEGIN: Search row (NO Clear button; rerun-safe; no top-level writes) ====
+    # Seed default from ?q= only for first render; do NOT write to session_state here
     qp_q = ""
+    try:
+        if hasattr(st, "query_params"):
+            qp_q = str(st.query_params.get("q") or "")
+    except Exception:
+        qp_q = ""
 
-q = st.text_input(
-    "Search",
-    key="q",
-    value=st.session_state.get("q", qp_q),
-    label_visibility="collapsed",
-    placeholder="Search e.g., plumb, roofing, \"Inverness\", phone digits…",
-    help="Case-insensitive; keyword hits appear first; matches across all columns. URL ?q= stays in sync.",
-)
+    q = st.text_input(
+        "Search",
+        key="q",
+        value=st.session_state.get("q", qp_q),
+        label_visibility="collapsed",
+        placeholder='Search e.g., plumb, roofing, "Inverness", phone digits…',
+        help="Case-insensitive; keyword hits appear first; matches across all columns. URL ?q= stays in sync.",
+    )
 
-# Keep ?q= synchronized while typing (only update if changed to avoid rerun loops)
-try:
-    if hasattr(st, "query_params"):
-        existing_q = ""
-        try:
-            # st.query_params behaves like a dict in 1.40
-            existing_q = (st.query_params.get("q") or "")
-        except Exception:
+    # Keep ?q= synchronized while typing (only update if changed to avoid rerun loops)
+    try:
+        if hasattr(st, "query_params"):
             existing_q = ""
-        desired_q = st.session_state.get("q", "")
-        if existing_q != desired_q:
-            st.query_params["q"] = desired_q
-except Exception:
-    pass
-# ==== END: Search row ====
-
+            try:
+                # st.query_params behaves like a dict in 1.40
+                existing_q = (st.query_params.get("q") or "")
+            except Exception:
+                existing_q = ""
+            desired_q = st.session_state.get("q", "")
+            if existing_q != desired_q:
+                st.query_params["q"] = desired_q
+    except Exception:
+        pass
+    # ==== END: Search row ====
 
     # ---- Filtering (prioritize computed_keywords if enabled) ----
     if READONLY_PRIORITIZE_CKW:
