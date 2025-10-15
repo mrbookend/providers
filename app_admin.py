@@ -90,16 +90,37 @@ _DB_STRATEGY   = str(st.secrets.get("DB_STRATEGY", "embedded_replica")).strip().
 _TURSO_URL     = str(st.secrets.get("TURSO_DATABASE_URL", "")).strip()
 _TURSO_TOKEN   = str(st.secrets.get("TURSO_AUTH_TOKEN", "")).strip()
 _EMBEDDED_PATH = str(st.secrets.get("EMBEDDED_DB_PATH", "/mount/src/providers/vendors-embedded.db")).strip()
+# --- URL validation for Turso sync (must be libsql://<host>[...]) ---
+from urllib.parse import urlparse
 
 def _validate_sync_url(u: str) -> str:
-    if not u:
+    """
+    Validate and normalize TURSO_DATABASE_URL for sync:
+      - non-empty
+      - scheme must be exactly libsql (case-insensitive)
+      - must NOT start with sqlite+libsql:// (that's an engine URL, not a sync URL)
+      - hostname must be present
+    Returns the stripped string value (original casing for host preserved).
+    """
+    if not u or not str(u).strip():
         raise ValueError("TURSO_DATABASE_URL is empty; expected libsql://<host>")
-    if u.startswith("sqlite+libsql://"):
+
+    s = str(u).strip().strip('"').strip("'")  # trim whitespace and accidental quotes
+
+    # Reject engine-style scheme even if cased weirdly
+    if s.lower().startswith("sqlite+libsql://"):
         raise ValueError("TURSO_DATABASE_URL must start with libsql:// (not sqlite+libsql://)")
-    scheme = u.split("://", 1)[0].lower()
+
+    p = urlparse(s)
+    scheme = (p.scheme or "").lower()
     if scheme != "libsql":
-        raise ValueError(f"Unsupported sync URL scheme: {scheme}:// (expected libsql://)")
-    return u
+        raise ValueError(f"Unsupported sync URL scheme: {p.scheme or '(missing)'}:// (expected libsql://)")
+
+    # Require a hostname; tolerate path/query/port (Turso allows them)
+    if not (p.hostname and p.hostname.strip()):
+        raise ValueError("TURSO_DATABASE_URL is missing a hostname")
+
+    return s  # return normalized string, not the parsed object
 
 # Require remote secrets only when syncing
 if _DB_STRATEGY in ("embedded_replica", "replica", "sync"):
@@ -115,17 +136,19 @@ if _DB_STRATEGY in ("embedded_replica", "replica", "sync"):
 # Back-compat for any remaining references
 _strategy = _DB_STRATEGY
 
-# --- URL masker: never leak tokens/paths; show scheme://host only ---
-from urllib.parse import urlparse
+# --- URL masker: never leak tokens/paths; show scheme://host[:port] only ---
 def _mask_sync_url(u: str) -> str:
     if not u:
         return ""
     try:
         p = urlparse(u)
         host = p.hostname or ""
-        return (p.scheme or "") + "://" + host
+        port = f":{p.port}" if p.port else ""
+        scheme = (p.scheme or "").lower()
+        return f"{scheme}://{host}{port}"
     except Exception:
         return (u.split("://", 1)[0] + "://") if "://" in u else ""
+
 
 # --- Canonical engine builder (embedded replica with libsql sync) ---
 def build_engine_and_probe() -> tuple[Engine, dict]:
