@@ -82,7 +82,6 @@ if _SHOW_DEBUG and _has_streamlit_ctx() and bool(st.secrets.get("SHOW_STATUS", T
     except Exception as _e:
         # Only warn in debug to avoid noise/headless issues
         st.sidebar.warning(f"Version banner failed: {_e}")
-# ==== END: FILE TOP (imports + page_config + Early Boot) ====
 
 # --- Secrets / strategy (validated) ---
 _DB_STRATEGY   = str(st.secrets.get("DB_STRATEGY", "embedded_replica")).strip().lower()
@@ -190,33 +189,9 @@ try:
                 except Exception as _e:
                     st.warning(f"Quick vendors count failed: {type(_e).__name__}: {_e}")
 
-        # Success marker only when debugging
-        if _SHOW_DEBUG:
-            st.success("App reached post-boot marker ✅")
-
         # Stash for reuse (UI context only)
         st.session_state["ENGINE"] = ENGINE
         st.session_state["DB_DBG"]  = _DB_DBG
-
-        if _SHOW_DEBUG:
-            with st.expander("Boot diagnostics (ENGINE + secrets)"):
-                st.json(_DB_DBG)
-
-            if bool(st.secrets.get("SHOW_COUNT", True)):
-                try:
-                    with ENGINE.connect() as cx:
-                        cnt = cx.exec_driver_sql("SELECT COUNT(*) FROM vendors").scalar()
-                    st.info(f"Vendors table row count: {int(cnt or 0)}")
-                except Exception as _e:
-                    st.warning(f"Quick vendors count failed: {type(_e).__name__}: {_e}")
-
-        # Success banner hidden in prod; show only when debugging
-        if _SHOW_DEBUG:
-            st.success("App reached post-boot marker ✅")
-
-        # Stash for reuse (UI context only)
-        st.session_state["ENGINE"] = ENGINE
-        st.session_state["DB_DBG"] = _DB_DBG
     else:
         # Headless import path: validate engine without touching UI/session
         with ENGINE.connect() as cx:
@@ -230,7 +205,6 @@ except Exception as e:
         # Re-raise in headless contexts so CI/linters fail loud
         raise
 # --- End: Single guarded init + diagnostics ---
-
 
 # ==== END: Admin boot bundle (version banner + guards + engine + init) ====
 
@@ -494,7 +468,7 @@ st.markdown(
 )
 
 # -----------------------------
-# DB helpers (schema + IO) — safer DDL (hard on tables, soft on indexes)
+# DB helpers (schema + IO) — plus cascade ops for category/service changes
 # -----------------------------
 REQUIRED_VENDOR_COLUMNS: List[str] = ["business_name", "category"]  # service optional
 
@@ -539,6 +513,7 @@ def ensure_schema(engine: Engine) -> None:
         """,
     ]
 
+    # Note: include a plain index on service to speed cascades
     index_ddls = [
         "CREATE INDEX IF NOT EXISTS idx_vendors_cat ON vendors(category)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_bus ON vendors(business_name)",
@@ -546,6 +521,7 @@ def ensure_schema(engine: Engine) -> None:
         "CREATE INDEX IF NOT EXISTS idx_vendors_bus_lower ON vendors(lower(business_name))",
         "CREATE INDEX IF NOT EXISTS idx_vendors_cat_lower ON vendors(lower(category))",
         "CREATE INDEX IF NOT EXISTS idx_vendors_svc_lower ON vendors(lower(service))",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_svc ON vendors(service)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_phone ON vendors(phone)",
     ]
 
@@ -566,7 +542,6 @@ def ensure_schema(engine: Engine) -> None:
             try:
                 conn.exec_driver_sql(stmt)
             except Exception as e:
-                # Soft-fail: log as a warning in debug mode only
                 if '_SHOW_DEBUG' in globals() and _SHOW_DEBUG and '_has_streamlit_ctx' in globals() and _has_streamlit_ctx():
                     st.warning(f"Index DDL skipped: {e.__class__.__name__}: {e}\n— {stmt}")
 
@@ -576,7 +551,7 @@ def ensure_schema(engine: Engine) -> None:
             return {str(r[1]) for r in rows}
 
         def _add_column_if_missing(table: str, decl: str) -> None:
-            # decl must be like: "computed_keywords TEXT"
+            # decl like: "computed_keywords TEXT"
             col = decl.split()[0]
             try:
                 if col not in _table_columns(table):
@@ -584,9 +559,9 @@ def ensure_schema(engine: Engine) -> None:
             except Exception as e:
                 if '_SHOW_DEBUG' in globals() and _SHOW_DEBUG and '_has_streamlit_ctx' in globals() and _has_streamlit_ctx():
                     st.warning(f"ALTER skipped: {table}.{col}: {e.__class__.__name__}: {e}")
-
-        # Example (disabled by default):
+        # Example (disabled):
         # _add_column_if_missing("vendors", "computed_keywords TEXT")
+
 
 def _normalize_phone(val: str | None) -> str:
     if not val:
@@ -632,9 +607,7 @@ def load_df(engine: Engine) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = ""
 
-    # Display-friendly phone; storage remains digits
     df["phone_fmt"] = df["phone"].apply(_format_phone)
-
     return df
 
 
@@ -650,153 +623,34 @@ def usage_count(engine: Engine, col: str, name: str) -> int:
     return int(cnt or 0)
 
 
-# -----------------------------
-# CSV Restore helpers (append-only, ID-checked)
-# -----------------------------
-def _get_table_columns(engine: Engine, table: str) -> list[str]:
-    with engine.connect() as conn:
-        res = conn.execute(sql_text(f"SELECT * FROM {table} LIMIT 0"))
-        return list(res.keys())
-
-
-def _fetch_existing_ids(engine: Engine, table: str = "vendors") -> set[int]:
-    with engine.connect() as conn:
-        rows = conn.execute(sql_text(f"SELECT id FROM {table}")).all()
-    return {int(r[0]) for r in rows if r[0] is not None}
-
-
-def _prepare_csv_for_append(
-    engine: Engine,
-    csv_df: pd.DataFrame,
-    *,
-    normalize_phone: bool,
-    trim_strings: bool,
-    treat_missing_id_as_autoincrement: bool,
-) -> tuple[pd.DataFrame, pd.DataFrame, list[int], list[str]]:
-    """
-    Returns: (with_id_df, without_id_df, rejected_existing_ids, insertable_columns)
-    DataFrames are already filtered to allowed columns and safe to insert.
-    """
-    df = csv_df.copy()
-
-    # Trim strings
-    if trim_strings:
-        for c in df.columns:
-            if pd.api.types.is_object_dtype(df[c]):
-                df[c] = df[c].astype(str).str.strip()
-
-    # Normalize phone to digits
-    if normalize_phone and "phone" in df.columns:
-        df["phone"] = df["phone"].astype(str).str.replace(r"\D+", "", regex=True)
-
-    db_cols = _get_table_columns(engine, "vendors")
-    insertable_cols = [c for c in df.columns if c in db_cols]
-
-    # Required columns present?
-    missing_req = [c for c in REQUIRED_VENDOR_COLUMNS if c not in df.columns]
-    if missing_req:
-        raise ValueError(f"Missing required column(s) in CSV: {missing_req}")
-
-    # Handle id column
-    has_id = "id" in df.columns
-    existing_ids = _fetch_existing_ids(engine)
-
-    if has_id:
-        df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
-        # Reject rows colliding with existing ids
-        mask_conflict = df["id"].notna() & df["id"].astype("Int64").astype("int", errors="ignore").isin(existing_ids)
-        rejected_existing_ids = df.loc[mask_conflict, "id"].dropna().astype(int).tolist()
-        df_ok = df.loc[~mask_conflict].copy()
-
-        # Split by having id vs. not
-        with_id_df = df_ok[df_ok["id"].notna()].copy()
-        without_id_df = df_ok[df_ok["id"].isna()].copy() if treat_missing_id_as_autoincrement else pd.DataFrame(columns=df.columns)
-    else:
-        rejected_existing_ids = []
-        with_id_df = pd.DataFrame(columns=df.columns)
-        without_id_df = df.copy()
-
-    # Limit to insertable columns and coerce NaN->None for DB
-    def _prep_cols(d: pd.DataFrame, drop_id: bool) -> pd.DataFrame:
-        cols = [c for c in insertable_cols if (c != "id" if drop_id else True)]
-        if not cols:
-            return pd.DataFrame(columns=[])
-        dd = d[cols].copy()
-        for c in cols:
-            dd[c] = dd[c].where(pd.notnull(dd[c]), None)
-        return dd
-
-    with_id_df = _prep_cols(with_id_df, drop_id=False)
-    without_id_df = _prep_cols(without_id_df, drop_id=True)
-
-    # Duplicate ids inside the CSV itself?
-    if "id" in csv_df.columns:
-        dup_ids = (
-            csv_df["id"]
-            .pipe(pd.to_numeric, errors="coerce")
-            .dropna()
-            .astype(int)
-            .duplicated(keep=False)
-        )
-        if dup_ids.any():
-            dups = sorted(csv_df.loc[dup_ids, "id"].dropna().astype(int).unique().tolist())
-            raise ValueError(f"Duplicate id(s) inside CSV: {dups}")
-
-    return with_id_df, without_id_df, rejected_existing_ids, insertable_cols
-
-
-def _execute_append_only(
-    engine: Engine,
-    with_id_df: pd.DataFrame,
-    without_id_df: pd.DataFrame,
-    insertable_cols: list[str],
-) -> int:
-    """Executes INSERTs in a single transaction. Returns total inserted rows."""
-    inserted = 0
+# ---------- Cascade helpers ----------
+def rename_category_and_cascade(engine: Engine, old: str, new: str) -> None:
     with engine.begin() as conn:
-        # with explicit id
-        if not with_id_df.empty:
-            cols = list(with_id_df.columns)  # includes 'id' by construction
-            placeholders = ", ".join(":" + c for c in cols)
-            stmt = sql_text(f"INSERT INTO vendors ({', '.join(cols)}) VALUES ({placeholders})")
-            conn.execute(stmt, with_id_df.to_dict(orient="records"))
-            inserted += len(with_id_df)
+        conn.execute(sql_text("INSERT OR IGNORE INTO categories(name) VALUES(:n)"), {"n": new})
+        conn.execute(sql_text("UPDATE vendors SET category=:new WHERE category=:old"), {"new": new, "old": old})
+        conn.execute(sql_text("DELETE FROM categories WHERE name=:old"), {"old": old})
 
-        # without id (autoincrement)
-        if not without_id_df.empty:
-            cols = list(without_id_df.columns)  # 'id' removed already
-            placeholders = ", ".join(":" + c for c in cols)
-            stmt = sql_text(f"INSERT INTO vendors ({', '.join(cols)}) VALUES ({placeholders})")
-            conn.execute(stmt, without_id_df.to_dict(orient="records"))
-            inserted += len(without_id_df)
+def delete_category_with_reassign(engine: Engine, tgt: str, repl: str) -> None:
+    with engine.begin() as conn:
+        conn.execute(sql_text("UPDATE vendors SET category=:repl WHERE category=:tgt"), {"repl": repl, "tgt": tgt})
+        conn.execute(sql_text("DELETE FROM categories WHERE name=:tgt"), {"tgt": tgt})
 
-    return inserted
+def rename_service_and_cascade(engine: Engine, old: str, new: str) -> None:
+    with engine.begin() as conn:
+        conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new})
+        conn.execute(sql_text("UPDATE vendors SET service=:new WHERE service=:old"), {"new": new, "old": old})
+        conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"old": old})
 
-
-# -----------------------------
-# SINGLE engine wiring for rest of app
-# -----------------------------
-engine: Engine = ENGINE
-engine_info: Dict = _DB_DBG
-
-# Ensure schema on the single engine
-ensure_schema(engine)
-
-# Apply WAL PRAGMAs for local SQLite (NOT for libsql driver)
-try:
-    if engine.dialect.name == "sqlite" and getattr(engine.dialect, "driver", "") != "libsql":
-        with engine.begin() as _conn:
-            _conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
-            _conn.exec_driver_sql("PRAGMA synchronous=NORMAL;")
-except Exception:
-    # Best-effort; ignore if unavailable
-    pass
+def delete_service_with_reassign(engine: Engine, tgt: str, repl: str) -> None:
+    with engine.begin() as conn:
+        conn.execute(sql_text("UPDATE vendors SET service=:repl WHERE service=:tgt"), {"repl": repl, "tgt": tgt})
+        conn.execute(sql_text("DELETE FROM services WHERE name=:tgt"), {"tgt": tgt})
 
 
 # -----------------------------
 # UI
 # -----------------------------
-_tab_labels = [
+_tab_names = [
     "Browse Vendors",
     "Add / Edit / Delete Vendor",
     "Category Admin",
@@ -804,13 +658,13 @@ _tab_labels = [
     "Maintenance",
 ]
 if _SHOW_DEBUG:
-    _tab_labels.append("Debug")
+    _tab_names.append("Debug")
 
-_tabs = st.tabs(_tab_labels)
+_tabs = st.tabs(_tab_names)
 
 # ---------- Browse
 with _tabs[0]:
-    df = load_df(engine)
+    df = load_df(ENGINE)
 
     # --- Build a lowercase search blob once (guarded) ---
     if "_blob" not in df.columns:
@@ -880,8 +734,8 @@ with _tabs[1]:
     _init_add_form_defaults()
     _apply_add_reset_if_needed()  # apply queued reset BEFORE creating widgets
 
-    cats = list_names(engine, "categories")
-    servs = list_names(engine, "services")
+    cats = list_names(ENGINE, "categories")
+    servs = list_names(ENGINE, "services")
 
     add_form_key = f"add_vendor_form_{st.session_state['add_form_version']}"
     with st.form(add_form_key, clear_on_submit=False):
@@ -936,7 +790,7 @@ with _tabs[1]:
             try:
                 now = datetime.utcnow().isoformat(timespec="seconds")
                 _exec_with_retry(
-                    engine,
+                    ENGINE,
                     """
                     INSERT INTO vendors(category, service, business_name, contact_name, phone, address,
                                         website, notes, keywords, created_at, updated_at, updated_by)
@@ -968,7 +822,7 @@ with _tabs[1]:
     st.divider()
     st.subheader("Edit / Delete Vendor")
 
-    df_all = load_df(engine)
+    df_all = load_df(ENGINE)
 
     if df_all.empty:
         st.info("No vendors yet. Use 'Add Vendor' above to create your first record.")
@@ -1027,8 +881,8 @@ with _tabs[1]:
             with col1:
                 st.text_input("Provider *", key="edit_business_name")
 
-                cats = list_names(engine, "categories")
-                servs = list_names(engine, "services")
+                cats = list_names(ENGINE, "categories")
+                servs = list_names(ENGINE, "services")
 
                 _edit_cat_options = [""] + (cats or [])
                 if (st.session_state.get("edit_category") or "") not in _edit_cat_options:
@@ -1071,7 +925,7 @@ with _tabs[1]:
                     try:
                         prev_updated = st.session_state.get("edit_row_updated_at") or ""
                         now = datetime.utcnow().isoformat(timespec="seconds")
-                        res = _exec_with_retry(engine, """
+                        res = _exec_with_retry(ENGINE, """
                             UPDATE vendors
                                SET category=:category,
                                    service=NULLIF(:service, ''),
@@ -1142,7 +996,7 @@ with _tabs[1]:
                 try:
                     row = df_all.loc[df_all["id"] == int(vid)]
                     prev_updated = (row.iloc[0]["updated_at"] if not row.empty else "") or ""
-                    res = _exec_with_retry(engine, """
+                    res = _exec_with_retry(ENGINE, """
                         DELETE FROM vendors
                          WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
                     """, {"id": int(vid), "prev_updated": prev_updated})
@@ -1165,7 +1019,7 @@ with _tabs[2]:
     _init_cat_defaults()
     _apply_cat_reset_if_needed()
 
-    cats = list_names(engine, "categories")
+    cats = list_names(ENGINE, "categories")
     cat_opts = ["— Select —"] + cats  # sentinel first
 
     colA, colB = st.columns(2)
@@ -1177,7 +1031,7 @@ with _tabs[2]:
                 st.error("Enter a name.")
             else:
                 try:
-                    _exec_with_retry(engine, "INSERT OR IGNORE INTO categories(name) VALUES(:n)", {"n": new_cat.strip()})
+                    _exec_with_retry(ENGINE, "INSERT OR IGNORE INTO categories(name) VALUES(:n)", {"n": new_cat.strip()})
                     st.success("Added (or already existed).")
                     _queue_cat_reset()
                     st.rerun()
@@ -1195,8 +1049,7 @@ with _tabs[2]:
                     st.error("Enter a new name.")
                 else:
                     try:
-                        _exec_with_retry(engine, "UPDATE categories SET name=:new WHERE name=:old", {"new": new.strip(), "old": old})
-                        _exec_with_retry(engine, "UPDATE vendors SET category=:new WHERE category=:old", {"new": new.strip(), "old": old})
+                        rename_category_and_cascade(ENGINE, old, new.strip())
                         st.success("Renamed and reassigned.")
                         _queue_cat_reset()
                         st.rerun()
@@ -1210,12 +1063,12 @@ with _tabs[2]:
             if tgt == "— Select —":
                 st.write("Select a category.")
             else:
-                cnt = usage_count(engine, "category", tgt)
+                cnt = usage_count(ENGINE, "category", tgt)
                 st.write(f"In use by {cnt} vendor(s).")
                 if cnt == 0:
                     if st.button("Delete category (no usage)", key="cat_del_btn"):
                         try:
-                            _exec_with_retry(engine, "DELETE FROM categories WHERE name=:n", {"n": tgt})
+                            _exec_with_retry(ENGINE, "DELETE FROM categories WHERE name=:n", {"n": tgt})
                             st.success("Deleted.")
                             _queue_cat_reset()
                             st.rerun()
@@ -1223,14 +1076,13 @@ with _tabs[2]:
                             st.error(f"Delete category failed: {e}")
                 else:
                     repl_options = ["— Select —"] + [c for c in cats if c != tgt]
-                    repl = st.selectbox("Reassign vendors to…", options=repl_options, key="cat_reassign_to")  # no index
+                    repl = st.selectbox("Reassign vendors to…", options=repl_options, key="cat_reassign_to")
                     if st.button("Reassign vendors then delete", key="cat_reassign_btn"):
                         if repl == "— Select —":
                             st.error("Choose a category to reassign to.")
                         else:
                             try:
-                                _exec_with_retry(engine, "UPDATE vendors SET category=:r WHERE category=:t", {"r": repl, "t": tgt})
-                                _exec_with_retry(engine, "DELETE FROM categories WHERE name=:t", {"t": tgt})
+                                delete_category_with_reassign(ENGINE, tgt, repl)
                                 st.success("Reassigned and deleted.")
                                 _queue_cat_reset()
                                 st.rerun()
@@ -1243,7 +1095,7 @@ with _tabs[3]:
     _init_svc_defaults()
     _apply_svc_reset_if_needed()
 
-    servs = list_names(engine, "services")
+    servs = list_names(ENGINE, "services")
     svc_opts = ["— Select —"] + servs  # sentinel first
 
     colA, colB = st.columns(2)
@@ -1255,7 +1107,7 @@ with _tabs[3]:
                 st.error("Enter a name.")
             else:
                 try:
-                    _exec_with_retry(engine, "INSERT OR IGNORE INTO services(name) VALUES(:n)", {"n": new_s.strip()})
+                    _exec_with_retry(ENGINE, "INSERT OR IGNORE INTO services(name) VALUES(:n)", {"n": new_s.strip()})
                     st.success("Added (or already existed).")
                     _queue_svc_reset()
                     st.rerun()
@@ -1273,8 +1125,7 @@ with _tabs[3]:
                     st.error("Enter a new name.")
                 else:
                     try:
-                        _exec_with_retry(engine, "UPDATE services SET name=:new WHERE name=:old", {"new": new.strip(), "old": old})
-                        _exec_with_retry(engine, "UPDATE vendors SET service=:new WHERE service=:old", {"new": new.strip(), "old": old})
+                        rename_service_and_cascade(ENGINE, old, new.strip())
                         st.success(f"Renamed service: {old} → {new.strip()}")
                         _queue_svc_reset()
                         st.rerun()
@@ -1288,12 +1139,12 @@ with _tabs[3]:
             if tgt == "— Select —":
                 st.write("Select a service.")
             else:
-                cnt = usage_count(engine, "service", tgt)
+                cnt = usage_count(ENGINE, "service", tgt)
                 st.write(f"In use by {cnt} vendor(s).")
                 if cnt == 0:
                     if st.button("Delete service (no usage)", key="svc_del_btn"):
                         try:
-                            _exec_with_retry(engine, "DELETE FROM services WHERE name=:n", {"n": tgt})
+                            _exec_with_retry(ENGINE, "DELETE FROM services WHERE name=:n", {"n": tgt})
                             st.success("Deleted.")
                             _queue_svc_reset()
                             st.rerun()
@@ -1301,14 +1152,13 @@ with _tabs[3]:
                             st.error(f"Delete service failed: {e}")
                 else:
                     repl_options = ["— Select —"] + [s for s in servs if s != tgt]
-                    repl = st.selectbox("Reassign vendors to…", options=repl_options, key="svc_reassign_to")  # no index
+                    repl = st.selectbox("Reassign vendors to…", options=repl_options, key="svc_reassign_to")
                     if st.button("Reassign vendors then delete service", key="svc_reassign_btn"):
                         if repl == "— Select —":
                             st.error("Choose a service to reassign to.")
                         else:
                             try:
-                                _exec_with_retry(engine, "UPDATE vendors SET service=:r WHERE service=:t", {"r": repl, "t": tgt})
-                                _exec_with_retry(engine, "DELETE FROM services WHERE name=:t", {"t": tgt})
+                                delete_service_with_reassign(ENGINE, tgt, repl)
                                 st.success("Reassigned and deleted.")
                                 _queue_svc_reset()
                                 st.rerun()
@@ -1323,7 +1173,7 @@ with _tabs[4]:
 
     # Export full, untruncated CSV of all columns/rows
     query = "SELECT * FROM vendors ORDER BY lower(business_name)"
-    with engine.begin() as conn:
+    with ENGINE.begin() as conn:
         full = pd.read_sql(sql_text(query), conn)
 
     # Dual exports: full dataset — formatted phones and digits-only
@@ -1374,7 +1224,7 @@ with _tabs[4]:
             try:
                 df_in = pd.read_csv(uploaded)
                 with_id_df, without_id_df, rejected_ids, insertable_cols = _prepare_csv_for_append(
-                    engine,
+                    ENGINE,
                     df_in,
                     normalize_phone=normalize_phone,
                     trim_strings=trim_strings,
@@ -1401,7 +1251,7 @@ with _tabs[4]:
                     if planned_inserts == 0:
                         st.info("Nothing to insert (all rows rejected or CSV empty after filters).")
                     else:
-                        inserted = _execute_append_only(engine, with_id_df, without_id_df, insertable_cols)
+                        inserted = _execute_append_only(ENGINE, with_id_df, without_id_df, insertable_cols)
                         st.success(f"Inserted {inserted} row(s). Rejected existing id(s): {rejected_ids or 'None'}")
             except Exception as e:
                 st.error(f"CSV restore failed: {e}")
@@ -1425,7 +1275,7 @@ with _tabs[4]:
 
         changed_vendors = 0
         try:
-            with engine.begin() as conn:
+            with ENGINE.begin() as conn:
                 # --- vendors table ---
                 rows = conn.execute(sql_text("SELECT * FROM vendors")).fetchall()
                 for r in rows:
@@ -1488,7 +1338,7 @@ with _tabs[4]:
     if st.button("Backfill created_at/updated_at when missing"):
         try:
             now = datetime.utcnow().isoformat(timespec="seconds")
-            with engine.begin() as conn:
+            with ENGINE.begin() as conn:
                 conn.execute(
                     sql_text(
                         """
@@ -1507,7 +1357,7 @@ with _tabs[4]:
     if st.button("Trim whitespace in text fields (safe)"):
         try:
             changed = 0
-            with engine.begin() as conn:
+            with ENGINE.begin() as conn:
                 rows = conn.execute(
                     sql_text(
                         """
@@ -1560,13 +1410,14 @@ with _tabs[4]:
         except Exception as e:
             st.error(f"Trim failed: {e}")
 
-# ---------- Debug
+# ---------- Debug (only when enabled)
 if _SHOW_DEBUG:
     with _tabs[-1]:
+        engine_info: Dict = _DB_DBG
         st.subheader("Status & Secrets (debug)")
         st.json(engine_info)
 
-        with engine.begin() as conn:
+        with ENGINE.begin() as conn:
             vendors_cols = conn.execute(sql_text("PRAGMA table_info(vendors)")).fetchall()
             categories_cols = conn.execute(sql_text("PRAGMA table_info(categories)")).fetchall()
             services_cols = conn.execute(sql_text("PRAGMA table_info(services)")).fetchall()
@@ -1602,30 +1453,3 @@ if _SHOW_DEBUG:
                 "timestamp_nulls": {"created_at": int(created_at_nulls), "updated_at": int(updated_at_nulls)},
             }
         )
-
-        # --- Null timestamp counts (quick sanity) ---
-        created_at_nulls = conn.execute(
-            sql_text("SELECT COUNT(*) FROM vendors WHERE created_at IS NULL OR created_at=''")
-        ).scalar() or 0
-        updated_at_nulls = conn.execute(
-            sql_text("SELECT COUNT(*) FROM vendors WHERE updated_at IS NULL OR updated_at=''")
-        ).scalar() or 0
-
-        counts = {
-            "vendors": conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0,
-            "categories": conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar() or 0,
-            "services": conn.execute(sql_text("SELECT COUNT(*) FROM services")).scalar() or 0,
-        }
-
-    st.subheader("DB Probe")
-    st.json(
-        {
-            "vendors_columns": [c[1] for c in vendors_cols],
-            "categories_columns": [c[1] for c in categories_cols],
-            "services_columns": [c[1] for c in services_cols],
-            "counts": counts,
-            "vendors_indexes": vendors_indexes,
-            "timestamp_nulls": {"created_at": int(created_at_nulls), "updated_at": int(updated_at_nulls)},
-        }
-    )
-
