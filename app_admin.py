@@ -495,12 +495,19 @@ st.markdown(
 
 
 # -----------------------------
-# DB helpers (schema + IO)
+# DB helpers (schema + IO) — robust DDL with per-statement tracing
 # -----------------------------
 REQUIRED_VENDOR_COLUMNS: List[str] = ["business_name", "category"]  # service optional
 
 def ensure_schema(engine: Engine) -> None:
-    stmts = [
+    """
+    Create tables and indexes if missing.
+    Uses exec_driver_sql (friendlier for DDL) and wraps each statement so
+    if something fails you see exactly which DDL caused it.
+    Also conditionally adds known columns if they don’t exist.
+    """
+    create_stmts = [
+        # Tables
         """
         CREATE TABLE IF NOT EXISTS vendors (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -530,6 +537,7 @@ def ensure_schema(engine: Engine) -> None:
           name TEXT UNIQUE
         )
         """,
+        # Indexes
         "CREATE INDEX IF NOT EXISTS idx_vendors_cat ON vendors(category)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_bus ON vendors(business_name)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_kw  ON vendors(keywords)",
@@ -538,9 +546,34 @@ def ensure_schema(engine: Engine) -> None:
         "CREATE INDEX IF NOT EXISTS idx_vendors_svc_lower ON vendors(lower(service))",
         "CREATE INDEX IF NOT EXISTS idx_vendors_phone ON vendors(phone)",
     ]
+
     with engine.begin() as conn:
-        for s in stmts:
-            conn.execute(sql_text(s))
+        # 1) Run basic DDLs with explicit tracing
+        for s in create_stmts:
+            stmt = s.strip()
+            try:
+                conn.exec_driver_sql(stmt)
+            except Exception as e:
+                # Raise with the exact statement so you know what failed
+                raise ValueError(f"DDL failed: {e.__class__.__name__}: {e}\n--- SQL ---\n{stmt}\n") from e
+
+        # 2) Defensive: add expected columns if DB has an older shape
+        def _table_columns(table: str) -> set[str]:
+            rows = conn.execute(sql_text(f"PRAGMA table_info({table})")).fetchall()
+            return {str(r[1]) for r in rows}
+
+        def _add_column_if_missing(table: str, col: str, decl: str) -> None:
+            if col not in _table_columns(table):
+                try:
+                    conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {decl}")
+                except Exception as e:
+                    raise ValueError(
+                        f"ALTER TABLE add-column failed on {table}.{col}: {e.__class__.__name__}: {e}"
+                    ) from e
+
+        # Example: if you later decide to persist a computed column
+        # _add_column_if_missing("vendors", "computed_keywords", "TEXT")
+
 
 
 def _normalize_phone(val: str | None) -> str:
