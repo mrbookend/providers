@@ -144,7 +144,7 @@ SHOW_STATUS = _as_bool(_get_secret("READONLY_SHOW_STATUS", False), False)
 # Prioritized-search toggle (enabled by default; can turn off in secrets)
 READONLY_PRIORITIZE_CKW = _as_bool(_get_secret("READONLY_PRIORITIZE_CKW", "true"), True)
 
-# Cache TTL (seconds) for the read query (default 120)
+# Cache TTL (seconds) for vendor list (default 120; override with READONLY_CACHE_TTL)
 READONLY_CACHE_TTL = _to_int(_get_secret("READONLY_CACHE_TTL", 120), 120)
 
 # Apply sidebar state retroactively (page title must stay as set_page_config)
@@ -259,6 +259,8 @@ _DEFAULT_WIDTHS = {
     "created_at": 120,
     "updated_at": 120,
     "updated_by": 120,
+    # internal-only (not displayed) but keep a default in case surfaced
+    "website_url": 180,
 }
 
 # Only accept known width keys; ignore accidental extras (e.g., HELP_MD)
@@ -287,6 +289,7 @@ HIDE_IN_DISPLAY = {
     "created_at",
     "updated_at",
     "updated_by",
+    "website_url",  # internal plain URL used for search/export
 }
 
 # =============================
@@ -376,7 +379,7 @@ VENDOR_COLS = [
     "website",
     "notes",
     "keywords",
-    "computed_keywords",  # included for prioritized search; kept hidden from display
+    "computed_keywords",  # used for prioritized search; hidden from display
     "created_at",
     "updated_at",
     "updated_by",
@@ -389,21 +392,27 @@ def fetch_vendors(_engine: Engine) -> pd.DataFrame:
     Leading underscore on _engine tells Streamlit not to hash the Engine object.
     """
     sql = "SELECT " + ", ".join(VENDOR_COLS) + " FROM vendors ORDER BY lower(business_name)"
-    with _engine.begin() as conn:
+    with _engine.connect() as conn:  # read-only; no transaction
         df = pd.read_sql(sql_text(sql), conn)
 
-    def _mk_anchor(v: str) -> str:
-        if not isinstance(v, str) or not v.strip():
+    def _normalize_url(v: str) -> str:
+        s = (v or "").strip()
+        if not s:
             return ""
-        u = v.strip()
-        if not (u.startswith("http://") or u.startswith("https://")):
-            u = "https://" + u
-        href = html.escape(u, quote=True)
-        return f'<a href="{href}" target="_blank" rel="noopener noreferrer nofollow">Website</a>'
+        if not (s.startswith("http://") or s.startswith("https://")):
+            s = "https://" + s
+        return s
 
+    # Build a plain URL column for search/export; render anchor for UI
     if "website" in df.columns:
-        df["website"] = df["website"].fillna("").astype(str).map(_mk_anchor)
+        df["website"] = df["website"].fillna("").astype(str)
+        df["website_url"] = df["website"].map(_normalize_url)
+        df["website"] = df["website_url"].map(
+            lambda u: f'<a href="{html.escape(u, quote=True)}" target="_blank" rel="noopener noreferrer nofollow">Website</a>'
+            if u else ""
+        )
 
+    # Coerce common text columns to string (but keep id/timestamps as-is)
     for c in df.columns:
         if c not in ("id", "created_at", "updated_at"):
             df[c] = df[c].fillna("").astype(str)
@@ -413,14 +422,14 @@ def fetch_vendors(_engine: Engine) -> pd.DataFrame:
 # Filtering
 # =============================
 def apply_global_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
-    """Pure contains across all columns (case-insensitive)."""
+    """Vectorized contains-any across all columns (case-insensitive)."""
     q = (query or "").strip().lower()
-    if not q:
+    if not q or df.empty:
         return df
-    mask = pd.Series(False, index=df.index)
-    for c in df.columns:
-        s = df[c].astype(str).str.lower()
-        mask |= s.str.contains(q, regex=False, na=False)
+    # Lowercase, string view of all columns
+    hay = df.astype(str).apply(lambda s: s.str.lower(), axis=0)
+    # contains per-column, reduce with any(axis=1)
+    mask = hay.apply(lambda s: s.str.contains(q, regex=False, na=False), axis=0).any(axis=1)
     return df[mask]
 
 def _filter_and_rank_by_query(df: pd.DataFrame, query: str) -> pd.DataFrame:
@@ -429,7 +438,7 @@ def _filter_and_rank_by_query(df: pd.DataFrame, query: str) -> pd.DataFrame:
     Case-insensitive substring match. Falls back gracefully if column is missing.
     """
     q = (query or "").strip().lower()
-    if not q:
+    if not q or df.empty:
         return df
 
     # Safe access / fallbacks
@@ -442,27 +451,28 @@ def _filter_and_rank_by_query(df: pd.DataFrame, query: str) -> pd.DataFrame:
             df.get("contact_name", ""),
             df.get("phone", ""),
             df.get("address", ""),
-            df.get("website", ""),
+            df.get("website_url", ""),  # search plain URL, not HTML anchor
             df.get("notes", ""),
             df.get("keywords", ""),
         ],
         axis=1,
     ).astype(str).agg(" ".join, axis=1).str.lower()
 
-    hit_ckw = ckw.str.contains(q, na=False)
-    hit_oth = other.str_contains(q, regex=False).fillna(False) if hasattr(other, "str_contains") else other.str.contains(q, regex=False, na=False)
+    hit_ckw = ckw.str.contains(q, regex=False, na=False)
+    hit_oth = other.str.contains(q, regex=False, na=False)
     any_hit = hit_ckw | hit_oth
 
     dfm = df.loc[any_hit].copy()
     dfm["_rank_ckw"] = (~hit_ckw.loc[dfm.index]).astype(int)  # 0 for ckw hit, 1 otherwise
-    # stable sort; tie-break by business_name for predictability
+
+    # Deterministic tie-break: business_name (case-insensitive), fallback empty string
+    dfm["__bn"] = dfm.get("business_name", "").astype(str).str.lower()
     dfm.sort_values(
-        by=["_rank_ckw", "business_name"] if "business_name" in dfm.columns else ["_rank_ckw"],
-        key=(lambda s: s.astype(str).str.lower()) if "business_name" in dfm.columns else None,
+        by=["_rank_ckw", "__bn"],
         kind="mergesort",
         inplace=True,
     )
-    dfm.drop(columns=["_rank_ckw"], inplace=True, errors="ignore")
+    dfm.drop(columns=["_rank_ckw", "__bn"], inplace=True, errors="ignore")
     return dfm
 
 # =============================
@@ -494,7 +504,7 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
             val = row[col]
             width = COLUMN_WIDTHS_PX_READONLY.get(orig, 140)
             if orig == "website":
-                cell_html = val
+                cell_html = val  # already an <a> anchor
             else:
                 cell_html = html.escape(str(val) if val is not None else "")
             tds.append(f'<td style="min-width:{width}px;max-width:{width}px;">{cell_html}</td>')
@@ -599,8 +609,9 @@ def main():
 
     # Prepare CSV with plain URLs (no HTML anchors)
     csv_df = df_disp_sorted.copy()
-    if "website" in csv_df.columns and not csv_df.empty:
-        csv_df["website"] = csv_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
+    if "website" in csv_df.columns and "website_url" in filtered_full.columns and not csv_df.empty:
+        # Replace display anchor with plain URL for export
+        csv_df["website"] = filtered_full.loc[csv_df.index, "website_url"].fillna("").astype(str)
     csv_buf = io.StringIO()
     if not csv_df.empty:
         csv_df.to_csv(csv_buf, index=False)
@@ -615,11 +626,10 @@ def main():
             disabled=csv_df.empty,
         )
 
-    # Prepare XLSX with plain URLs (already converting)
+    # Prepare XLSX with plain URLs
     excel_df = df_disp_sorted.copy()
-    if "website" in excel_df.columns and not excel_df.empty:
-        # Convert anchor to plain URL for Excel export
-        excel_df["website"] = excel_df["website"].str.replace(r'.*href="([^"]+)".*', r"\1", regex=True)
+    if "website" in excel_df.columns and "website_url" in filtered_full.columns and not excel_df.empty:
+        excel_df["website"] = filtered_full.loc[excel_df.index, "website_url"].fillna("").astype(str)
 
     xlsx_buf = io.BytesIO()
     if not excel_df.empty:
