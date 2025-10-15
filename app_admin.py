@@ -174,6 +174,12 @@ try:
     ENGINE, _DB_DBG = build_engine_and_probe()
 
     if _has_streamlit_ctx():
+        # Sidebar runtime overrides (session-only toggle; takes effect next rerun)
+        with st.sidebar.expander("Admin runtime toggles", expanded=False):
+            st.checkbox("Show debug (this session only)", key="ADMIN_RUNTIME_DEBUG")
+        if st.session_state.get("ADMIN_RUNTIME_DEBUG"):
+            _SHOW_DEBUG = True  # session override (safe; defaults still from secrets)
+
         # Sidebar notice only when debugging (keeps sidebar hidden in prod)
         if _SHOW_DEBUG:
             st.sidebar.success("DB ready")
@@ -794,6 +800,154 @@ def delete_service_with_reassign(engine: Engine, tgt: str, repl: str) -> None:
 ensure_schema(ENGINE)
 
 # -----------------------------
+# CSV Restore helpers (append-only, ID-checked)
+# -----------------------------
+def _table_columns(engine: Engine, table: str) -> list[str]:
+    with engine.begin() as conn:
+        rows = conn.execute(sql_text(f"PRAGMA table_info({table})")).fetchall()
+    return [str(r[1]) for r in rows]
+
+def _existing_ids(engine: Engine, table: str, ids: list[int]) -> set[int]:
+    if not ids:
+        return set()
+    out: set[int] = set()
+    CHUNK = 900
+    with engine.begin() as conn:
+        for i in range(0, len(ids), CHUNK):
+            chunk = ids[i:i+CHUNK]
+            q = f"SELECT id FROM {table} WHERE id IN ({','.join([':i'+str(j) for j in range(len(chunk))])})"
+            params = {('i'+str(j)): int(chunk[j]) for j in range(len(chunk))}
+            rows = conn.execute(sql_text(q), params).fetchall()
+            out.update(int(r[0]) for r in rows)
+    return out
+
+def _prepare_csv_for_append(
+    engine: Engine,
+    df_in: pd.DataFrame,
+    *,
+    normalize_phone: bool = True,
+    trim_strings: bool = True,
+    treat_missing_id_as_autoincrement: bool = True,
+):
+    """
+    Returns: (with_id_df, without_id_df, rejected_ids, insertable_cols)
+    - with_id_df: rows that have a non-conflicting explicit id
+    - without_id_df: rows that will autoincrement id
+    - rejected_ids: list of ids rejected because they already exist
+    - insertable_cols: final column list we will insert
+    """
+    table_cols = _table_columns(engine, "vendors")
+    df = df_in.copy()
+    insertable_cols = [c for c in df.columns if c in table_cols]
+    if not insertable_cols:
+        return pd.DataFrame(), pd.DataFrame(), [], insertable_cols
+    df = df[insertable_cols]
+
+    def _soft_trim(s):
+        if isinstance(s, str):
+            return re.sub(r"[ \t]+", " ", s.strip())
+        return s
+
+    if trim_strings:
+        for c in df.columns:
+            if df[c].dtype == "object":
+                df[c] = df[c].map(_soft_trim)
+
+    if normalize_phone and "phone" in df.columns:
+        df["phone"] = df["phone"].map(_normalize_phone)
+
+    if "website" in df.columns:
+        df["website"] = df["website"].map(_sanitize_url)
+
+    has_id = "id" in df.columns
+    with_id_df = pd.DataFrame(columns=insertable_cols)
+    without_id_df = pd.DataFrame(columns=[c for c in insertable_cols if c != "id"])
+
+    if has_id:
+        exp = df[~df["id"].isna() & (df["id"].astype(str).strip() != "")]
+        exp = exp.copy()
+
+        def _to_int_or_none(x):
+            try:
+                return int(str(x).strip())
+            except Exception:
+                return None
+
+        exp["id"] = exp["id"].map(_to_int_or_none)
+        exp = exp[~exp["id"].isna()]
+
+        exists = _existing_ids(engine, "vendors", exp["id"].astype(int).tolist())
+        rejected_ids = sorted(list(exists))
+        with_id_df = exp[~exp["id"].isin(exists)].copy()
+
+        if treat_missing_id_as_autoincrement:
+            miss = df[df["id"].isna() | (df["id"].astype(str).strip() == "")]
+            without_id_df = miss.drop(columns=["id"], errors="ignore").copy()
+        else:
+            without_id_df = pd.DataFrame(columns=[c for c in insertable_cols if c != "id"])
+    else:
+        rejected_ids = []
+        without_id_df = df.copy()
+
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    for d in (with_id_df, without_id_df):
+        if "created_at" in d.columns:
+            d["created_at"] = d["created_at"].replace({None: "", "": None}).fillna(now)
+        if "updated_at" in d.columns:
+            d["updated_at"] = d["updated_at"].replace({None: "", "": None}).fillna(now)
+        if "updated_by" in d.columns:
+            d["updated_by"] = d["updated_by"].replace({None: "", "": None}).fillna(os.getenv("USER", "admin"))
+
+    return with_id_df, without_id_df, rejected_ids, insertable_cols
+
+def _execute_append_only(
+    engine: Engine,
+    with_id_df: pd.DataFrame,
+    without_id_df: pd.DataFrame,
+    insertable_cols: list[str],
+) -> int:
+    """
+    Executes two INSERT batches: explicit-id rows and autoincrement rows.
+    Returns total number of rows inserted.
+    """
+    total = 0
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    cols_explicit = insertable_cols[:]
+    cols_auto = [c for c in insertable_cols if c != "id"]
+
+    def _fill_defaults(row: dict, cols: list[str]) -> dict:
+        r = {c: row.get(c, None) for c in cols}
+        if "created_at" in cols and not r.get("created_at"):
+            r["created_at"] = now
+        if "updated_at" in cols and not r.get("updated_at"):
+            r["updated_at"] = now
+        if "updated_by" in cols and not r.get("updated_by"):
+            r["updated_by"] = os.getenv("USER", "admin")
+        if "service" in cols and isinstance(r.get("service"), str) and r["service"].strip() == "":
+            r["service"] = None
+        return r
+
+    if not with_id_df.empty:
+        rows = [_fill_defaults(rec, cols_explicit) for rec in with_id_df.to_dict(orient="records")]
+        ph = ", ".join([f":{c}" for c in cols_explicit])
+        cols_sql = ", ".join(cols_explicit)
+        sql = f"INSERT INTO vendors({cols_sql}) VALUES({ph})"
+        with engine.begin() as conn:
+            conn.execute(sql_text(sql), rows)
+        total += len(rows)
+
+    if not without_id_df.empty:
+        rows = [_fill_defaults(rec, cols_auto) for rec in without_id_df.to_dict(orient="records")]
+        ph = ", ".join([f":{c}" for c in cols_auto])
+        cols_sql = ", ".join(cols_auto)
+        sql = f"INSERT INTO vendors({cols_sql}) VALUES({ph})"
+        with engine.begin() as conn:
+            conn.execute(sql_text(sql), rows)
+        total += len(rows)
+
+    return total
+
+# -----------------------------
 # UI
 # -----------------------------
 _tab_names = [
@@ -971,6 +1125,7 @@ with _tabs[1]:
                 st.session_state["add_last_done"] = add_nonce
                 st.success(f"Vendor added: {business_name}")
                 _queue_add_form_reset()
+                list_names.clear()  # refresh cached taxonomy
                 _nonce_rotate("add")
                 st.rerun()
             except Exception as e:
@@ -1131,6 +1286,7 @@ with _tabs[1]:
                             st.success(f"Vendor updated: {bn}")
                             _queue_edit_form_reset()
                             _nonce_rotate("edit")
+                            list_names.clear()
                             st.rerun()
                     except Exception as e:
                         st.error(f"Update failed: {e}")
@@ -1178,6 +1334,7 @@ with _tabs[1]:
                         st.success("Vendor deleted.")
                         _queue_delete_form_reset()
                         _nonce_rotate("delete")
+                        list_names.clear()
                         st.rerun()
                 except Exception as e:
                     st.error(f"Delete failed: {e}")
@@ -1439,7 +1596,7 @@ with _tabs[4]:
             mime="text/csv",
         )
 
-    # CSV Restore UI (Append-only, ID-checked) — guarded if helpers absent
+    # CSV Restore UI (Append-only, ID-checked) — helpers bundled
     have_csv_helpers = all(name in globals() for name in ("_prepare_csv_for_append", "_execute_append_only"))
     if have_csv_helpers:
         with st.expander("CSV Restore (Append-only, ID-checked)", expanded=False):
@@ -1496,6 +1653,62 @@ with _tabs[4]:
                     st.error(f"CSV restore failed: {e}")
     else:
         st.info("CSV Restore is disabled in this build (helpers not bundled).")
+
+    st.divider()
+    st.subheader("Integrity self-test")
+
+    if st.button("Run insert/rollback self-test"):
+        try:
+            conn = ENGINE.connect()
+            trans = conn.begin()  # manual transaction so we can rollback
+            now = datetime.utcnow().isoformat(timespec="seconds")
+            probe_name = f"_probe_vendor_{uuid.uuid4().hex[:8]}"
+            conn.execute(
+                sql_text("""
+                    INSERT INTO vendors(category, service, business_name, contact_name, phone, address,
+                                        website, notes, keywords, computed_keywords, created_at, updated_at, updated_by)
+                    VALUES(:category, :service, :business_name, :contact_name, :phone, :address,
+                           :website, :notes, :keywords, :computed_keywords, :created_at, :updated_at, :updated_by)
+                """),
+                {
+                    "category": "_Probe",
+                    "service": None,
+                    "business_name": probe_name,
+                    "contact_name": "Tester",
+                    "phone": "5555555555",
+                    "address": "123 Test Ln",
+                    "website": "https://example.com",
+                    "notes": "self-test insert",
+                    "keywords": "probe, test",
+                    "computed_keywords": _kw_from_row_fast({
+                        "business_name": probe_name,
+                        "category": "_Probe",
+                        "service": "",
+                        "notes": "self-test insert",
+                        "address": "123 Test Ln",
+                        "keywords": "probe, test",
+                    }),
+                    "created_at": now,
+                    "updated_at": now,
+                    "updated_by": os.getenv("USER", "admin"),
+                }
+            )
+            # verify visibility inside the same txn
+            exists = conn.execute(
+                sql_text("SELECT COUNT(*) AS c FROM vendors WHERE business_name=:n"),
+                {"n": probe_name}
+            ).scalar() or 0
+
+            # rollback to leave DB unchanged
+            trans.rollback()
+            conn.close()
+
+            if exists:
+                st.success("Self-test passed: insert was visible inside transaction and rolled back cleanly.")
+            else:
+                st.warning("Self-test inconclusive: inserted row not visible during transaction.")
+        except Exception as e:
+            st.error(f"Self-test failed: {type(e).__name__}: {e}")
 
     st.divider()
     st.subheader("Data cleanup")
