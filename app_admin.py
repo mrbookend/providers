@@ -493,7 +493,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
 # -----------------------------
 # DB helpers (schema + IO) — safer DDL (hard on tables, soft on indexes)
 # -----------------------------
@@ -557,7 +556,6 @@ def ensure_schema(engine: Engine) -> None:
             try:
                 conn.exec_driver_sql(stmt)
             except Exception as e:
-                # Bubble the exact failing SQL so we know what tripped
                 raise ValueError(
                     f"TABLE DDL failed: {e.__class__.__name__}: {e}\n--- SQL ---\n{stmt}\n"
                 ) from e
@@ -589,9 +587,6 @@ def ensure_schema(engine: Engine) -> None:
 
         # Example (disabled by default):
         # _add_column_if_missing("vendors", "computed_keywords TEXT")
-
-
-
 
 def _normalize_phone(val: str | None) -> str:
     if not val:
