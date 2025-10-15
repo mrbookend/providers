@@ -230,6 +230,47 @@ if SHOW_STATUS:
     except Exception as _e:
         st.sidebar.warning(f"Version banner failed: {_e}")
 
+# ==== BEGIN: Read-only guardrail block (order + null-safe) ====
+
+# 1) Build engine & show diagnostics
+ENGINE, _DB_DBG = build_engine_and_probe()
+if ENGINE is None:
+    st.error("Database engine failed to initialize. See Boot diagnostics.")
+    st.stop()
+
+with st.expander("Boot diagnostics (ENGINE + secrets)"):
+    st.json(_DB_DBG)
+
+# 2) Smoke test (prove table exists & is reachable)
+try:
+    with ENGINE.connect() as cx:
+        _rowcount = cx.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar_one()
+    st.sidebar.success(f"DB OK · vendors rows: {_rowcount}")
+except Exception as e:
+    st.error(f"Smoke test failed: {e.__class__.__name__}: {e}")
+    st.stop()
+
+# 3) Load dataframe (fail safe)
+try:
+    df_full = pd.read_sql(sql_text("SELECT * FROM vendors"), ENGINE)
+except Exception as e:
+    st.error(f"Failed to load vendors: {e.__class__.__name__}: {e}")
+    st.stop()
+
+if df_full is None or df_full.empty:
+    st.info("No provider rows to display yet.")
+    st.stop()
+
+# 4) Get query, then filter
+q = st.text_input(
+    "Search",
+    value=(st.query_params.get("q", "") if hasattr(st, "query_params") else "")
+)
+filtered_full = _filter_and_rank_by_query(df_full, q or "")
+
+# ==== END: Read-only guardrail block ====
+
+
 if SHOW_DIAGS:
     st.caption(f"HELP_MD present: {'HELP_MD' in getattr(st, 'secrets', {})}")
     st.caption(
