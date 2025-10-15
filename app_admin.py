@@ -1046,9 +1046,24 @@ with _tabs[1]:
             st.text_input("Phone (10 digits or blank)", key="add_phone")
         with col2:
             st.text_area("Address", height=80, key="add_address")
-            st.text_input("Website (https://…)", key="add_website")
+                        st.text_input("Website (https://…)", key="add_website")
             st.text_area("Notes", height=100, key="add_notes")
             st.text_input("Keywords (comma separated)", key="add_keywords")
+
+            # ==== BEGIN: CKW on Add (manual lock + preview) ====
+            st.checkbox("Lock computed keywords on create", value=False, key="add_ckw_locked")
+            if st.form_submit_button("Suggest computed keywords", type="secondary"):
+                _bn = (st.session_state["add_business_name"] or "").strip()
+                _cat = (st.session_state["add_category"] or "").strip()
+                _svc = (st.session_state["add_service"] or "").strip(" /;,")
+                st.session_state["_ckw_add_suggest"] = build_computed_keywords(_cat, _svc, _bn, CKW_MAX_TERMS)
+            st.text_area(
+                "computed_keywords (optional; leave blank to auto-generate)",
+                value=st.session_state.get("_ckw_add_suggest", ""),
+                height=90,
+                key="add_computed_keywords",
+            )
+            # ==== END: CKW on Add (manual lock + preview) ====
 
         submitted = st.form_submit_button("Add Provider")
 
@@ -1101,8 +1116,8 @@ with _tabs[1]:
                         "website": website,
                         "notes": notes,
                         "keywords": keywords,
-                        "computed_keywords": ckw_final,
-                        "ckw_locked": int(ckw_locked),
+                        "computed_keywords": (st.session_state.get("add_computed_keywords") or ckw_final),
+                        "ckw_locked": int(bool(st.session_state.get("add_ckw_locked"))),
                         "ckw_version": CKW_VERSION,
                         "now": now,
                         "user": _updated_by(),
@@ -1201,22 +1216,35 @@ with _tabs[1]:
                 st.text_area("Notes", height=100, key="edit_notes")
                 st.text_input("Keywords (comma separated)", key="edit_keywords")
 
-                # ==== BEGIN: CKW Edit Suggest (E) ====
+                                # ==== BEGIN: CKW Edit (manual lock + suggest) ====
                 st.caption("Computed keywords are used for search in the read-only app.")
-                ckw_current = st.text_area(
+                current_row = id_to_row.get(int(st.session_state["edit_vendor_id"])) if st.session_state["edit_vendor_id"] else {}
+                ckw_db = (current_row.get("computed_keywords") or "") if current_row else ""
+                ckw_locked_db = int(current_row.get("ckw_locked") or 0) if current_row else 0
+
+                # Manual lock toggle (DB-backed)
+                st.checkbox("Lock (skip bulk recompute)", value=bool(ckw_locked_db), key="edit_ckw_locked")
+
+                # Editable CKW field
+                st.text_area(
                     "computed_keywords (editable)",
-                    value=(id_to_row.get(int(st.session_state["edit_vendor_id"]), {}).get("computed_keywords", "") if st.session_state["edit_vendor_id"] else ""),
-                    height=80,
+                    value=ckw_db,
+                    height=90,
                     key="edit_computed_keywords",
                 )
-                if st.form_submit_button("Suggest (recompute)", type="secondary"):
+
+                # One-click suggestion
+                if st.form_submit_button("Suggest from Category/Service/Name", type="secondary", use_container_width=False):
                     cat = (st.session_state["edit_category"] or "").strip()
                     svc = (st.session_state["edit_service"] or "").strip(" /;,")
                     bn  = (st.session_state["edit_business_name"] or "").strip()
                     st.session_state["_ckw_suggest"] = build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
+                    st.session_state["edit_computed_keywords"] = st.session_state["_ckw_suggest"]
+
                 if st.session_state.get("_ckw_suggest"):
-                    st.info("Suggested: " + st.session_state["_ckw_suggest"])
-                # ==== END: CKW Edit Suggest (E) ====
+                    st.caption("Suggested: " + st.session_state["_ckw_suggest"])
+                # ==== END: CKW Edit (manual lock + suggest) ====
+
 
             edited = st.form_submit_button("Save Changes")
 
@@ -1275,8 +1303,8 @@ with _tabs[1]:
                             "website": _sanitize_url(st.session_state["edit_website"]),
                             "notes": (st.session_state["edit_notes"] or "").strip(),
                             "keywords": (st.session_state["edit_keywords"] or "").strip(),
-                            "ckw": ckw_current_val or suggested_now,
-                            "ckw_locked": int(ckw_locked_val),
+                            "ckw": (st.session_state.get("edit_computed_keywords") or suggested_now),
+                            "ckw_locked": int(bool(st.session_state.get("edit_ckw_locked"))),
                             "ckw_version": CKW_VERSION,
                             "now": now, "user": _updated_by(),
                             "id": int(vid),
@@ -1564,85 +1592,95 @@ def _ckw_current_version() -> str:
     return ver or "2025-10-15"
 
 CURRENT_VER = _ckw_current_version()
-
-# Optional: create an index that speeds up the sweep query (noop if already there)
 try:
     _exec_with_retry(ENGINE, "CREATE INDEX IF NOT EXISTS idx_vendors_ckw_status ON vendors(ckw_locked, ckw_version)")
 except Exception:
     pass
 
-# -- Cheap feature detection: prefer build_computed_keywords if present; else use _kw_from_row_fast --
-_has_builder = "build_computed_keywords" in globals()
+# ---- CKW controls: recompute + bump version (all outside any button blocks) ----
+st.subheader("Computed Keywords")
 
-colA, colB = st.columns([1, 1])
-with colA:
-    limit = st.number_input("Batch size per commit", min_value=50, max_value=1000, value=300, step=50)
-with colB:
-    run_btn = st.button("Recompute all (unlocked & stale)", type="primary")
+c1, c2, c3 = st.columns([1, 1, 1])
+with c1:
+    batch_sz = st.number_input("Batch size", min_value=50, max_value=1000, value=300, step=50)
+with c2:
+    run_stale = st.button("Recompute unlocked & stale", type="primary", use_container_width=True)
+with c3:
+    run_all = st.button("Recompute ALL unlocked", type="secondary", use_container_width=True)
 
-if run_btn:
+def _rows_for_stale(engine: Engine, ver: str) -> list[tuple]:
+    with engine.connect() as cx:
+        return cx.execute(sql_text("""
+            SELECT id, category, service, business_name
+              FROM vendors
+             WHERE IFNULL(ckw_locked,0)=0
+               AND (ckw_version IS NULL OR ckw_version <> :ver
+                    OR computed_keywords IS NULL OR TRIM(computed_keywords) = '')
+        """), {"ver": ver}).fetchall()
+
+def _rows_for_all_unlocked(engine: Engine) -> list[tuple]:
+    with engine.connect() as cx:
+        return cx.execute(sql_text("""
+            SELECT id, category, service, business_name
+              FROM vendors
+             WHERE IFNULL(ckw_locked,0)=0
+        """)).fetchall()
+
+def _do_recompute(rows: list[tuple], label: str, batch: int):
+    total = len(rows)
+    if total == 0:
+        st.success(f"No rows to update for: {label}.")
+        return
+    st.write(f"{label}: **{total}** row(s) to update…")
+    done = 0
+    todo: list[dict] = []
+    pbar = st.progress(0)
+    for r in rows:
+        rid, cat, svc, bn = int(r[0]), (r[1] or ""), (r[2] or ""), (r[3] or "")
+        ckw = build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
+        todo.append({"id": rid, "ckw": ckw, "ver": CURRENT_VER})
+        if len(todo) >= int(batch):
+            _exec_with_retry(ENGINE, "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id", todo)
+            done += len(todo)
+            todo.clear()
+            pbar.progress(min(done / total, 1.0))
+    if todo:
+        _exec_with_retry(ENGINE, "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id", todo)
+        done += len(todo)
+        pbar.progress(1.0)
+    st.success(f"{label}: updated {done} row(s).")
+
+if run_stale:
     try:
-        # Pull the minimal fields needed for compute
-        with ENGINE.connect() as cx:
-            rows = cx.execute(
-                sql_text(
-                    """
-                    SELECT id, category, service, business_name
-                      FROM vendors
-                     WHERE IFNULL(ckw_locked,0)=0
-                       AND (
-                             ckw_version IS NULL OR ckw_version <> :ver
-                             OR computed_keywords IS NULL OR TRIM(computed_keywords) = ''
-                           )
-                    """
-                ),
-                {"ver": CURRENT_VER},
-            ).fetchall()
-
-        total = len(rows)
-        if total == 0:
-            st.success("All rows are up-to-date (no unlocked & stale records).")
-        else:
-            st.write(f"Found **{total}** row(s) to update…")
-            done = 0
-            batch: list[dict] = []
-
-            # Progress bar for UX; avoid flooding the UI
-            pbar = st.progress(0)
-
-            for r in rows:
-                rid = int(r[0]); cat = r[1] or ""; svc = r[2] or ""; bn = r[3] or ""
-                if _has_builder:
-                    ckw = build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
-                else:
-                    # Fallback uses the legacy fast builder if the new one isn’t present
-                    ckw = _kw_from_row_fast({"category": cat, "service": svc, "business_name": bn})
-
-                batch.append({"id": rid, "ckw": ckw, "ver": CURRENT_VER})
-
-                if len(batch) >= int(limit):
-                    _exec_with_retry(
-                        ENGINE,
-                        "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id",
-                        batch,
-                    )
-                    done += len(batch)
-                    batch.clear()
-                    pbar.progress(min(done / total, 1.0))
-
-            # Flush tail
-            if batch:
-                _exec_with_retry(
-                    ENGINE,
-                    "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id",
-                    batch,
-                )
-                done += len(batch)
-                pbar.progress(1.0)
-
-            st.success(f"Recomputed keywords for {done} row(s).")
+        _do_recompute(_rows_for_stale(ENGINE, CURRENT_VER), "Unlocked & stale", batch_sz)
     except Exception as e:
-        st.error(f"Bulk recompute failed: {type(e).__name__}: {e}")
+        st.error(f"Recompute (stale) failed: {type(e).__name__}: {e}")
+
+if run_all:
+    try:
+        _do_recompute(_rows_for_all_unlocked(ENGINE), "ALL unlocked", batch_sz)
+    except Exception as e:
+        st.error(f"Recompute (all) failed: {type(e).__name__}: {e}")
+
+st.divider()
+bump = st.button("Bump CKW version (DB meta)", help="Increases CKW_VERSION in the meta table; does not recompute by itself.")
+if bump:
+    try:
+        old = CURRENT_VER
+        import re as _re
+        m = _re.match(r"^(.*?)(?:\.(\d+))?$", old)
+        base = (m.group(1) if m else old) or "2025-10-15"
+        inc = int(m.group(2) or "0") + 1
+        new_ver = f"{base}.{inc}"
+        with ENGINE.begin() as cx:
+            cx.exec_driver_sql("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL DEFAULT '')")
+            cx.execute(sql_text(
+                "INSERT INTO meta(k,v) VALUES('CKW_VERSION', :v) "
+                "ON CONFLICT(k) DO UPDATE SET v=excluded.v"
+            ), {"v": new_ver})
+        st.success(f"CKW_VERSION bumped: {old} → {new_ver}")
+    except Exception as e:
+        st.error(f"Version bump failed: {type(e).__name__}: {e}")
 
 st.divider()
 # (Optional) Tiny convenience: bump version in DB so future recomputes target new logic automatically.
