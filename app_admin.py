@@ -28,9 +28,6 @@ st.set_page_config(page_title="Vendors Admin", layout="wide", initial_sidebar_st
 # --- Unified libsql version + details (authoritative from package metadata) ---
 import importlib
 import importlib.metadata as _im
-_lib_file = "n/a"
-import importlib
-import importlib.metadata as _im
 
 _lib_file = "n/a"
 try:
@@ -41,12 +38,11 @@ except Exception:
         _lib_ver_display = getattr(_lib_mod, "__version__", "unknown")
     except Exception:
         _lib_ver_display = "unknown"
+
 try:
     _lib_mod = importlib.import_module("sqlalchemy_libsql")
     _lib_file = getattr(_lib_mod, "__file__", "n/a")
 except Exception:
-    pass
-
     pass
 
 # --- Streamlit run-context guard (prevents SessionInfo errors during import) ---
@@ -54,6 +50,7 @@ try:
     from streamlit.runtime.scriptrunner import get_script_run_ctx as _get_ctx
 except Exception:
     _get_ctx = None
+
 def _has_streamlit_ctx() -> bool:
     try:
         return (_get_ctx() is not None) if _get_ctx else False
@@ -68,8 +65,8 @@ if isinstance(_raw_show_debug, bool):
 else:
     _SHOW_DEBUG = (_ENV != "prod")
 
-# --- Version banner (sidebar) ---
-if bool(st.secrets.get("SHOW_STATUS", True)) and _has_streamlit_ctx():
+# --- Version banner (sidebar, debug-only; hidden in prod) ---
+if _SHOW_DEBUG and _has_streamlit_ctx() and bool(st.secrets.get("SHOW_STATUS", True)):
     try:
         st.sidebar.info(
             "Versions | "
@@ -83,7 +80,9 @@ if bool(st.secrets.get("SHOW_STATUS", True)) and _has_streamlit_ctx():
         with st.sidebar.expander("libsql details"):
             st.write({"module_file": _lib_file, "pkg_version": _lib_ver_display})
     except Exception as _e:
+        # Only warn in debug to avoid noise/headless issues
         st.sidebar.warning(f"Version banner failed: {_e}")
+# ==== END: FILE TOP (imports + page_config + Early Boot) ====
 
 # --- Secrets / strategy (validated) ---
 _DB_STRATEGY   = str(st.secrets.get("DB_STRATEGY", "embedded_replica")).strip().lower()
