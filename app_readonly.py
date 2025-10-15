@@ -38,6 +38,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+st.caption("Read-only boot OK — reached post-page_config")
+
 # ==== END: Boot-time page title from Secrets ====
 
 # =============================
@@ -723,4 +725,9 @@ def _clear_search():
                 st.write({"db_probe_error": str(e)})
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback, streamlit as st
+        st.error("Top-level crash in app_readonly.py")
+        st.code("".join(traceback.format_exc()))
