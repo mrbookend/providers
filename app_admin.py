@@ -495,19 +495,18 @@ st.markdown(
 
 
 # -----------------------------
-# DB helpers (schema + IO) — robust DDL with per-statement tracing
+# DB helpers (schema + IO) — safer DDL (hard on tables, soft on indexes)
 # -----------------------------
 REQUIRED_VENDOR_COLUMNS: List[str] = ["business_name", "category"]  # service optional
 
 def ensure_schema(engine: Engine) -> None:
     """
-    Create tables and indexes if missing.
-    Uses exec_driver_sql (friendlier for DDL) and wraps each statement so
-    if something fails you see exactly which DDL caused it.
-    Also conditionally adds known columns if they don’t exist.
+    Create tables if missing (hard fail with exact SQL on error).
+    Create indexes best-effort (warn, don't crash).
+    Optional ALTERs (migrations) also best-effort.
     """
-    create_stmts = [
-        # Tables
+    table_ddls = [
+        # vendors
         """
         CREATE TABLE IF NOT EXISTS vendors (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -525,19 +524,23 @@ def ensure_schema(engine: Engine) -> None:
           updated_by TEXT
         )
         """,
+        # categories
         """
         CREATE TABLE IF NOT EXISTS categories (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT UNIQUE
         )
         """,
+        # services
         """
         CREATE TABLE IF NOT EXISTS services (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT UNIQUE
         )
         """,
-        # Indexes
+    ]
+
+    index_ddls = [
         "CREATE INDEX IF NOT EXISTS idx_vendors_cat ON vendors(category)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_bus ON vendors(business_name)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_kw  ON vendors(keywords)",
@@ -548,31 +551,45 @@ def ensure_schema(engine: Engine) -> None:
     ]
 
     with engine.begin() as conn:
-        # 1) Run basic DDLs with explicit tracing
-        for s in create_stmts:
+        # --- 1) Tables: hard requirement (raise with exact statement) ---
+        for s in table_ddls:
             stmt = s.strip()
             try:
                 conn.exec_driver_sql(stmt)
             except Exception as e:
-                # Raise with the exact statement so you know what failed
-                raise ValueError(f"DDL failed: {e.__class__.__name__}: {e}\n--- SQL ---\n{stmt}\n") from e
+                # Bubble the exact failing SQL so we know what tripped
+                raise ValueError(
+                    f"TABLE DDL failed: {e.__class__.__name__}: {e}\n--- SQL ---\n{stmt}\n"
+                ) from e
 
-        # 2) Defensive: add expected columns if DB has an older shape
+        # --- 2) Indexes: best-effort (warn, do not abort app) ---
+        for s in index_ddls:
+            stmt = s.strip()
+            try:
+                conn.exec_driver_sql(stmt)
+            except Exception as e:
+                # Soft-fail: log as a warning in debug mode only
+                if '_SHOW_DEBUG' in globals() and _SHOW_DEBUG and '_has_streamlit_ctx' in globals() and _has_streamlit_ctx():
+                    st.warning(f"Index DDL skipped: {e.__class__.__name__}: {e}\n— {stmt}")
+
+        # --- 3) Optional migrations: add missing columns if ever needed (soft) ---
         def _table_columns(table: str) -> set[str]:
             rows = conn.execute(sql_text(f"PRAGMA table_info({table})")).fetchall()
             return {str(r[1]) for r in rows}
 
-        def _add_column_if_missing(table: str, col: str, decl: str) -> None:
-            if col not in _table_columns(table):
-                try:
+        def _add_column_if_missing(table: str, decl: str) -> None:
+            # decl must be like: "computed_keywords TEXT"
+            col = decl.split()[0]
+            try:
+                if col not in _table_columns(table):
                     conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {decl}")
-                except Exception as e:
-                    raise ValueError(
-                        f"ALTER TABLE add-column failed on {table}.{col}: {e.__class__.__name__}: {e}"
-                    ) from e
+            except Exception as e:
+                if '_SHOW_DEBUG' in globals() and _SHOW_DEBUG and '_has_streamlit_ctx' in globals() and _has_streamlit_ctx():
+                    st.warning(f"ALTER skipped: {table}.{col}: {e.__class__.__name__}: {e}")
 
-        # Example: if you later decide to persist a computed column
-        # _add_column_if_missing("vendors", "computed_keywords", "TEXT")
+        # Example (disabled by default):
+        # _add_column_if_missing("vendors", "computed_keywords TEXT")
+
 
 
 
