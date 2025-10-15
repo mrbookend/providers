@@ -176,8 +176,7 @@ try:
     if _has_streamlit_ctx():
         st.sidebar.success("DB ready")
         # Always show a simple success marker
-        st.success("App reached post-boot marker ✅")
-
+        
         # Optional, gated debug panel
         if _SHOW_DEBUG:
             with st.expander("Boot diagnostics (ENGINE + secrets)"):
