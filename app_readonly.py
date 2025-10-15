@@ -38,7 +38,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
-st.caption("Read-only boot OK — reached post-page_config")
 # ==== END: Boot-time page title from Secrets ====
 
 # =============================
@@ -663,8 +662,6 @@ def main():
     # ---- Table ----
     if df_render.empty:
         st.info("No matching providers. Tip: try fewer words.")
-    else:
-        st.markdown(_build_table_html(df_render, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
 
     # ---- Quick Stats ----
     with st.expander("Quick Stats", expanded=False):
