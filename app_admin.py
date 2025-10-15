@@ -714,16 +714,17 @@ except Exception:
 # -----------------------------
 # UI
 # -----------------------------
-_tabs = st.tabs(
-    [
-        "Browse Vendors",
-        "Add / Edit / Delete Vendor",
-        "Category Admin",
-        "Service Admin",
-        "Maintenance",
-        "Debug",
-    ]
-)
+_tab_labels = [
+    "Browse Vendors",
+    "Add / Edit / Delete Vendor",
+    "Category Admin",
+    "Service Admin",
+    "Maintenance",
+]
+if _SHOW_DEBUG:
+    _tab_labels.append("Debug")
+
+_tabs = st.tabs(_tab_labels)
 
 # ---------- Browse
 with _tabs[0]:
@@ -1478,44 +1479,45 @@ with _tabs[4]:
             st.error(f"Trim failed: {e}")
 
 # ---------- Debug
-with _tabs[5]:
-    st.subheader("Status & Secrets (debug)")
-    st.json(engine_info)
+if _SHOW_DEBUG:
+    with _tabs[-1]:
+        st.subheader("Status & Secrets (debug)")
+        st.json(engine_info)
 
-    with engine.begin() as conn:
-        vendors_cols = conn.execute(sql_text("PRAGMA table_info(vendors)")).fetchall()
-        categories_cols = conn.execute(sql_text("PRAGMA table_info(categories)")).fetchall()
-        services_cols = conn.execute(sql_text("PRAGMA table_info(services)")).fetchall()
+        with engine.begin() as conn:
+            vendors_cols = conn.execute(sql_text("PRAGMA table_info(vendors)")).fetchall()
+            categories_cols = conn.execute(sql_text("PRAGMA table_info(categories)")).fetchall()
+            services_cols = conn.execute(sql_text("PRAGMA table_info(services)")).fetchall()
 
-        # --- Index presence (vendors) ---
-        idx_rows = conn.execute(sql_text("PRAGMA index_list(vendors)")).fetchall()
-        vendors_indexes = [
-            {"seq": r[0], "name": r[1], "unique": bool(r[2]), "origin": r[3], "partial": bool(r[4])} for r in idx_rows
-        ]
+            # --- Index presence (vendors) ---
+            idx_rows = conn.execute(sql_text("PRAGMA index_list(vendors)")).fetchall()
+            vendors_indexes = [
+                {"seq": r[0], "name": r[1], "unique": bool(r[2]), "origin": r[3], "partial": bool(r[4])} for r in idx_rows
+            ]
 
-        # --- Null timestamp counts (quick sanity) ---
-        created_at_nulls = conn.execute(
-            sql_text("SELECT COUNT(*) FROM vendors WHERE created_at IS NULL OR created_at=''")
-        ).scalar() or 0
-        updated_at_nulls = conn.execute(
-            sql_text("SELECT COUNT(*) FROM vendors WHERE updated_at IS NULL OR updated_at=''")
-        ).scalar() or 0
+            # --- Null timestamp counts (quick sanity) ---
+            created_at_nulls = conn.execute(
+                sql_text("SELECT COUNT(*) FROM vendors WHERE created_at IS NULL OR created_at=''")
+            ).scalar() or 0
+            updated_at_nulls = conn.execute(
+                sql_text("SELECT COUNT(*) FROM vendors WHERE updated_at IS NULL OR updated_at=''")
+            ).scalar() or 0
 
-        counts = {
-            "vendors": conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0,
-            "categories": conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar() or 0,
-            "services": conn.execute(sql_text("SELECT COUNT(*) FROM services")).scalar() or 0,
-        }
+            counts = {
+                "vendors": conn.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0,
+                "categories": conn.execute(sql_text("SELECT COUNT(*) FROM categories")).scalar() or 0,
+                "services": conn.execute(sql_text("SELECT COUNT(*) FROM services")).scalar() or 0,
+            }
 
-    st.subheader("DB Probe")
-    st.json(
-        {
-            "vendors_columns": [c[1] for c in vendors_cols],
-            "categories_columns": [c[1] for c in categories_cols],
-            "services_columns": [c[1] for c in services_cols],
-            "counts": counts,
-            "vendors_indexes": vendors_indexes,
-            "timestamp_nulls": {"created_at": int(created_at_nulls), "updated_at": int(updated_at_nulls)},
-        }
-    )
+        st.subheader("DB Probe")
+        st.json(
+            {
+                "vendors_columns": [c[1] for c in vendors_cols],
+                "categories_columns": [c[1] for c in categories_cols],
+                "services_columns": [c[1] for c in services_cols],
+                "counts": counts,
+                "vendors_indexes": vendors_indexes,
+                "timestamp_nulls": {"created_at": int(created_at_nulls), "updated_at": int(updated_at_nulls)},
+            }
+        )
 
