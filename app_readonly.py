@@ -20,7 +20,7 @@ try:
 except Exception:
     pass
 
-# ==== BEGIN: Boot-time page title from Secrets ====
+# ==== BEGIN: Boot-time page title from Secrets (MUST be before anything Streamlit renders) ====
 def _safe_title(v, default="HCR Providers — Read-Only"):
     try:
         s = str(v).strip()
@@ -39,7 +39,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 st.caption("Read-only boot OK — reached post-page_config")
-
 # ==== END: Boot-time page title from Secrets ====
 
 # =============================
@@ -229,55 +228,6 @@ if SHOW_STATUS:
         )
     except Exception as _e:
         st.sidebar.warning(f"Version banner failed: {_e}")
-
-# ==== BEGIN: Read-only guardrail block (order + null-safe) ====
-
-# 1) Build engine & show diagnostics
-ENGINE, _DB_DBG = build_engine_and_probe()
-if ENGINE is None:
-    st.error("Database engine failed to initialize. See Boot diagnostics.")
-    st.stop()
-
-with st.expander("Boot diagnostics (ENGINE + secrets)"):
-    st.json(_DB_DBG)
-
-# 2) Smoke test (prove table exists & is reachable)
-try:
-    with ENGINE.connect() as cx:
-        _rowcount = cx.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar_one()
-    st.sidebar.success(f"DB OK · vendors rows: {_rowcount}")
-except Exception as e:
-    st.error(f"Smoke test failed: {e.__class__.__name__}: {e}")
-    st.stop()
-
-# 3) Load dataframe (fail safe)
-try:
-    df_full = pd.read_sql(sql_text("SELECT * FROM vendors"), ENGINE)
-except Exception as e:
-    st.error(f"Failed to load vendors: {e.__class__.__name__}: {e}")
-    st.stop()
-
-if df_full is None or df_full.empty:
-    st.info("No provider rows to display yet.")
-    st.stop()
-
-# 4) Get query, then filter
-q = st.text_input(
-    "Search",
-    value=(st.query_params.get("q", "") if hasattr(st, "query_params") else "")
-)
-filtered_full = _filter_and_rank_by_query(df_full, q or "")
-
-# ==== END: Read-only guardrail block ====
-
-
-if SHOW_DIAGS:
-    st.caption(f"HELP_MD present: {'HELP_MD' in getattr(st, 'secrets', {})}")
-    st.caption(
-        "Turso secrets — URL: %s | TOKEN: %s"
-        % (bool(_get_secret("TURSO_DATABASE_URL", "")), bool(_get_secret("TURSO_AUTH_TOKEN", "")))
-    )
-    st.caption(f"Viewport rows: {VIEWPORT_ROWS} (height ≈ {SCROLL_MAX_HEIGHT}px)")
 
 # =============================
 # Column labels & widths (SAFE)
@@ -520,7 +470,7 @@ def _filter_and_rank_by_query(df: pd.DataFrame, query: str) -> pd.DataFrame:
     return dfm
 
 # =============================
-# Rendering
+# Rendering helpers
 # =============================
 def _label_for(col_key: str) -> str:
     return READONLY_COLUMN_LABELS.get(col_key, col_key.replace("_", " ").title())
@@ -560,29 +510,46 @@ def _build_table_html(df: pd.DataFrame, sticky_first: bool) -> str:
 # Main UI
 # =============================
 def main():
+    # ---- Engine (remote embedded-replica if creds present; else local fallback) ----
     engine, info = build_engine()
     if info.get("strategy") == "local_fallback":
         st.warning("Turso credentials not found. Running on local SQLite fallback (`./vendors.db`).")
 
+    # ---- Load vendors (guarded) ----
     try:
         df_full = fetch_vendors(engine)
     except Exception as e:
-        st.error(f"Failed to load vendors: {e}")
+        st.error(f"Failed to load vendors: {e.__class__.__name__}: {e}")
         return
-# ==== BEGIN: Search row (input + Clear button on same line) ====
-def _clear_search():
-    st.session_state["q"] = ""
-    st.rerun()
 
-    # ==== BEGIN: Search row (input + Clear button on same line) ====
+    if df_full is None or df_full.empty:
+        st.info("No provider rows to display yet.")
+        return
+
+    # ---- Search row (input + Clear button on same line) ----
     def _clear_search():
         st.session_state["q"] = ""
+        try:
+            # Clear query param if supported
+            if hasattr(st, "query_params"):
+                st.query_params["q"] = ""
+        except Exception:
+            pass
         st.rerun()
+
+    # Initialize from query param once (if present and no session value yet)
+    if "q" not in st.session_state:
+        try:
+            qp = getattr(st, "query_params", {})
+            if isinstance(qp, dict) and qp.get("q"):
+                st.session_state["q"] = str(qp.get("q"))
+        except Exception:
+            pass
 
     c_search, c_clearbtn = st.columns([12, 2])
     with c_search:
         st.text_input(
-            "Search",  # non-empty for accessibility; label collapsed
+            "Search",  # accessible label; collapsed in UI
             key="q",
             label_visibility="collapsed",
             placeholder="Search e.g., plumb, roofing, 'Inverness', phone digits, etc.",
@@ -590,10 +557,10 @@ def _clear_search():
         )
     with c_clearbtn:
         st.button("Clear", type="secondary", use_container_width=True, on_click=_clear_search)
-    # ==== END: Search row (input + Clear button on same line) ====
 
     q = st.session_state.get("q", "")
 
+    # ---- Filtering (prioritize computed_keywords if enabled) ----
     if READONLY_PRIORITIZE_CKW:
         filtered_full = _filter_and_rank_by_query(df_full, q)
     else:
@@ -607,16 +574,10 @@ def _clear_search():
     # Exclude 'website' from sort choices (HTML anchors)
     sortable_cols = [c for c in disp_cols if c != "website"]
     sort_labels = [_label_for(c) for c in sortable_cols]
-
-    # ==== BEGIN: Controls Row (no Help, no Clear — Clear moved next to Search) ====
     c_csv, c_xlsx, c_sort, c_order = st.columns([2, 2, 2, 2])
-    # ==== END: Controls Row (no Help, no Clear — Clear moved next to Search) ====
-
 
     # Safe defaults when no sortable cols
     if len(sortable_cols) == 0:
-        chosen_label = "Business Name"
-        order = "Ascending"
         sort_col = None
         ascending = True
     else:
@@ -674,11 +635,11 @@ def _clear_search():
             use_container_width=True,
             disabled=csv_df.empty,
         )
+
     # Prepare XLSX with plain URLs
     excel_df = df_disp_sorted.copy()
     if "website" in excel_df.columns and "website_url" in filtered_full.columns and not excel_df.empty:
         excel_df["website"] = filtered_full.loc[excel_df.index, "website_url"].fillna("").astype(str)
-
     xlsx_buf = io.BytesIO()
     if not excel_df.empty:
         with pd.ExcelWriter(xlsx_buf, engine="xlsxwriter") as writer:
@@ -700,18 +661,17 @@ def _clear_search():
     # Always show tiny result count caption (keeps users oriented)
     st.caption(f"{len(df_disp_sorted)} result(s). Viewport rows: {VIEWPORT_ROWS}")
 
-    # ==== BEGIN: Help / Tips (expander only) ====
+    # ---- Help / Tips (expander only) ----
     with st.expander("Help / Tips", expanded=False):
         st.markdown(_get_help_md(), unsafe_allow_html=True)
-    # ==== END: Help / Tips (expander only) ====
 
-    # ---------------- Scrollable full table (admin-style viewport) ----------------
+    # ---- Scrollable full table ----
     if df_disp_sorted.empty:
-        st.info("No matching providers. Tip: try fewer words or click × to clear the search.")
+        st.info("No matching providers. Tip: try fewer words or click Clear to reset the search.")
     else:
         st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
 
-    # ==== BEGIN: Quick Stats (read-only) ====
+    # ---- Quick Stats (read-only) ----
     with st.expander("Quick Stats", expanded=False):
         try:
             nrows, ncols = df_disp_sorted.shape
@@ -723,9 +683,8 @@ def _clear_search():
             })
         except Exception as _e:
             st.caption(f"Stats unavailable: {_e}")
-    # ==== END: Quick Stats (read-only) ====
 
-    # Debug / Diagnostics (shown only when explicitly enabled)
+    # ---- Debug / Diagnostics (shown only when explicitly enabled) ----
     if SHOW_DIAGS:
         st.divider()
         if st.button("Debug (status & secrets keys)", type="secondary"):
