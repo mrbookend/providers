@@ -526,23 +526,24 @@ def main():
     except Exception as e:
         st.error(f"Failed to load vendors: {e}")
         return
-# ==== BEGIN: Search row (input + Clear button on same line) ====
-def _clear_search():
-    st.session_state["q"] = ""
-    st.rerun()
 
-c_search, c_clearbtn = st.columns([12, 2])
-with c_search:
-    st.text_input(
-        "Search",  # non-empty for accessibility; label collapsed
-        key="q",
-        label_visibility="collapsed",
-        placeholder="Search e.g., plumb, roofing, 'Inverness', phone digits, etc.",
-        help="Case-insensitive; keyword hits appear first; matches across all columns.",
-    )
-with c_clearbtn:
-    st.button("Clear", type="secondary", use_container_width=True, on_click=_clear_search)
-# ==== END: Search row (input + Clear button on same line) ====
+    # ==== BEGIN: Search row (input + Clear button on same line) ====
+    def _clear_search():
+        st.session_state["q"] = ""
+        st.rerun()
+
+    c_search, c_clearbtn = st.columns([12, 2])
+    with c_search:
+        st.text_input(
+            "Search",  # non-empty for accessibility; label collapsed
+            key="q",
+            label_visibility="collapsed",
+            placeholder="Search e.g., plumb, roofing, 'Inverness', phone digits, etc.",
+            help="Case-insensitive; keyword hits appear first; matches across all columns.",
+        )
+    with c_clearbtn:
+        st.button("Clear", type="secondary", use_container_width=True, on_click=_clear_search)
+    # ==== END: Search row (input + Clear button on same line) ====
 
     q = st.session_state.get("q", "")
 
@@ -563,6 +564,7 @@ with c_clearbtn:
     # ==== BEGIN: Controls Row (no Help, no Clear — Clear moved next to Search) ====
     c_csv, c_xlsx, c_sort, c_order = st.columns([2, 2, 2, 2])
     # ==== END: Controls Row (no Help, no Clear — Clear moved next to Search) ====
+
 
     # Safe defaults when no sortable cols
     if len(sortable_cols) == 0:
