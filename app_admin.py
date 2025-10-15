@@ -432,6 +432,45 @@ def _tfidf_terms_for_group(df_group: pd.DataFrame, top_k: int = 8) -> list[str]:
     ordered = sorted(((t, s) for t, s in scores.items() if t not in _STOPWORDS), key=lambda x: x[1], reverse=True)
     return [t for (t, _) in ordered[:top_k]]
 
+# ==== BEGIN: helper – priority search using computed_keywords first ====
+def _filter_and_rank_by_query(df: pd.DataFrame, query: str) -> pd.DataFrame:
+    """
+    Returns a filtered df where rows with matches in computed_keywords are ranked first,
+    then other matches follow. Case-insensitive substring match.
+    """
+    if not query:
+        return df
+
+    q = str(query).strip().lower()
+    # Safely access columns; treat missing as empty
+    ckw = df.get("computed_keywords", pd.Series([""] * len(df), index=df.index)).astype(str).str.lower()
+    # Fallback blob: combine other visible fields (cheap)
+    other = pd.concat([
+        df.get("business_name", ""),
+        df.get("category", ""),
+        df.get("service", ""),
+        df.get("contact_name", ""),
+        df.get("phone", ""),
+        df.get("address", ""),
+        df.get("website", ""),
+        df.get("notes", ""),
+        df.get("keywords", ""),
+    ], axis=1).astype(str).agg(" ".join, axis=1).str.lower()
+
+    hit_ckw = ckw.str.contains(q, na=False)
+    hit_oth = other.str.contains(q, na=False)
+
+    # Filter to any hits
+    any_hit_mask = hit_ckw | hit_oth
+    dfm = df.loc[any_hit_mask].copy()
+
+    # Rank: hits in computed_keywords come first; then by business_name for stability
+    dfm["_rank_ckw"] = (~hit_ckw.loc[dfm.index]).astype(int)  # 0 for ckw hit, 1 otherwise
+    dfm.sort_values(by=["_rank_ckw", "business_name"], inplace=True, kind="mergesort")
+    dfm.drop(columns=["_rank_ckw"], inplace=True, errors="ignore")
+    return dfm
+# ==== END: helper – priority search using computed_keywords first ====
+
 # -----------------------------
 # Form state helpers (Add / Edit / Delete)
 # -----------------------------
@@ -610,105 +649,96 @@ st.markdown(
 # -----------------------------
 REQUIRED_VENDOR_COLUMNS: List[str] = ["business_name", "category"]  # service optional
 
+# ==== BEGIN: ensure_schema per-statement retry (drop-in replacement) ====
 def ensure_schema(engine: Engine) -> None:
     """
-    Create tables if missing (hard fail with exact SQL on error).
-    Create indexes best-effort (warn, don't crash).
-    Optional ALTERs (migrations) also best-effort.
-
-    NOTE: Each DDL/ALTER is executed independently with retry to
-    avoid Hrana 'stream not found' breaking the whole boot.
+    Create/upgrade schema with per-statement retry to tolerate transient Hrana drops.
+    Each DDL/DML runs in its own short transaction via engine.begin(), guarded by _exec_with_retry.
+    Idempotent: safe to run on every boot.
     """
-    table_ddls = [
-        # vendors
-        """
-        CREATE TABLE IF NOT EXISTS vendors (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          category TEXT NOT NULL,
-          service TEXT,
-          business_name TEXT NOT NULL,
-          contact_name TEXT,
-          phone TEXT,
-          address TEXT,
-          website TEXT,
-          notes TEXT,
-          keywords TEXT,
-          computed_keywords TEXT,
-          created_at TEXT,
-          updated_at TEXT,
-          updated_by TEXT
-        )
-        """,
-        # categories
+    # DDL statements (idempotent)
+    ddls: list[str] = [
+        # Tables
         """
         CREATE TABLE IF NOT EXISTS categories (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT UNIQUE
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE
         )
         """,
-        # services
         """
         CREATE TABLE IF NOT EXISTS services (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT UNIQUE
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE
         )
         """,
+        """
+        CREATE TABLE IF NOT EXISTS vendors (
+            id INTEGER PRIMARY KEY,
+            category TEXT NOT NULL DEFAULT '',
+            service TEXT NOT NULL DEFAULT '',
+            business_name TEXT NOT NULL DEFAULT '',
+            contact_name TEXT NOT NULL DEFAULT '',
+            phone TEXT NOT NULL DEFAULT '',
+            address TEXT NOT NULL DEFAULT '',
+            website TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
+            keywords TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT '',
+            updated_by TEXT NOT NULL DEFAULT '',
+            computed_keywords TEXT NOT NULL DEFAULT ''
+        )
+        """,
+
+        # Indexes (create if not exists)
+        "CREATE INDEX IF NOT EXISTS idx_vendors_cat        ON vendors(category)",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_svc        ON vendors(service)",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_bus        ON vendors(business_name)",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_kw         ON vendors(keywords)",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_phone      ON vendors(phone)",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_cat_lower  ON vendors(LOWER(category))",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_svc_lower  ON vendors(LOWER(service))",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_bus_lower  ON vendors(LOWER(business_name))",
+        "CREATE INDEX IF NOT EXISTS idx_vendors_ckw        ON vendors(computed_keywords)"
     ]
 
-    index_ddls = [
-        "CREATE INDEX IF NOT EXISTS idx_vendors_cat ON vendors(category)",
-        "CREATE INDEX IF NOT EXISTS idx_vendors_bus ON vendors(business_name)",
-        "CREATE INDEX IF NOT EXISTS idx_vendors_kw  ON vendors(keywords)",
-        "CREATE INDEX IF NOT EXISTS idx_vendors_ckw ON vendors(computed_keywords)",
-        "CREATE INDEX IF NOT EXISTS idx_vendors_bus_lower ON vendors(lower(business_name))",
-        "CREATE INDEX IF NOT EXISTS idx_vendors_cat_lower ON vendors(lower(category))",
-        "CREATE INDEX IF NOT EXISTS idx_vendors_svc_lower ON vendors(lower(service))",
-        "CREATE INDEX IF NOT EXISTS idx_vendors_svc ON vendors(service)",
-        "CREATE INDEX IF NOT EXISTS idx_vendors_phone ON vendors(phone)",
+    # Optional one-time fixes (idempotent backfills/sanitizers)
+    fixes: list[str] = [
+        # backfill timestamps if blanks (keep ISO yyyy-mm-ddTHH:MM:SSZ or your chosen format)
+        """
+        UPDATE vendors
+           SET created_at = COALESCE(NULLIF(created_at, ''), updated_at, strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+               updated_at = COALESCE(NULLIF(updated_at, ''), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+         WHERE (created_at = '' OR updated_at = '')
+        """,
+        # normalize NULLs to empty string for text fields (safety)
+        """
+        UPDATE vendors
+           SET category      = COALESCE(category,''),
+               service       = COALESCE(service,''),
+               business_name = COALESCE(business_name,''),
+               contact_name  = COALESCE(contact_name,''),
+               phone         = COALESCE(phone,''),
+               address       = COALESCE(address,''),
+               website       = COALESCE(website,''),
+               notes         = COALESCE(notes,''),
+               keywords      = COALESCE(keywords,''),
+               updated_by    = COALESCE(updated_by,''),
+               computed_keywords = COALESCE(computed_keywords,'')
+         WHERE 1=1
+        """
     ]
 
-    # --- 1) Tables (each with retry) ---
-    for s in table_ddls:
-        stmt = s.strip()
-        try:
-            _exec_with_retry(engine, stmt)
-        except Exception as e:
-            raise ValueError(
-                f"TABLE DDL failed: {e.__class__.__name__}: {e}\n--- SQL ---\n{stmt}\n"
-            ) from e
+    # Run DDLs with per-statement retry
+    for stmt in ddls:
+        with engine.begin() as cx:
+            _exec_with_retry(cx, sql_text(stmt))
 
-    # --- 2) Indexes (each best-effort with retry; warn on failure) ---
-    for s in index_ddls:
-        stmt = s.strip()
-        try:
-            _exec_with_retry(engine, stmt)
-        except Exception as e:
-            if '_SHOW_DEBUG' in globals() and _SHOW_DEBUG and '_has_streamlit_ctx' in globals() and _has_streamlit_ctx():
-                st.warning(f"Index DDL skipped: {e.__class__.__name__}: {e}\n— {stmt}")
-
-    # --- 3) Optional migrations: add missing columns if ever needed (soft) ---
-    def _table_columns(table: str) -> set[str]:
-        with engine.connect() as conn:
-            rows = conn.execute(sql_text(f"PRAGMA table_info({table})")).fetchall()
-        return {str(r[1]) for r in rows}
-
-    def _add_column_if_missing(table: str, decl: str) -> None:
-        col = decl.split()[0]
-        try:
-            if col not in _table_columns(table):
-                _exec_with_retry(engine, f"ALTER TABLE {table} ADD COLUMN {decl}")
-        except Exception as e:
-            if '_SHOW_DEBUG' in globals() and _SHOW_DEBUG and '_has_streamlit_ctx' in globals() and _has_streamlit_ctx():
-                st.warning(f"ALTER skipped: {table}.{col}: {e.__class__.__name__}: {e}")
-
-    # ensure computed_keywords exists even on old DBs
-    _add_column_if_missing("vendors", "computed_keywords TEXT")
-    # retry index if it failed before column existed
-    try:
-        _exec_with_retry(engine, "CREATE INDEX IF NOT EXISTS idx_vendors_ckw ON vendors(computed_keywords)")
-    except Exception as e:
-        if '_SHOW_DEBUG' in globals() and _SHOW_DEBUG and '_has_streamlit_ctx' in globals() and _has_streamlit_ctx():
-            st.warning(f"Index (ckw) create skipped: {type(e).__name__}: {e}")
+    # Run fixes with per-statement retry
+    for stmt in fixes:
+        with engine.begin() as cx:
+            _exec_with_retry(cx, sql_text(stmt))
+# ==== END: ensure_schema per-statement retry (drop-in replacement) ====
 
 def _normalize_phone(val: str | None) -> str:
     if not val:
@@ -960,14 +990,6 @@ _tabs = st.tabs(_tab_names)
 with _tabs[0]:
     df = load_df(ENGINE)
 
-    # --- Build a lowercase search blob once (guarded) ---
-    if "_blob" not in df.columns:
-        parts = [
-            df.get(c, pd.Series("", index=df.index)).astype(str)
-            for c in ["business_name", "category", "service", "contact_name", "phone", "address", "website", "notes", "keywords", "computed_keywords"]
-        ]
-        df["_blob"] = pd.concat(parts, axis=1).agg(" ".join, axis=1).str.lower()
-
     # --- Search input at 25% width (table remains full width) ---
     left, right = st.columns([1, 3])  # 25% / 75% split for this row only
     with left:
@@ -978,12 +1000,8 @@ with _tabs[0]:
             key="q",
         )
 
-    # Fast local filter using the prebuilt blob (no regex)
-    qq = (st.session_state.get("q") or "").strip().lower()
-    if qq:
-        filtered = df[df["_blob"].str.contains(qq, regex=False, na=False)]
-    else:
-        filtered = df
+    # Prefer matches in computed_keywords first, then other fields
+    filtered = _filter_and_rank_by_query(df, (st.session_state.get("q") or ""))
 
     view_cols = [
         "id",
@@ -1908,3 +1926,32 @@ if _SHOW_DEBUG:
                 "timestamp_nulls": {"created_at": int(created_at_nulls), "updated_at": int(updated_at_nulls)},
             }
         )
+
+        # ==== BEGIN: Quick Probe – replica, indexes, ckw, timestamps ====
+        def _quick_probe_replica_and_indexes(engine: Engine) -> dict:
+            out: dict = {}
+            try:
+                with engine.connect() as cx:
+                    out["select_1"] = cx.execute(sql_text("SELECT 1")).scalar_one()
+                    out["vendors_count"] = cx.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar_one()
+                    out["ckw_nonblank"] = cx.execute(sql_text("""
+                        SELECT COUNT(*) FROM vendors WHERE TRIM(COALESCE(computed_keywords,'')) <> ''
+                    """)).scalar_one()
+                    out["max_updated_at"] = cx.execute(sql_text("""
+                        SELECT COALESCE(MAX(updated_at), '') FROM vendors
+                    """)).scalar_one()
+
+                    # Index list (compact)
+                    rows = cx.execute(sql_text("PRAGMA index_list('vendors')")).all()
+                    out["indexes"] = [{"seq": r[0], "name": r[1], "unique": bool(r[2])} for r in rows]
+            except Exception as e:
+                out["error"] = f"{e.__class__.__name__}: {e}"
+            return out
+
+        with st.expander("Quick Probe: replica + indexes + ckw + timestamps"):
+            try:
+                probe = _quick_probe_replica_and_indexes(ENGINE)
+                st.json(probe)
+            except Exception as e:
+                st.error(f"Probe failed: {e.__class__.__name__}: {e}")
+        # ==== END: Quick Probe – replica, indexes, ckw, timestamps ====
