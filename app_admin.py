@@ -191,6 +191,26 @@ try:
                 except Exception as _e:
                     st.warning(f"Quick vendors count failed: {type(_e).__name__}: {_e}")
 
+        # Success marker only when debugging
+        if _SHOW_DEBUG:
+            st.success("App reached post-boot marker ✅")
+
+        # Stash for reuse (UI context only)
+        st.session_state["ENGINE"] = ENGINE
+        st.session_state["DB_DBG"]  = _DB_DBG
+
+        if _SHOW_DEBUG:
+            with st.expander("Boot diagnostics (ENGINE + secrets)"):
+                st.json(_DB_DBG)
+
+            if bool(st.secrets.get("SHOW_COUNT", True)):
+                try:
+                    with ENGINE.connect() as cx:
+                        cnt = cx.exec_driver_sql("SELECT COUNT(*) FROM vendors").scalar()
+                    st.info(f"Vendors table row count: {int(cnt or 0)}")
+                except Exception as _e:
+                    st.warning(f"Quick vendors count failed: {type(_e).__name__}: {_e}")
+
         # Success banner hidden in prod; show only when debugging
         if _SHOW_DEBUG:
             st.success("App reached post-boot marker ✅")
