@@ -1,4 +1,4 @@
-# Reproducible pins: match deployed env on 2025-10-15
+# Reproducible pins for providers (Admin) — 2025-10-15
 streamlit==1.40.2
 pandas==2.2.2
 sqlalchemy==2.0.44
@@ -8,4 +8,5 @@ requests==2.32.5
 XlsxWriter==3.2.0
 python-magic-bin==0.4.14 ; platform_system == "Windows"
 python-magic==0.4.27 ; platform_system != "Windows"
+
 
