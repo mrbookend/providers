@@ -526,6 +526,10 @@ def main():
     except Exception as e:
         st.error(f"Failed to load vendors: {e}")
         return
+# ==== BEGIN: Search row (input + Clear button on same line) ====
+def _clear_search():
+    st.session_state["q"] = ""
+    st.rerun()
 
     # ==== BEGIN: Search row (input + Clear button on same line) ====
     def _clear_search():
