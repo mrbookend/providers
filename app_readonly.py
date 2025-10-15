@@ -136,7 +136,6 @@ def _get_help_md() -> str:
 # =============================
 # Secrets-driven page options
 # =============================
-PAGE_TITLE = _get_secret("page_title", "HCR Providers — Read-Only")
 PAGE_MAX_WIDTH_PX = _to_int(_get_secret("page_max_width_px", 2300), 2300)
 SIDEBAR_STATE = _get_secret("sidebar_state", "collapsed")
 SHOW_DIAGS = _as_bool(_get_secret("READONLY_SHOW_DIAGS", False), False)
@@ -257,11 +256,12 @@ _DEFAULT_WIDTHS = {
     "website_url": 180,
 }
 
-# Only accept known width keys; ignore accidental extras (e.g., HELP_MD)
+_ignored_width_keys: List[str] = []
 _user_widths: Dict[str, int] = {}
 for k, v in dict(_col_widths_raw).items():
     sk = str(k)
     if sk not in _DEFAULT_WIDTHS:
+        _ignored_width_keys.append(sk)
         continue
     _user_widths[sk] = _to_int(v, _DEFAULT_WIDTHS.get(sk, 140))
 
@@ -379,22 +379,36 @@ VENDOR_COLS = [
     "updated_by",
 ]
 
-@st.cache_data(ttl=READONLY_CACHE_TTL, show_spinner=False)
+# ==== BEGIN (A+B): Cache robustness + schema-tolerant SELECT ====
+@st.cache_data(ttl=READONLY_CACHE_TTL, show_spinner=False, hash_funcs={Engine: lambda _e: 0})
 def fetch_vendors(_engine: Engine) -> pd.DataFrame:
     """
     Load vendors; cached briefly to reduce DB hits.
-    Leading underscore on _engine tells Streamlit not to hash the Engine object.
+    Explicit cache hash ignores the Engine object; schema-tolerant SELECT prevents 500s during migrations.
     """
-    sql = "SELECT " + ", ".join(VENDOR_COLS) + " FROM vendors ORDER BY lower(business_name)"
     with _engine.connect() as conn:  # read-only; no transaction
+        cols_df = pd.read_sql(sql_text("PRAGMA table_info(vendors)"), conn)
+        present = set(cols_df["name"].astype(str)) if "name" in cols_df else set()
+        wanted = [c for c in VENDOR_COLS if c in present]
+        if not wanted:
+            raise RuntimeError("Table 'vendors' has no expected columns.")
+        sql = "SELECT " + ", ".join(wanted) + " FROM vendors ORDER BY lower(business_name)"
         df = pd.read_sql(sql_text(sql), conn)
 
     def _normalize_url(v: str) -> str:
+        # (E) URL guard: strip control/whitespace, require http(s), do a loose host check
         s = (v or "").strip()
         if not s:
             return ""
+        s = re.sub(r"[\s\x00-\x1f]+", "", s)
         if not (s.startswith("http://") or s.startswith("https://")):
             s = "https://" + s
+        try:
+            host = s.split("://", 1)[1].split("/", 1)[0]
+            if not host or (("." not in host) and (host != "localhost")):
+                return ""  # refuse obviously bogus anchors
+        except Exception:
+            return ""
         return s
 
     # Build a plain URL column for search/export; render anchor for UI
@@ -411,25 +425,28 @@ def fetch_vendors(_engine: Engine) -> pd.DataFrame:
         if c not in ("id", "created_at", "updated_at"):
             df[c] = df[c].fillna("").astype(str)
     return df
+# ==== END (A+B) ====
 
 # =============================
 # Filtering
 # =============================
 def apply_global_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
-    """Vectorized contains-any across all columns (case-insensitive)."""
+    """Vectorized contains-any across all columns (case-insensitive). Searches `website_url` rather than the anchor."""
     q = (query or "").strip().lower()
     if not q or df.empty:
         return df
-    # Lowercase, string view of all columns
-    hay = df.astype(str).apply(lambda s: s.str.lower(), axis=0)
-    # contains per-column, reduce with any(axis=1)
+    # Use plain URL for website column to avoid matching literal "Website" anchor text
+    df2 = df.copy()
+    if "website" in df2.columns and "website_url" in df2.columns:
+        df2["website"] = df2["website_url"]
+    hay = df2.astype(str).apply(lambda s: s.str.lower(), axis=0)
     mask = hay.apply(lambda s: s.str.contains(q, regex=False, na=False), axis=0).any(axis=1)
     return df[mask]
 
 def _filter_and_rank_by_query(df: pd.DataFrame, query: str) -> pd.DataFrame:
     """
-    Prioritize rows that match in computed_keywords, then other matches.
-    Case-insensitive substring match. Falls back gracefully if column is missing.
+    (D) Prioritize rows that match in computed_keywords; then by token hit count; tie-break by business_name.
+    Supports quoted phrases for exact matches and AND across tokens.
     """
     q = (query or "").strip().lower()
     if not q or df.empty:
@@ -445,28 +462,46 @@ def _filter_and_rank_by_query(df: pd.DataFrame, query: str) -> pd.DataFrame:
             df.get("contact_name", ""),
             df.get("phone", ""),
             df.get("address", ""),
-            df.get("website_url", ""),  # search plain URL, not HTML anchor
+            df.get("website_url", ""),
             df.get("notes", ""),
             df.get("keywords", ""),
         ],
         axis=1,
     ).astype(str).agg(" ".join, axis=1).str.lower()
 
-    hit_ckw = ckw.str.contains(q, regex=False, na=False)
-    hit_oth = other.str.contains(q, regex=False, na=False)
+    # Tokenize: "quoted phrases" and bare tokens
+    parts = re.findall(r'"([^"]+)"|(\S+)', q)
+    tokens = [a or b for (a, b) in parts if (a or b)]
+    if not tokens:
+        tokens = [q]
+
+    def _all_tokens_in(series: pd.Series) -> pd.Series:
+        base = series.astype(str).str.lower()
+        mask = pd.Series(True, index=series.index)
+        for t in tokens:
+            mask &= base.str.contains(t, regex=False, na=False)  # AND semantics
+        return mask
+
+    hit_ckw = _all_tokens_in(ckw)
+    hit_oth = _all_tokens_in(other)
     any_hit = hit_ckw | hit_oth
 
     dfm = df.loc[any_hit].copy()
-    dfm["_rank_ckw"] = (~hit_ckw.loc[dfm.index]).astype(int)  # 0 for ckw hit, 1 otherwise
+    dfm["_rank_ckw"] = (~hit_ckw.loc[dfm.index]).astype(int)  # 0 if ckw hit
 
-    # Deterministic tie-break: business_name (case-insensitive), fallback empty string
+    # Token score (more token hits => higher priority). Use negative for sort asc.
+    tok_hits = pd.DataFrame({t: other.str.contains(t, regex=False, na=False) for t in tokens})
+    dfm["_tok_score"] = tok_hits.loc[dfm.index].sum(axis=1) * -1
+
+    # Deterministic tie-break: business_name (case-insensitive)
     dfm["__bn"] = dfm.get("business_name", "").astype(str).str.lower()
+
     dfm.sort_values(
-        by=["_rank_ckw", "__bn"],
+        by=["_rank_ckw", "_tok_score", "__bn"],
         kind="mergesort",
         inplace=True,
     )
-    dfm.drop(columns=["_rank_ckw", "__bn"], inplace=True, errors="ignore")
+    dfm.drop(columns=["_rank_ckw", "_tok_score", "__bn"], inplace=True, errors="ignore")
     return dfm
 
 # =============================
@@ -530,7 +565,6 @@ def main():
     def _clear_search():
         st.session_state["q"] = ""
         try:
-            # Clear query param if supported
             if hasattr(st, "query_params"):
                 st.query_params["q"] = ""
         except Exception:
@@ -560,6 +594,13 @@ def main():
 
     q = st.session_state.get("q", "")
 
+    # Keep ?q= synchronized while typing (best effort; safe if unsupported)
+    try:
+        if hasattr(st, "query_params"):
+            st.query_params["q"] = q or ""
+    except Exception:
+        pass
+
     # ---- Filtering (prioritize computed_keywords if enabled) ----
     if READONLY_PRIORITIZE_CKW:
         filtered_full = _filter_and_rank_by_query(df_full, q)
@@ -571,7 +612,6 @@ def main():
     df_disp_all = filtered_full[disp_cols]
 
     # ----- Controls Row: Downloads/Sort -----
-    # Exclude 'website' from sort choices (HTML anchors)
     sortable_cols = [c for c in disp_cols if c != "website"]
     sort_labels = [_label_for(c) for c in sortable_cols]
     c_csv, c_xlsx, c_sort, c_order = st.columns([2, 2, 2, 2])
@@ -580,6 +620,7 @@ def main():
     if len(sortable_cols) == 0:
         sort_col = None
         ascending = True
+        chosen_label = None
     else:
         default_sort_col = "business_name" if "business_name" in sortable_cols else sortable_cols[0]
         default_label = _label_for(default_sort_col)
@@ -614,13 +655,19 @@ def main():
     else:
         df_disp_sorted = df_disp_all.copy()
 
+    # ==== BEGIN: Render cap (limit DOM rows; exports remain full) ====
+    RENDER_MAX_ROWS = int(_to_int(_get_secret("READONLY_RENDER_MAX_ROWS", 1000), 1000))
+    df_render = df_disp_sorted.head(RENDER_MAX_ROWS)
+    capped = len(df_disp_sorted) > RENDER_MAX_ROWS
+    render_note = "" if not capped else f" (showing first {len(df_render)} of {len(df_disp_sorted)})"
+    # ==== END ====
+
     # Downloads (use sorted view) — guard empty frames
     ts = pd.Timestamp.utcnow().strftime("%Y%m%d-%H%M%S")
 
-    # Prepare CSV with plain URLs (no HTML anchors)
+    # Prepare CSV with plain URLs (no HTML anchors), encoded for Excel (UTF-8 BOM)
     csv_df = df_disp_sorted.copy()
     if "website" in csv_df.columns and "website_url" in filtered_full.columns and not csv_df.empty:
-        # Replace display anchor with plain URL for export
         csv_df["website"] = filtered_full.loc[csv_df.index, "website_url"].fillna("").astype(str)
     csv_buf = io.StringIO()
     if not csv_df.empty:
@@ -628,7 +675,7 @@ def main():
     with c_csv:
         st.download_button(
             "Download CSV",
-            data=csv_buf.getvalue().encode("utf-8"),
+            data=csv_buf.getvalue().encode("utf-8-sig"),  # BOM for Excel
             file_name=f"providers_{ts}.csv",
             mime="text/csv",
             type="secondary",
@@ -636,7 +683,7 @@ def main():
             disabled=csv_df.empty,
         )
 
-    # Prepare XLSX with plain URLs
+    # Prepare XLSX with plain URLs (kept as text; low-risk change only)
     excel_df = df_disp_sorted.copy()
     if "website" in excel_df.columns and "website_url" in filtered_full.columns and not excel_df.empty:
         excel_df["website"] = filtered_full.loc[excel_df.index, "website_url"].fillna("").astype(str)
@@ -658,28 +705,38 @@ def main():
             disabled=excel_df.empty,
         )
 
-    # Always show tiny result count caption (keeps users oriented)
-    st.caption(f"{len(df_disp_sorted)} result(s). Viewport rows: {VIEWPORT_ROWS}")
+    # ---- Result count (a11y-friendly) ----
+    st.markdown(
+        f'<div role="status" aria-live="polite" class="result-count">{len(df_disp_sorted)} result(s){render_note}. '
+        f'Viewport rows: {VIEWPORT_ROWS}'
+        + (f' · Sorted by: {chosen_label}' if chosen_label else '') +
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Render-cap hint for clarity
+    if capped:
+        st.info("Showing the first results only. Refine your search or use **Download CSV/XLSX** for the full set.")
 
     # ---- Help / Tips (expander only) ----
     with st.expander("Help / Tips", expanded=False):
         st.markdown(_get_help_md(), unsafe_allow_html=True)
 
     # ---- Scrollable full table ----
-    if df_disp_sorted.empty:
+    if df_render.empty:
         st.info("No matching providers. Tip: try fewer words or click Clear to reset the search.")
     else:
-        st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
+        st.markdown(_build_table_html(df_render, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
 
     # ---- Quick Stats (read-only) ----
     with st.expander("Quick Stats", expanded=False):
         try:
-            nrows, ncols = df_disp_sorted.shape
+            nrows, ncols = df_render.shape
             st.write({
                 "rows_displayed": int(nrows),
                 "columns": int(ncols),
-                "unique_categories": int(df_disp_sorted["category"].nunique() if "category" in df_disp_sorted else 0),
-                "unique_services": int(df_disp_sorted["service"].nunique() if "service" in df_disp_sorted else 0),
+                "unique_categories": int(df_render["category"].nunique() if "category" in df_render else 0),
+                "unique_services": int(df_render["service"].nunique() if "service" in df_render else 0),
             })
         except Exception as _e:
             st.caption(f"Stats unavailable: {_e}")
@@ -687,11 +744,22 @@ def main():
     # ---- Debug / Diagnostics (shown only when explicitly enabled) ----
     if SHOW_DIAGS:
         st.divider()
+        # Operator utility: clear cache to force refresh
+        cols = st.columns([2, 2, 6])
+        with cols[0]:
+            if st.button("Refresh data cache", type="secondary"):
+                try:
+                    st.cache_data.clear()
+                    st.success("Cache cleared.")
+                except Exception as e:
+                    st.warning(f"Failed to clear cache: {e}")
+
         if st.button("Debug (status & secrets keys)", type="secondary"):
             dbg = {
                 "DB (resolved)": info,
                 "Secrets keys": sorted(list(getattr(st, "secrets", {}).keys())) if hasattr(st, "secrets") else [],
                 "Widths (effective)": COLUMN_WIDTHS_PX_READONLY,
+                "Ignored width keys": _ignored_width_keys,
                 "Viewport rows": VIEWPORT_ROWS,
                 "Scroll height px": SCROLL_MAX_HEIGHT,
                 "page_title_note": "Page title set at boot due to Streamlit order constraint.",
@@ -705,24 +773,37 @@ def main():
                 has_nested_help = False
             st.caption(f"HELP_MD present (nested in widths): {has_nested_help}")
 
-            try:
-                with engine.connect() as conn:
-                    cols_v = pd.read_sql(sql_text("PRAGMA table_info(vendors)"), conn)
-                    cols_c = pd.read_sql(sql_text("PRAGMA table_info(categories)"), conn)
-                    cols_s = pd.read_sql(sql_text("PRAGMA table_info(services)"), conn)
-                    counts = {}
-                    for t in ("vendors", "categories", "services"):
-                        c = pd.read_sql(sql_text(f"SELECT COUNT(*) AS n FROM {t}"), conn)["n"].iloc[0]
-                        counts[t] = int(c)
-                probe = {
-                    "vendors_columns": list(cols_v["name"]) if "name" in cols_v else [],
-                    "categories_columns": list(cols_c["name"]) if "name" in cols_c else [],
-                    "services_columns": list(cols_s["name"]) if "name" in cols_s else [],
-                    "counts": counts,
-                }
+            # Schema/PRAGMA probe with a tiny retry for transient hiccups
+            probe = {}
+            err = None
+            for attempt in (1, 2):
+                try:
+                    with engine.connect() as conn:
+                        cols_v = pd.read_sql(sql_text("PRAGMA table_info(vendors)"), conn)
+                        present = set(cols_v["name"].astype(str)) if "name" in cols_v else set()
+                        missing = [c for c in VENDOR_COLS if c not in present]
+
+                        cols_c = pd.read_sql(sql_text("PRAGMA table_info(categories)"), conn)
+                        cols_s = pd.read_sql(sql_text("PRAGMA table_info(services)"), conn)
+                        counts = {}
+                        for t in ("vendors", "categories", "services"):
+                            c = pd.read_sql(sql_text(f"SELECT COUNT(*) AS n FROM {t}"), conn)["n"].iloc[0]
+                            counts[t] = int(c)
+                    probe = {
+                        "vendors_columns": list(cols_v["name"]) if "name" in cols_v else [],
+                        "categories_columns": list(cols_c["name"]) if "name" in cols_c else [],
+                        "services_columns": list(cols_s["name"]) if "name" in cols_s else [],
+                        "counts": counts,
+                        "vendors_missing_expected": missing,
+                    }
+                    err = None
+                    break
+                except Exception as e:
+                    err = e
+            if err:
+                st.write({"db_probe_error": str(err)})
+            else:
                 st.write(probe)
-            except Exception as e:
-                st.write({"db_probe_error": str(e)})
 
 if __name__ == "__main__":
     try:
