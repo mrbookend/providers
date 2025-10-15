@@ -144,8 +144,8 @@ SHOW_STATUS = _as_bool(_get_secret("READONLY_SHOW_STATUS", False), False)
 # Prioritized-search toggle (enabled by default; can turn off in secrets)
 READONLY_PRIORITIZE_CKW = _as_bool(_get_secret("READONLY_PRIORITIZE_CKW", "true"), True)
 
-# Cache TTL (seconds) for vendor list
-READONLY_CACHE_TTL = _to_int(_get_secret("READONLY_CACHE_TTL", 60), 60)
+# Cache TTL (seconds) for vendor list (default 120; override with READONLY_CACHE_TTL)
+READONLY_CACHE_TTL = _to_int(_get_secret("READONLY_CACHE_TTL", 120), 120)
 
 # Apply sidebar state retroactively (page title must stay as set_page_config)
 try:
@@ -408,7 +408,7 @@ def fetch_vendors(_engine: Engine) -> pd.DataFrame:
         df["website"] = df["website"].fillna("").astype(str)
         df["website_url"] = df["website"].map(_normalize_url)
         df["website"] = df["website_url"].map(
-            lambda u: f'<a href="{html.escape(u, quote=True)}" target="_blank" rel="noopener noreferrer">Website</a>'
+            lambda u: f'<a href="{html.escape(u, quote=True)}" target="_blank" rel="noopener noreferrer nofollow">Website</a>'
             if u else ""
         )
 
@@ -424,9 +424,7 @@ def fetch_vendors(_engine: Engine) -> pd.DataFrame:
 def apply_global_search(df: pd.DataFrame, query: str) -> pd.DataFrame:
     """Vectorized contains-any across all columns (case-insensitive)."""
     q = (query or "").strip().lower()
-    if not q:
-        return df
-    if df.empty:
+    if not q or df.empty:
         return df
     # Lowercase, string view of all columns
     hay = df.astype(str).apply(lambda s: s.str.lower(), axis=0)
@@ -440,9 +438,7 @@ def _filter_and_rank_by_query(df: pd.DataFrame, query: str) -> pd.DataFrame:
     Case-insensitive substring match. Falls back gracefully if column is missing.
     """
     q = (query or "").strip().lower()
-    if not q:
-        return df
-    if df.empty:
+    if not q or df.empty:
         return df
 
     # Safe access / fallbacks
@@ -536,7 +532,7 @@ def main():
         key="q",
         label_visibility="collapsed",
         placeholder="Search e.g., plumb, roofing, 'Inverness', phone digits, etc.",
-        help="Case-insensitive; prioritizes matches in computed keywords; matches across all columns.",
+        help="Case-insensitive; results with keyword hits appear first; matches across all columns.",
     )
     # ==== END: Search input (accessibility-safe) ====
 
@@ -551,17 +547,22 @@ def main():
     disp_cols = [c for c in filtered_full.columns if c not in HIDE_IN_DISPLAY]
     df_disp_all = filtered_full[disp_cols]
 
-    # ----- Controls Row: Help (left) + Downloads/Sort (right) -----
+    # ----- Controls Row: Help (left) + Downloads/Sort/Clear (right) -----
     # Exclude 'website' from sort choices (HTML anchors)
     sortable_cols = [c for c in disp_cols if c != "website"]
     sort_labels = [_label_for(c) for c in sortable_cols]
 
-    c_help, c_spacer, c_csv, c_xlsx, c_sort, c_order = st.columns([2, 6, 2, 2, 2, 2])
+    c_help, c_spacer, c_csv, c_xlsx, c_sort, c_order, c_clear = st.columns([2, 6, 2, 2, 2, 2, 1])
 
     with c_help:
         open_help = st.button("Help / Tips", type="primary", use_container_width=True)
     if open_help:
         st.session_state["help_open"] = True
+
+    with c_clear:
+        if st.button("×", help="Clear search", type="secondary", use_container_width=True):
+            st.session_state["q"] = ""
+            st.rerun()
 
     # Safe defaults when no sortable cols
     if len(sortable_cols) == 0:
@@ -648,13 +649,8 @@ def main():
             disabled=excel_df.empty,
         )
 
-    # Optional status line (toggle via Secrets)
-    if SHOW_STATUS:
-        st.caption(
-            f"{len(df_disp_sorted)} matching provider(s). "
-            f"Viewport rows: {VIEWPORT_ROWS}. "
-            f"Prioritized search: {'on' if READONLY_PRIORITIZE_CKW else 'off'}."
-        )
+    # Always show tiny result count caption (keeps users oriented)
+    st.caption(f"{len(df_disp_sorted)} result(s). Viewport rows: {VIEWPORT_ROWS}")
 
     # -------- Help / Tips expander (controlled by session_state + Close button) --------
     def _close_help():
@@ -667,48 +663,49 @@ def main():
 
     # ---------------- Scrollable full table (admin-style viewport) ----------------
     if df_disp_sorted.empty:
-        st.info("No matching providers.")
+        st.info("No matching providers. Tip: try fewer words or click × to clear the search.")
     else:
         st.markdown(_build_table_html(df_disp_sorted, sticky_first=STICKY_FIRST_COL), unsafe_allow_html=True)
 
-    # Debug / Diagnostics
-    st.divider()
-    if st.button("Debug (status & secrets keys)", type="secondary"):
-        dbg = {
-            "DB (resolved)": info,
-            "Secrets keys": sorted(list(getattr(st, "secrets", {}).keys())) if hasattr(st, "secrets") else [],
-            "Widths (effective)": COLUMN_WIDTHS_PX_READONLY,
-            "Viewport rows": VIEWPORT_ROWS,
-            "Scroll height px": SCROLL_MAX_HEIGHT,
-            "page_title_note": "Page title set at boot due to Streamlit order constraint.",
-        }
-        st.write(dbg)
-        st.caption(f"HELP_MD present (top-level): {'HELP_MD' in getattr(st, 'secrets', {})}")
-        try:
-            nested = st.secrets.get("COLUMN_WIDTHS_PX_READONLY", {})
-            has_nested_help = isinstance(nested, dict) and bool((nested.get("HELP_MD", "") or "").strip())
-        except Exception:
-            has_nested_help = False
-        st.caption(f"HELP_MD present (nested in widths): {has_nested_help}")
-
-        try:
-            with engine.connect() as conn:
-                cols_v = pd.read_sql(sql_text("PRAGMA table_info(vendors)"), conn)
-                cols_c = pd.read_sql(sql_text("PRAGMA table_info(categories)"), conn)
-                cols_s = pd.read_sql(sql_text("PRAGMA table_info(services)"), conn)
-                counts = {}
-                for t in ("vendors", "categories", "services"):
-                    c = pd.read_sql(sql_text(f"SELECT COUNT(*) AS n FROM {t}"), conn)["n"].iloc[0]
-                    counts[t] = int(c)
-            probe = {
-                "vendors_columns": list(cols_v["name"]) if "name" in cols_v else [],
-                "categories_columns": list(cols_c["name"]) if "name" in cols_c else [],
-                "services_columns": list(cols_s["name"]) if "name" in cols_s else [],
-                "counts": counts,
+    # Debug / Diagnostics (shown only when explicitly enabled)
+    if SHOW_DIAGS:
+        st.divider()
+        if st.button("Debug (status & secrets keys)", type="secondary"):
+            dbg = {
+                "DB (resolved)": info,
+                "Secrets keys": sorted(list(getattr(st, "secrets", {}).keys())) if hasattr(st, "secrets") else [],
+                "Widths (effective)": COLUMN_WIDTHS_PX_READONLY,
+                "Viewport rows": VIEWPORT_ROWS,
+                "Scroll height px": SCROLL_MAX_HEIGHT,
+                "page_title_note": "Page title set at boot due to Streamlit order constraint.",
             }
-            st.write(probe)
-        except Exception as e:
-            st.write({"db_probe_error": str(e)})
+            st.write(dbg)
+            st.caption(f"HELP_MD present (top-level): {'HELP_MD' in getattr(st, 'secrets', {})}")
+            try:
+                nested = st.secrets.get("COLUMN_WIDTHS_PX_READONLY", {})
+                has_nested_help = isinstance(nested, dict) and bool((nested.get("HELP_MD", "") or "").strip())
+            except Exception:
+                has_nested_help = False
+            st.caption(f"HELP_MD present (nested in widths): {has_nested_help}")
+
+            try:
+                with engine.connect() as conn:
+                    cols_v = pd.read_sql(sql_text("PRAGMA table_info(vendors)"), conn)
+                    cols_c = pd.read_sql(sql_text("PRAGMA table_info(categories)"), conn)
+                    cols_s = pd.read_sql(sql_text("PRAGMA table_info(services)"), conn)
+                    counts = {}
+                    for t in ("vendors", "categories", "services"):
+                        c = pd.read_sql(sql_text(f"SELECT COUNT(*) AS n FROM {t}"), conn)["n"].iloc[0]
+                        counts[t] = int(c)
+                probe = {
+                    "vendors_columns": list(cols_v["name"]) if "name" in cols_v else [],
+                    "categories_columns": list(cols_c["name"]) if "name" in cols_c else [],
+                    "services_columns": list(cols_s["name"]) if "name" in cols_s else [],
+                    "counts": counts,
+                }
+                st.write(probe)
+            except Exception as e:
+                st.write({"db_probe_error": str(e)})
 
 if __name__ == "__main__":
     main()
