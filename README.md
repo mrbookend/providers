@@ -92,3 +92,23 @@ This repo uses a simple, low-drama workflow that keeps `main` clean and the Stre
 Run a 1-minute database check before pushing to Streamlit Cloud:
 ```bash
 python scripts/smoke.py
+
+## Secrets Reference
+
+| Key | Used by | Purpose |
+|---|---|---|
+| `TURSO_DATABASE_URL` | Admin & Read-Only | Remote libSQL sync endpoint (must be `libsql://…`, not `sqlite+libsql://`) |
+| `TURSO_AUTH_TOKEN` | Admin & Read-Only | Auth token for Turso/libSQL |
+| `DB_STRATEGY` | Admin | `embedded_replica` (default), `remote_only`, or `embedded_only` |
+| `EMBEDDED_DB_PATH` | Admin & Read-Only | Path to local embedded replica (e.g., `vendors-embedded.db`) |
+| `ENV` | Admin | `prod` (default) hides debug; anything else shows debug |
+| `SHOW_DEBUG` | Admin | Force enable debug UI for this session/environment |
+| `SHOW_STATUS` / `READONLY_SHOW_STATUS` | Both | Show version banner in sidebar |
+| `READONLY_SHOW_DIAGS` | Read-Only | Show diagnostic captions (safe) |
+| `READONLY_VIEWPORT_ROWS` | Read-Only | Row viewport height (10–40 clamp) |
+| `page_title` | Read-Only | Page title shown in browser/tab |
+| `page_left_padding_px` / `page_top_padding_px` / `page_max_width_px` | Read-Only | Layout tuning |
+| `COLUMN_WIDTHS_PX_READONLY` | Read-Only | Dict of column widths (px) |
+| `READONLY_PRIORITIZE_CKW` | Read-Only | Prioritize `computed_keywords` hits in search |
+| `CKW_RULES` | Admin | JSON/TOML rules for computed keywords (by category/service) |
+| `ADMIN_USER` | Admin | Used for `updated_by` stamp on writes |
