@@ -23,7 +23,7 @@ from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
 
 # ---- Streamlit page config MUST be first Streamlit call ----
-st.set_page_config(page_title="Vendors Admin", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Providers Admin", layout="wide", initial_sidebar_state="expanded")
 
 # ==== BEGIN: Admin boot bundle (version banner + guards + engine + init) ====
 
@@ -458,7 +458,7 @@ def _apply_add_reset_if_needed():
         st.session_state["add_form_version"] += 1
 
 def _queue_add_form_reset():
-    st.session_state["_pending_add_form_reset"] = True
+    # removed unused: st.session_state["_pending_add_form_reset"] = True
     st.session_state["_pending_add_reset"] = True  # keep original flag for compatibility
 
 EDIT_FORM_KEYS = [
@@ -615,6 +615,9 @@ def ensure_schema(engine: Engine) -> None:
     Create tables if missing (hard fail with exact SQL on error).
     Create indexes best-effort (warn, don't crash).
     Optional ALTERs (migrations) also best-effort.
+
+    NOTE: Each DDL/ALTER is executed independently with retry to
+    avoid Hrana 'stream not found' breaking the whole boot.
     """
     table_ddls = [
         # vendors
@@ -652,7 +655,6 @@ def ensure_schema(engine: Engine) -> None:
         """,
     ]
 
-    # Note: include an index on computed_keywords and service/category helpers
     index_ddls = [
         "CREATE INDEX IF NOT EXISTS idx_vendors_cat ON vendors(category)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_bus ON vendors(business_name)",
@@ -665,50 +667,48 @@ def ensure_schema(engine: Engine) -> None:
         "CREATE INDEX IF NOT EXISTS idx_vendors_phone ON vendors(phone)",
     ]
 
-    with engine.begin() as conn:
-        # --- 1) Tables: hard requirement (raise with exact statement) ---
-        for s in table_ddls:
-            stmt = s.strip()
-            try:
-                conn.exec_driver_sql(stmt)
-            except Exception as e:
-                raise ValueError(
-                    f"TABLE DDL failed: {e.__class__.__name__}: {e}\n--- SQL ---\n{stmt}\n"
-                ) from e
-
-        # --- 2) Indexes (first pass): best-effort (warn, do not abort app) ---
-        for s in index_ddls:
-            stmt = s.strip()
-            try:
-                conn.exec_driver_sql(stmt)
-            except Exception as e:
-                if '_SHOW_DEBUG' in globals() and _SHOW_DEBUG and '_has_streamlit_ctx' in globals() and _has_streamlit_ctx():
-                    st.warning(f"Index DDL skipped: {e.__class__.__name__}: {e}\n— {stmt}")
-
-        # --- 3) Optional migrations: add missing columns if ever needed (soft) ---
-        def _table_columns(table: str) -> set[str]:
-            rows = conn.execute(sql_text(f"PRAGMA table_info({table})")).fetchall()
-            return {str(r[1]) for r in rows}
-
-        def _add_column_if_missing(table: str, decl: str) -> None:
-            # decl like: "computed_keywords TEXT"
-            col = decl.split()[0]
-            try:
-                if col not in _table_columns(table):
-                    conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {decl}")
-            except Exception as e:
-                if '_SHOW_DEBUG' in globals() and _SHOW_DEBUG and '_has_streamlit_ctx' in globals() and _has_streamlit_ctx():
-                    st.warning(f"ALTER skipped: {table}.{col}: {e.__class__.__name__}: {e}")
-
-        # ensure computed_keywords exists even on old DBs
-        _add_column_if_missing("vendors", "computed_keywords TEXT")
-        # retry index if it failed before column existed
+    # --- 1) Tables (each with retry) ---
+    for s in table_ddls:
+        stmt = s.strip()
         try:
-            conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS idx_vendors_ckw ON vendors(computed_keywords)")
+            _exec_with_retry(engine, stmt)
+        except Exception as e:
+            raise ValueError(
+                f"TABLE DDL failed: {e.__class__.__name__}: {e}\n--- SQL ---\n{stmt}\n"
+            ) from e
+
+    # --- 2) Indexes (each best-effort with retry; warn on failure) ---
+    for s in index_ddls:
+        stmt = s.strip()
+        try:
+            _exec_with_retry(engine, stmt)
         except Exception as e:
             if '_SHOW_DEBUG' in globals() and _SHOW_DEBUG and '_has_streamlit_ctx' in globals() and _has_streamlit_ctx():
-                st.warning(f"Index (ckw) create skipped: {type(e).__name__}: {e}")
+                st.warning(f"Index DDL skipped: {e.__class__.__name__}: {e}\n— {stmt}")
 
+    # --- 3) Optional migrations: add missing columns if ever needed (soft) ---
+    def _table_columns(table: str) -> set[str]:
+        with engine.connect() as conn:
+            rows = conn.execute(sql_text(f"PRAGMA table_info({table})")).fetchall()
+        return {str(r[1]) for r in rows}
+
+    def _add_column_if_missing(table: str, decl: str) -> None:
+        col = decl.split()[0]
+        try:
+            if col not in _table_columns(table):
+                _exec_with_retry(engine, f"ALTER TABLE {table} ADD COLUMN {decl}")
+        except Exception as e:
+            if '_SHOW_DEBUG' in globals() and _SHOW_DEBUG and '_has_streamlit_ctx' in globals() and _has_streamlit_ctx():
+                st.warning(f"ALTER skipped: {table}.{col}: {e.__class__.__name__}: {e}")
+
+    # ensure computed_keywords exists even on old DBs
+    _add_column_if_missing("vendors", "computed_keywords TEXT")
+    # retry index if it failed before column existed
+    try:
+        _exec_with_retry(engine, "CREATE INDEX IF NOT EXISTS idx_vendors_ckw ON vendors(computed_keywords)")
+    except Exception as e:
+        if '_SHOW_DEBUG' in globals() and _SHOW_DEBUG and '_has_streamlit_ctx' in globals() and _has_streamlit_ctx():
+            st.warning(f"Index (ckw) create skipped: {type(e).__name__}: {e}")
 
 def _normalize_phone(val: str | None) -> str:
     if not val:
@@ -718,13 +718,11 @@ def _normalize_phone(val: str | None) -> str:
         digits = digits[1:]
     return digits if len(digits) == 10 else digits
 
-
 def _format_phone(val: str | None) -> str:
     s = re.sub(r"\D", "", str(val or ""))
     if len(s) == 10:
         return f"({s[0:3]}) {s[3:6]}-{s[6:10]}"
     return (val or "").strip()
-
 
 def _sanitize_url(url: str | None) -> str:
     if not url:
@@ -733,7 +731,6 @@ def _sanitize_url(url: str | None) -> str:
     if url and not re.match(r"^https?://", url, re.I):
         url = "https://" + url
     return url
-
 
 def load_df(engine: Engine) -> pd.DataFrame:
     with engine.begin() as conn:
@@ -758,7 +755,6 @@ def load_df(engine: Engine) -> pd.DataFrame:
     df["phone_fmt"] = df["phone"].apply(_format_phone)
     return df
 
-
 # ---- cached taxonomy lookups (no Engine arg; safe to cache) ----
 @st.cache_data(ttl=30, show_spinner=False)
 def list_names(table: str) -> list[str]:
@@ -766,12 +762,10 @@ def list_names(table: str) -> list[str]:
         rows = conn.execute(sql_text(f"SELECT name FROM {table} ORDER BY lower(name)")).fetchall()
     return [r[0] for r in rows]
 
-
 def usage_count(engine: Engine, col: str, name: str) -> int:
     with engine.begin() as conn:
         cnt = conn.execute(sql_text(f"SELECT COUNT(*) FROM vendors WHERE {col} = :n"), {"n": name}).scalar()
     return int(cnt or 0)
-
 
 # ---------- Cascade helpers ----------
 def rename_category_and_cascade(engine: Engine, old: str, new: str) -> None:
@@ -951,8 +945,8 @@ def _execute_append_only(
 # UI
 # -----------------------------
 _tab_names = [
-    "Browse Vendors",
-    "Add / Edit / Delete Vendor",
+    "Browse Providers",
+    "Add / Edit / Delete Provider",
     "Category Admin",
     "Service Admin",
     "Maintenance",
@@ -1014,7 +1008,7 @@ with _tabs[0]:
         hide_index=True,
         column_config={
             "business_name": st.column_config.TextColumn("Provider"),
-            "website": st.column_config.LinkColumn("website"),
+            "website": st.column_config.LinkColumn("Website"),
             "notes": st.column_config.TextColumn(width=420),
             "keywords": st.column_config.TextColumn(width=260),
             "computed_keywords": st.column_config.TextColumn(width=260),
@@ -1029,10 +1023,10 @@ with _tabs[0]:
         mime="text/csv",
     )
 
-# ---------- Add/Edit/Delete Vendor
+# ---------- Add/Edit/Delete Provider
 with _tabs[1]:
-    # ===== Add Vendor =====
-    st.subheader("Add Vendor")
+    # ===== Add Provider =====
+    st.subheader("Add Provider")
     _init_add_form_defaults()
     _apply_add_reset_if_needed()  # apply queued reset BEFORE creating widgets
 
@@ -1065,7 +1059,7 @@ with _tabs[1]:
             st.text_area("Notes", height=100, key="add_notes")
             st.text_input("Keywords (comma separated)", key="add_keywords")
 
-        submitted = st.form_submit_button("Add Vendor")
+        submitted = st.form_submit_button("Add Provider")
 
     if submitted:
         add_nonce = _nonce("add")
@@ -1087,7 +1081,7 @@ with _tabs[1]:
         if phone_norm and len(phone_norm) != 10:
             st.error("Phone must be 10 digits or blank.")
         elif not business_name or not category:
-            st.error("Business Name and Category are required.")
+            st.error("Provider and Category are required.")
         else:
             try:
                 now = datetime.utcnow().isoformat(timespec="seconds")
@@ -1123,7 +1117,7 @@ with _tabs[1]:
                     },
                 )
                 st.session_state["add_last_done"] = add_nonce
-                st.success(f"Vendor added: {business_name}")
+                st.success(f"Provider added: {business_name}")
                 _queue_add_form_reset()
                 list_names.clear()  # refresh cached taxonomy
                 _nonce_rotate("add")
@@ -1132,12 +1126,12 @@ with _tabs[1]:
                 st.error(f"Add failed: {e}")
 
     st.divider()
-    st.subheader("Edit / Delete Vendor")
+    st.subheader("Edit Provider")
 
     df_all = load_df(ENGINE)
 
     if df_all.empty:
-        st.info("No vendors yet. Use 'Add Vendor' above to create your first record.")
+        st.info("No providers yet. Use 'Add Provider' above to create your first record.")
     else:
         # Init + apply resets BEFORE rendering widgets
         _init_edit_form_defaults()
@@ -1224,7 +1218,7 @@ with _tabs[1]:
 
             vid = st.session_state.get("edit_vendor_id")
             if vid is None:
-                st.error("Select a vendor first.")
+                st.error("Select a provider first.")
             else:
                 bn  = (st.session_state["edit_business_name"] or "").strip()
                 cat = (st.session_state["edit_category"] or "").strip()
@@ -1233,7 +1227,7 @@ with _tabs[1]:
                 if phone_norm and len(phone_norm) != 10:
                     st.error("Phone must be 10 digits or blank.")
                 elif not bn or not cat:
-                    st.error("Business Name and Category are required.")
+                    st.error("Provider and Category are required.")
                 else:
                     try:
                         prev_updated = st.session_state.get("edit_row_updated_at") or ""
@@ -1283,7 +1277,7 @@ with _tabs[1]:
                             st.warning("No changes applied (stale selection or already updated). Refresh and try again.")
                         else:
                             st.session_state["edit_last_done"] = edit_nonce
-                            st.success(f"Vendor updated: {bn}")
+                            st.success(f"Provider updated: {bn}")
                             _queue_edit_form_reset()
                             _nonce_rotate("edit")
                             list_names.clear()
@@ -1292,6 +1286,8 @@ with _tabs[1]:
                         st.error(f"Update failed: {e}")
 
         st.markdown("---")
+        st.subheader("Delete Provider")
+
         # Use separate delete selection (ID-backed similar approach could be added later)
         sel_label_del = st.selectbox(
             "Select provider to delete (type to search)",
@@ -1306,7 +1302,7 @@ with _tabs[1]:
 
         del_form_key = f"delete_vendor_form_{st.session_state['delete_form_version']}"
         with st.form(del_form_key, clear_on_submit=False):
-            deleted = st.form_submit_button("Delete Vendor")
+            deleted = st.form_submit_button("Delete Provider")
 
         if deleted:
             del_nonce = _nonce("delete")
@@ -1316,7 +1312,7 @@ with _tabs[1]:
 
             vid = st.session_state.get("delete_vendor_id")
             if vid is None:
-                st.error("Select a vendor first.")
+                st.error("Select a provider first.")
             else:
                 try:
                     row = df_all.loc[df_all["id"] == int(vid)]
@@ -1331,7 +1327,7 @@ with _tabs[1]:
                         st.warning("No delete performed (stale selection). Refresh and try again.")
                     else:
                         st.session_state["delete_last_done"] = del_nonce
-                        st.success("Vendor deleted.")
+                        st.success("Provider deleted.")
                         _queue_delete_form_reset()
                         _nonce_rotate("delete")
                         list_names.clear()
@@ -1341,7 +1337,7 @@ with _tabs[1]:
 
 # ---------- Category Admin
 with _tabs[2]:
-    st.caption("Category is required. Manage the reference list and reassign vendors safely.")
+    st.caption("Category is required. Manage the reference list and reassign providers safely.")
     _init_cat_defaults()
     _apply_cat_reset_if_needed()
 
@@ -1392,7 +1388,7 @@ with _tabs[2]:
                 st.write("Select a category.")
             else:
                 cnt = usage_count(ENGINE, "category", tgt)
-                st.write(f"In use by {cnt} vendor(s).")
+                st.write(f"In use by {cnt} provider(s).")
                 if cnt == 0:
                     if st.button("Delete category (no usage)", key="cat_del_btn"):
                         try:
@@ -1405,8 +1401,8 @@ with _tabs[2]:
                             st.error(f"Delete category failed: {e}")
                 else:
                     repl_options = ["— Select —"] + [c for c in cats if c != tgt]
-                    repl = st.selectbox("Reassign vendors to…", options=repl_options, key="cat_reassign_to")
-                    if st.button("Reassign vendors then delete", key="cat_reassign_btn"):
+                    repl = st.selectbox("Reassign providers to…", options=repl_options, key="cat_reassign_to")
+                    if st.button("Reassign providers then delete", key="cat_reassign_btn"):
                         if repl == "— Select —":
                             st.error("Choose a category to reassign to.")
                         else:
@@ -1421,7 +1417,7 @@ with _tabs[2]:
 
 # ---------- Service Admin
 with _tabs[3]:
-    st.caption("Service is optional on vendors. Manage the reference list here.")
+    st.caption("Service is optional on providers. Manage the reference list here.")
     _init_svc_defaults()
     _apply_svc_reset_if_needed()
 
@@ -1472,7 +1468,7 @@ with _tabs[3]:
                 st.write("Select a service.")
             else:
                 cnt = usage_count(ENGINE, "service", tgt)
-                st.write(f"In use by {cnt} vendor(s).")
+                st.write(f"In use by {cnt} provider(s).")
                 if cnt == 0:
                     if st.button("Delete service (no usage)", key="svc_del_btn"):
                         try:
@@ -1485,8 +1481,8 @@ with _tabs[3]:
                             st.error(f"Delete service failed: {e}")
                 else:
                     repl_options = ["— Select —"] + [s for s in servs if s != tgt]
-                    repl = st.selectbox("Reassign vendors to…", options=repl_options, key="svc_reassign_to")
-                    if st.button("Reassign vendors then delete service", key="svc_reassign_btn"):
+                    repl = st.selectbox("Reassign providers to…", options=repl_options, key="svc_reassign_to")
+                    if st.button("Reassign providers then delete service", key="svc_reassign_btn"):
                         if repl == "— Select —":
                             st.error("Choose a service to reassign to.")
                         else:
@@ -1583,14 +1579,14 @@ with _tabs[4]:
     colA, colB = st.columns([1, 1])
     with colA:
         st.download_button(
-            "Export all vendors (formatted phones)",
+            "Export all providers (formatted phones)",
             data=full_formatted.to_csv(index=False).encode("utf-8"),
             file_name=f"providers_{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv",
             mime="text/csv",
         )
     with colB:
         st.download_button(
-            "Export all vendors (digits-only phones)",
+            "Export all providers (digits-only phones)",
             data=full.to_csv(index=False).encode("utf-8"),
             file_name=f"providers_raw_{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv",
             mime="text/csv",
@@ -1713,7 +1709,7 @@ with _tabs[4]:
     st.divider()
     st.subheader("Data cleanup")
 
-    if st.button("Normalize phone numbers & Title Case (vendors + categories/services)"):
+    if st.button("Normalize phone numbers & Title Case (providers + categories/services)"):
         def to_title(s: str | None) -> str:
             return ((s or "").strip()).title()
 
@@ -1784,7 +1780,12 @@ with _tabs[4]:
                             {"new": new_name, "old": old_name},
                         )
                         conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"old": old_name})
-            st.success(f"Vendors normalized: {changed_vendors}. Categories/services retitled and reconciled.")
+            st.success(f"Providers normalized: {changed_vendors}. Categories/services retitled and reconciled.")
+            # Refresh lookups and UI so dropdowns don't keep stale case-sensitive options
+            list_names.clear()
+            _queue_cat_reset()
+            _queue_svc_reset()
+            st.rerun()
         except Exception as e:
             st.error(f"Normalization failed: {e}")
 
