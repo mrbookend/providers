@@ -567,7 +567,7 @@ def rename_service_and_cascade(engine: Engine, old: str, new: str) -> None:
     with engine.begin() as conn:
         conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new})
         conn.execute(sql_text("UPDATE vendors SET service=:new WHERE service=:old"), {"new": new, "old": old})
-        conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"name": old})
+        conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"old": old})  # fixed param name
 
 def delete_service_with_reassign(engine: Engine, tgt: str, repl: str) -> None:
     with engine.begin() as conn:
@@ -624,7 +624,6 @@ def _join_kw(terms: list[str], max_terms: int = 16) -> str:
         seen.add(tt); out.append(tt)
         if len(out) >= max_terms:
             break
-        return ", ".join(out)
     return ", ".join(out)
 
 def _kw_from_row_fast(row: dict) -> str:
@@ -1168,20 +1167,6 @@ if edited:
                     st.rerun()
             except Exception as e:
                 st.error(f"Update failed: {e}")
-
-
-                        rowcount = res.rowcount or 0
-                        if rowcount == 0:
-                            st.warning("No changes applied (stale selection or already updated). Refresh and try again.")
-                        else:
-                            st.session_state["edit_last_done"] = edit_nonce
-                            st.success(f"Provider updated: {bn}")
-                            _queue_edit_form_reset()
-                            _nonce_rotate("edit")
-                            list_names.clear()
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Update failed: {e}")
 
         st.markdown("---")
         st.subheader("Delete Provider")
@@ -1993,3 +1978,4 @@ if _SHOW_DEBUG:
                 st.json(probe)
             except Exception as e:
                 st.error(f"Probe failed: {e.__class__.__name__}: {e}")
+# ==== END FILE ====
