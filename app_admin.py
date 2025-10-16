@@ -217,18 +217,17 @@ def _get_data_version(engine: Engine) -> str:
         return "0"
 
 @st.cache_data(show_spinner=False)
-def load_active_df(engine: Engine, version: str) -> pd.DataFrame:
+def load_df(_engine: Engine, version: str) -> pd.DataFrame:
     q = """
-    SELECT id, category, service, business_name, contact_name, phone, address,
-           website, notes, keywords, computed_keywords, ckw_version,
-           created_at, updated_at, updated_by
+    SELECT id, business_name, category, service, phone, website, notes, computed_keywords
       FROM vendors
      WHERE deleted_at IS NULL
      ORDER BY business_name COLLATE NOCASE
     """
-    with engine.connect() as cx:
+    with _engine.connect() as cx:
         df = pd.read_sql(sql_text(q), cx)
     return df
+
 
 @st.cache_data(show_spinner=False)
 def load_deleted_df(engine: Engine, version: str) -> pd.DataFrame:
