@@ -215,11 +215,12 @@ def _get_data_version(engine: Engine) -> str:
             return str(v or "0")
     except Exception:
         return "0"
-
 @st.cache_data(show_spinner=False)
-def load_df(_engine: Engine, version: str) -> pd.DataFrame:
+def load_active_df(_engine: Engine, version: str) -> pd.DataFrame:
     q = """
-    SELECT id, business_name, category, service, phone, website, notes, computed_keywords
+    SELECT id, category, service, business_name, contact_name, phone, address,
+           website, notes, keywords, computed_keywords, ckw_version,
+           created_at, updated_at, updated_by
       FROM vendors
      WHERE deleted_at IS NULL
      ORDER BY business_name COLLATE NOCASE
