@@ -966,7 +966,6 @@ with _tabs[1]:
                 st.session_state["_ckw_add_suggest"] = _suggestion
                 st.session_state["add_computed_keywords"] = _suggestion
 
-
             st.text_area(
                 "computed_keywords (optional; leave blank to auto-generate)",
                 value=st.session_state.get("_ckw_add_suggest", ""),
