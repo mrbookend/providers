@@ -1,3 +1,4 @@
+
 # ==== BEGIN: FILE TOP (imports + page_config + Early Boot) ====
 # -*- coding: utf-8 -*-
 from __future__ import annotations
@@ -892,6 +893,8 @@ with _tabs[1]:
             st.text_input("Website (https://…)", key="add_website")
             st.text_area("Notes", height=100, key="add_notes")
             st.text_input("Keywords (comma separated)", key="add_keywords")
+
+            # ==== BEGIN: CKW on Add (manual lock + preview) ====
             st.checkbox("Lock computed keywords on create", value=False, key="add_ckw_locked")
             if st.form_submit_button("Suggest computed keywords", type="secondary"):
                 _bn = (st.session_state["add_business_name"] or "").strip()
@@ -904,6 +907,9 @@ with _tabs[1]:
                 height=90,
                 key="add_computed_keywords",
             )
+
+            # ==== END: CKW on Add (manual lock + preview) ====
+
         submitted = st.form_submit_button("Add Provider")
 
     if submitted:
@@ -1042,13 +1048,29 @@ with _tabs[1]:
                 st.text_area("Notes", height=100, key="edit_notes")
                 st.text_input("Keywords (comma separated)", key="edit_keywords")
 
+                # ==== BEGIN: CKW Edit (manual lock + suggest) ====
+
                 st.caption("Computed keywords are used for search in the read-only app.")
                 current_row = id_to_row.get(int(st.session_state["edit_vendor_id"])) if st.session_state["edit_vendor_id"] else {}
                 ckw_db = (current_row.get("computed_keywords") or "") if current_row else ""
                 ckw_locked_db = int(current_row.get("ckw_locked") or 0) if current_row else 0
+
                 st.checkbox("Lock (skip bulk recompute)", value=bool(ckw_locked_db), key="edit_ckw_locked")
 
                 st.text_area("computed_keywords (editable)", value=ckw_db, height=90, key="edit_computed_keywords")
+
+                # Manual lock toggle (DB-backed)
+                st.checkbox("Lock (skip bulk recompute)", value=bool(ckw_locked_db), key="edit_ckw_locked")
+
+                # Editable CKW field
+                st.text_area(
+                    "computed_keywords (editable)",
+                    value=ckw_db,
+                    height=90,
+                    key="edit_computed_keywords",
+                )
+
+                # One-click suggestion
 
                 if st.form_submit_button("Suggest from Category/Service/Name", type="secondary", use_container_width=False):
                     cat = (st.session_state["edit_category"] or "").strip()
@@ -1059,6 +1081,9 @@ with _tabs[1]:
 
                 if st.session_state.get("_ckw_suggest"):
                     st.caption("Suggested: " + st.session_state["_ckw_suggest"])
+
+                # ==== END: CKW Edit (manual lock + suggest) ====
+
 
             edited = st.form_submit_button("Save Changes")
 
@@ -1084,6 +1109,9 @@ with _tabs[1]:
                     try:
                         prev_updated = st.session_state.get("edit_row_updated_at") or ""
                         now = datetime.utcnow().isoformat(timespec="seconds")
+
+                        # Suggested now (used if user left field blank)
+
                         suggested_now = st.session_state.get("_ckw_suggest") or build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
 
                         res = _exec_with_retry(ENGINE, """
@@ -1380,7 +1408,11 @@ with _tabs[4]:
             except Exception as e:
                 st.error(f"Integrity test failed: {type(e).__name__}: {e}")
 
+
     # ---- CKW version resolve + index ----
+
+    # -- Helper: resolve the current CKW version (prefers DB meta; falls back to secret or default) --
+
     def _ckw_current_version() -> str:
         ver = None
         try:
@@ -1403,6 +1435,7 @@ with _tabs[4]:
         _exec_with_retry(ENGINE, "CREATE INDEX IF NOT EXISTS idx_vendors_ckw_status ON vendors(ckw_locked, ckw_version)")
     except Exception:
         pass
+
 
     # ---- NEW: CKW stats helper ----
     def _ckw_stats(engine: Engine, ver: str) -> dict:
@@ -1434,6 +1467,9 @@ with _tabs[4]:
         f"unlocked: {stats['unlocked']}, at_version: {stats['at_version']}, "
         f"stale_unlocked: {stats['stale_unlocked']}"
     )
+
+    # ---- CKW controls: recompute + bump version (all outside any button blocks) ----
+    st.subheader("Computed Keywords")
 
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
@@ -1496,6 +1532,7 @@ with _tabs[4]:
             _do_recompute(_rows_for_all_unlocked(ENGINE), "ALL unlocked", batch_sz)
         except Exception as e:
             st.error(f"Recompute (all) failed: {type(e).__name__}: {e}")
+
 
     # ---- NEW: Force recompute ALL (override locks) ----
     force_all = st.button(
