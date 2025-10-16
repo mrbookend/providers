@@ -416,7 +416,6 @@ st.markdown(
 # DB helpers (schema + IO)
 # -----------------------------
 REQUIRED_VENDOR_COLUMNS: List[str] = ["business_name", "category"]
-
 def ensure_schema(engine: Engine) -> None:
     ddls: list[str] = [
         """
@@ -451,6 +450,25 @@ def ensure_schema(engine: Engine) -> None:
             ckw_version TEXT NOT NULL DEFAULT ''
         )
         """,
+        # ---- NEW: CKW seed store (per Category, Service) ----
+        """
+        CREATE TABLE IF NOT EXISTS ckw_seeds (
+            id INTEGER PRIMARY KEY,
+            category TEXT NOT NULL,
+            service  TEXT NOT NULL,
+            seed     TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+            UNIQUE(category, service)
+        )
+        """,
+        # ---- NEW: meta table (shared key/value) ----
+        """
+        CREATE TABLE IF NOT EXISTS meta (
+            k TEXT PRIMARY KEY,
+            v TEXT NOT NULL DEFAULT ''
+        )
+        """,
+        # Indexes
         "CREATE INDEX IF NOT EXISTS idx_vendors_cat        ON vendors(category)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_svc        ON vendors(service)",
         "CREATE INDEX IF NOT EXISTS idx_vendors_bus        ON vendors(business_name)",
@@ -483,6 +501,12 @@ def ensure_schema(engine: Engine) -> None:
                computed_keywords = COALESCE(computed_keywords,''),
                ckw_version   = COALESCE(ckw_version,'')
          WHERE 1=1
+        """,
+        # ensure meta has CKW_VERSION if absent (used by your _ckw_current_version helper)
+        """
+        INSERT INTO meta(k,v)
+        SELECT 'CKW_VERSION', '2025-10-15'
+        WHERE NOT EXISTS (SELECT 1 FROM meta WHERE k='CKW_VERSION')
         """
     ]
     for stmt in ddls:
@@ -640,6 +664,25 @@ def _kw_from_row_fast(row: dict) -> str:
     toks = _canon_tokenize(base)
     terms = seeds + explicit + toks
     return _join_kw(terms)
+# ---- NEW: CKW seed store helpers ----
+def _load_ckw_seed(category: str, service: str) -> str:
+    try:
+        with ENGINE.connect() as cx:
+            row = cx.execute(sql_text("""
+                SELECT seed FROM ckw_seeds WHERE category=:c AND service=:s
+            """), {"c": (category or ""), "s": (service or "")}).fetchone()
+        return (row[0] or "").strip() if row else ""
+    except Exception:
+        return ""
+
+def _save_ckw_seed(category: str, service: str, seed: str) -> None:
+    if not (seed or "").strip():
+        return
+    with ENGINE.begin() as cx:
+        cx.execute(sql_text("""
+            INSERT INTO ckw_seeds(category, service, seed) VALUES(:c,:s,:seed)
+            ON CONFLICT(category, service) DO UPDATE SET seed=excluded.seed
+        """), {"c": (category or ""), "s": (service or ""), "seed": (seed or "").strip()})
 
 def _filter_and_rank_by_query(df: pd.DataFrame, query: str) -> pd.DataFrame:
     if not query:
@@ -919,14 +962,23 @@ with _tabs[1]:
                 _bn = (st.session_state["add_business_name"] or "").strip()
                 _cat = (st.session_state["add_category"] or "").strip()
                 _svc = (st.session_state["add_service"] or "").strip(" /;,")
-                st.session_state["_ckw_add_suggest"] = build_computed_keywords(_cat, _svc, _bn, CKW_MAX_TERMS)
+                # Prefer stored seed for (Category, Service); fall back to rules-driven builder
+                _seed = _load_ckw_seed(_cat, _svc)
+                st.session_state["_ckw_add_suggest"] = (_seed or build_computed_keywords(_cat, _svc, _bn, CKW_MAX_TERMS))
             st.text_area(
                 "computed_keywords (optional; leave blank to auto-generate)",
                 value=st.session_state.get("_ckw_add_suggest", ""),
                 height=90,
                 key="add_computed_keywords",
             )
+            st.checkbox(
+                "Remember these keywords as seed for this (Category, Service)",
+                value=True,
+                key="add_remember_ckw_seed",
+                help="Saves to ckw_seeds so future suggestions for the same type are consistent."
+            )
             # ==== END: CKW on Add (manual lock + preview) ====
+
 
         submitted = st.form_submit_button("Add Provider")
 
@@ -982,7 +1034,14 @@ with _tabs[1]:
                         "user": _updated_by(),
                     },
                 )
+                # NEW: Save seed if requested and provided
+                if bool(st.session_state.get("add_remember_ckw_seed")):
+                    seed_text = (st.session_state.get("add_computed_keywords") or "").strip()
+                    if seed_text:
+                        _save_ckw_seed(category, service, seed_text)
+
                 st.session_state["add_last_done"] = add_nonce
+
                 st.success(f"Provider added: {business_name}")
                 _queue_add_form_reset()
                 list_names.clear()
@@ -1073,13 +1132,14 @@ with st.form(edit_form_key, clear_on_submit=False):
         )
 
         st.text_area("computed_keywords (editable)", value=ckw_db, height=90, key="edit_computed_keywords")
-
         if st.form_submit_button("Suggest from Category/Service/Name", type="secondary", use_container_width=False):
             cat = (st.session_state["edit_category"] or "").strip()
             svc = (st.session_state["edit_service"] or "").strip(" /;,")
             bn  = (st.session_state["edit_business_name"] or "").strip()
-            st.session_state["_ckw_suggest"] = build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
+            seed = _load_ckw_seed(cat, svc)
+            st.session_state["_ckw_suggest"] = seed or build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
             st.session_state["edit_computed_keywords"] = st.session_state["_ckw_suggest"]
+
 
         if st.session_state.get("_ckw_suggest"):
             st.caption("Suggested: " + st.session_state["_ckw_suggest"])
@@ -1135,7 +1195,7 @@ if edited:
                            ckw_version=:ckw_version,
                            updated_at=:now,
                            updated_by=:user
-                     WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
+                     WHERE id=:id AND COALESCE(updated_at,'') = COALESCE(:prev_updated,'')
                     """,
                     {
                         "category": cat,
@@ -1205,7 +1265,7 @@ if deleted:
                 ENGINE,
                 """
                 DELETE FROM vendors
-                 WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
+                 WHERE id=:id AND COALESCE(updated_at,'') = COALESCE(:prev_updated,'')
                 """,
                 {"id": int(vid), "prev_updated": prev_updated},
             )
