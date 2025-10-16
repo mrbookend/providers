@@ -977,6 +977,7 @@ with _tabs[1]:
                 key="add_remember_ckw_seed",
                 help="Saves to ckw_seeds so future suggestions for the same type are consistent."
             )
+
             # ==== END: CKW on Add (manual lock + preview) ====
 
 
@@ -1140,7 +1141,6 @@ with st.form(edit_form_key, clear_on_submit=False):
             st.session_state["_ckw_suggest"] = seed or build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
             st.session_state["edit_computed_keywords"] = st.session_state["_ckw_suggest"]
 
-
         if st.session_state.get("_ckw_suggest"):
             st.caption("Suggested: " + st.session_state["_ckw_suggest"])
         # ==== END: CKW Edit (manual lock + suggest) ====
@@ -1196,6 +1196,7 @@ if edited:
                            updated_at=:now,
                            updated_by=:user
                      WHERE id=:id AND COALESCE(updated_at,'') = COALESCE(:prev_updated,'')
+
                     """,
                     {
                         "category": cat,
@@ -1266,6 +1267,7 @@ if deleted:
                 """
                 DELETE FROM vendors
                  WHERE id=:id AND COALESCE(updated_at,'') = COALESCE(:prev_updated,'')
+
                 """,
                 {"id": int(vid), "prev_updated": prev_updated},
             )
