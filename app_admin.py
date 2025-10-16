@@ -591,7 +591,7 @@ def rename_service_and_cascade(engine: Engine, old: str, new: str) -> None:
     with engine.begin() as conn:
         conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new})
         conn.execute(sql_text("UPDATE vendors SET service=:new WHERE service=:old"), {"new": new, "old": old})
-        conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"name": old})
+        conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"old": old})
 
 def delete_service_with_reassign(engine: Engine, tgt: str, repl: str) -> None:
     with engine.begin() as conn:
@@ -640,16 +640,18 @@ def _rules_for_pair(rules: dict, category: str, service: str) -> list[str]:
     return uniq
 
 def _join_kw(terms: list[str], max_terms: int = 16) -> str:
-    seen=set(); out=[]
+    seen = set()
+    out = []
     for t in terms:
         tt = t.strip().lower()
         if not tt or tt in seen:
             continue
-        seen.add(tt); out.append(tt)
+        seen.add(tt)
+        out.append(tt)
         if len(out) >= max_terms:
             break
-        return ", ".join(out)
     return ", ".join(out)
+
 
 def _kw_from_row_fast(row: dict) -> str:
     seeds = _rules_for_pair(CKW_RULES, row.get("category") or "", row.get("service") or "")
@@ -1122,9 +1124,12 @@ with st.form(edit_form_key, clear_on_submit=False):
         # ==== BEGIN: CKW Edit (manual lock + suggest) ====
         st.caption("Computed keywords are used for search in the read-only app.")
 
-        current_row = id_to_row.get(int(st.session_state["edit_vendor_id"])) if st.session_state["edit_vendor_id"] else {}
-        ckw_db = (current_row.get("computed_keywords") or "") if current_row else st.session_state.get("edit_computed_keywords", "")
-        ckw_locked_db = int(current_row.get("ckw_locked") or 0) if current_row else int(bool(st.session_state.get("edit_ckw_locked_flag")))
+        vid_sel = st.session_state.get("edit_vendor_id")
+        current_row = id_to_row.get(int(vid_sel)) if vid_sel is not None else None
+
+        # Pull values safely (avoid pandas truthiness)
+        ckw_db = (current_row.get("computed_keywords") or "") if current_row is not None else st.session_state.get("edit_computed_keywords", "")
+        ckw_locked_db = int(current_row.get("ckw_locked") or 0) if current_row is not None else int(bool(st.session_state.get("edit_ckw_locked_flag")))
 
         st.checkbox(
             "Lock (skip bulk recompute)",
@@ -1134,6 +1139,7 @@ with st.form(edit_form_key, clear_on_submit=False):
         )
 
         st.text_area("computed_keywords (editable)", value=ckw_db, height=90, key="edit_computed_keywords")
+
         if st.form_submit_button("Suggest from Category/Service/Name", type="secondary", use_container_width=False):
             cat = (st.session_state["edit_category"] or "").strip()
             svc = (st.session_state["edit_service"] or "").strip(" /;,")
@@ -1145,6 +1151,7 @@ with st.form(edit_form_key, clear_on_submit=False):
         if st.session_state.get("_ckw_suggest"):
             st.caption("Suggested: " + st.session_state["_ckw_suggest"])
         # ==== END: CKW Edit (manual lock + suggest) ====
+
 
     edited = st.form_submit_button("Save Changes")
 
@@ -1579,9 +1586,11 @@ with c3:
         todo: list[dict] = []
         pbar = st.progress(0)
         for r in rows:
-            rid, cat, svc, bn = int(r[0]), (r[1] or ""), (r[2] or ""), (r[3] or "")
-            ckw = build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
-            todo.append({"id": rid, "ckw": ckw, "ver": CURRENT_VER})
+                rid, cat, svc, bn = int(r[0]), (r[1] or ""), (r[2] or ""), (r[3] or "")
+                seed = _load_ckw_seed(cat, svc)
+                ckw = seed or build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
+                todo.append({"id": rid, "ckw": ckw, "ver": CURRENT_VER})
+
             if len(todo) >= int(batch):
                 _exec_with_retry(ENGINE, "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id", todo)
                 done += len(todo)
@@ -1634,7 +1643,9 @@ if force_all:
                 svc = r.get("service") or ""
                 bn  = r.get("business_name") or ""
 
-                ckw = build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
+                seed = _load_ckw_seed(cat, svc)
+                ckw = seed or build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
+
                 batch.append({"id": rid, "ckw": ckw, "ver": CURRENT_VER})
 
                 if len(batch) >= batch_size:
