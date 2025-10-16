@@ -1129,10 +1129,6 @@ with st.form(edit_form_key, clear_on_submit=False):
 
         # IMPORTANT: Ensure a default value BEFORE the widget is instantiated
 
-        #  - First time: seed from DB (or suggestion if DB empty)
-
-        #  - If user cleared it to empty, re-seed from DB/suggestion on next open
-
         if "edit_computed_keywords" not in st.session_state:
 
             st.session_state["edit_computed_keywords"] = ckw_db or suggested_now
@@ -1142,14 +1138,14 @@ with st.form(edit_form_key, clear_on_submit=False):
             st.session_state["edit_computed_keywords"] = ckw_db or suggested_now
 
 
-        # Callback to copy the live suggestion into the widget value
+        # Form-safe callback: only used on form_submit_button
 
-        def _apply_ckw_suggestion():
+        def _apply_ckw_suggestion_cb():
 
             st.session_state["edit_computed_keywords"] = st.session_state.get("_ckw_suggest", "")
 
 
-        # Controls (place the button BEFORE the input so callback runs first in the run)
+        # Controls (stay inside the form; only form_submit_button has a callback)
 
         c1, c2 = st.columns([1, 3])
 
@@ -1167,13 +1163,11 @@ with st.form(edit_form_key, clear_on_submit=False):
 
             )
 
-            st.button(
+            use_suggest = st.form_submit_button(
 
                 "Use suggestion",
 
-                on_click=_apply_ckw_suggestion,
-
-                help="Replace the text field with the current suggestion."
+                on_click=_apply_ckw_suggestion_cb
 
             )
 
