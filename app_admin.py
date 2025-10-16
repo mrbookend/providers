@@ -1090,52 +1090,110 @@ with st.form(edit_form_key, clear_on_submit=False):
         st.text_input("Keywords (comma separated)", key="edit_keywords")
 
         # ==== BEGIN: CKW Edit (manual lock + suggest) ====
-st.caption("Computed keywords are used for search in the read-only app.")
 
-# Current row and DB defaults
-current_row = id_to_row.get(int(st.session_state["edit_vendor_id"])) if st.session_state.get("edit_vendor_id") else {}
-ckw_db = (current_row.get("computed_keywords") or "").strip() if current_row else ""
-ckw_locked_db = int(current_row.get("ckw_locked") or 0) if current_row else 0
+        st.caption("Computed keywords are used for search in the read-only app.")
 
-# Compute a fresh suggestion for the current form values
-try:
-    suggested_now = _suggest_ckw(
-        category=cat,
-        service=svc,
-        business_name=bn,
-    ).strip()
-except Exception:
-    suggested_now = ""
 
-# Stash the suggestion for callbacks
-st.session_state["_ckw_suggest"] = suggested_now
+        # Current row and DB defaults
 
-# IMPORTANT: Ensure a default value BEFORE the widget is instantiated
-#  - First time: seed from DB (or suggestion if DB empty)
-#  - If user cleared it to empty, re-seed from DB/suggestion on next open
-if "edit_computed_keywords" not in st.session_state:
-    st.session_state["edit_computed_keywords"] = ckw_db or suggested_now
-elif (st.session_state["edit_computed_keywords"] or "").strip() == "" and (ckw_db or suggested_now):
-    st.session_state["edit_computed_keywords"] = ckw_db or suggested_now
+        current_row = id_to_row.get(int(st.session_state["edit_vendor_id"])) if st.session_state.get("edit_vendor_id") else {}
 
-# Callback to copy the live suggestion into the widget value
-def _apply_ckw_suggestion():
-    st.session_state["edit_computed_keywords"] = st.session_state.get("_ckw_suggest", "")
+        ckw_db = (current_row.get("computed_keywords") or "").strip() if current_row else ""
 
-# Controls (place the button BEFORE the input so callback runs first in the run)
-c1, c2 = st.columns([1, 3])
-with c1:
-    st.checkbox("Lock CKW", key="edit_ckw_locked", value=bool(ckw_locked_db), help="Prevents bulk recompute from altering this row.")
-    st.button("Use suggestion", on_click=_apply_ckw_suggestion, help="Replace the text field with the current suggestion.")
-with c2:
-    st.text_input(
-        "computed_keywords (editable)",
-        key="edit_computed_keywords",
-        help="Comma-separated search terms (lowercase preferred).",
-    )
-    st.caption(f"Suggested now: {suggested_now or '—'}")
-# ==== END: CKW Edit (manual lock + suggest) ====
+        ckw_locked_db = int(current_row.get("ckw_locked") or 0) if current_row else 0
 
+
+        # Compute a fresh suggestion for the current form values
+
+        try:
+
+            suggested_now = _suggest_ckw(
+
+                category=cat,
+
+                service=svc,
+
+                business_name=bn,
+
+            ).strip()
+
+        except Exception:
+
+            suggested_now = ""
+
+
+        # Stash the suggestion for callbacks
+
+        st.session_state["_ckw_suggest"] = suggested_now
+
+
+        # IMPORTANT: Ensure a default value BEFORE the widget is instantiated
+
+        #  - First time: seed from DB (or suggestion if DB empty)
+
+        #  - If user cleared it to empty, re-seed from DB/suggestion on next open
+
+        if "edit_computed_keywords" not in st.session_state:
+
+            st.session_state["edit_computed_keywords"] = ckw_db or suggested_now
+
+        elif (st.session_state["edit_computed_keywords"] or "").strip() == "" and (ckw_db or suggested_now):
+
+            st.session_state["edit_computed_keywords"] = ckw_db or suggested_now
+
+
+        # Callback to copy the live suggestion into the widget value
+
+        def _apply_ckw_suggestion():
+
+            st.session_state["edit_computed_keywords"] = st.session_state.get("_ckw_suggest", "")
+
+
+        # Controls (place the button BEFORE the input so callback runs first in the run)
+
+        c1, c2 = st.columns([1, 3])
+
+        with c1:
+
+            st.checkbox(
+
+                "Lock (skip bulk recompute)",
+
+                value=bool(ckw_locked_db),
+
+                key="edit_ckw_locked_flag",
+
+                help="When locked, bulk recompute tools will not overwrite this row’s computed_keywords."
+
+            )
+
+            st.button(
+
+                "Use suggestion",
+
+                on_click=_apply_ckw_suggestion,
+
+                help="Replace the text field with the current suggestion."
+
+            )
+
+        with c2:
+
+            st.text_area(
+
+                "computed_keywords (editable)",
+
+                key="edit_computed_keywords",
+
+                height=90,
+
+                help="Comma-separated search terms (lowercase preferred).",
+
+            )
+
+            st.caption(f"Suggested now: {suggested_now or '—'}")
+
+        # ==== END: CKW Edit (manual lock + suggest) ====
     edited = st.form_submit_button("Save Changes")
 
 if edited:
