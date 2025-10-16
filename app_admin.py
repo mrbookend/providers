@@ -1,4 +1,3 @@
-
 # ==== BEGIN: FILE TOP (imports + page_config + Early Boot) ====
 # -*- coding: utf-8 -*-
 from __future__ import annotations
@@ -447,7 +446,9 @@ def ensure_schema(engine: Engine) -> None:
             created_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT '',
             updated_by TEXT NOT NULL DEFAULT '',
-            computed_keywords TEXT NOT NULL DEFAULT ''
+            computed_keywords TEXT NOT NULL DEFAULT '',
+            ckw_locked INTEGER NOT NULL DEFAULT 0,
+            ckw_version TEXT NOT NULL DEFAULT ''
         )
         """,
         "CREATE INDEX IF NOT EXISTS idx_vendors_cat        ON vendors(category)",
@@ -479,7 +480,8 @@ def ensure_schema(engine: Engine) -> None:
                notes         = COALESCE(notes,''),
                keywords      = COALESCE(keywords,''),
                updated_by    = COALESCE(updated_by,''),
-               computed_keywords = COALESCE(computed_keywords,'')
+               computed_keywords = COALESCE(computed_keywords,''),
+               ckw_version   = COALESCE(ckw_version,'')
          WHERE 1=1
         """
     ]
@@ -565,7 +567,7 @@ def rename_service_and_cascade(engine: Engine, old: str, new: str) -> None:
     with engine.begin() as conn:
         conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new})
         conn.execute(sql_text("UPDATE vendors SET service=:new WHERE service=:old"), {"new": new, "old": old})
-        conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"old": old})
+        conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"name": old})
 
 def delete_service_with_reassign(engine: Engine, tgt: str, repl: str) -> None:
     with engine.begin() as conn:
@@ -699,6 +701,8 @@ EDIT_FORM_KEYS = [
     "edit_vendor_id", "edit_business_name", "edit_category", "edit_service",
     "edit_contact_name", "edit_phone", "edit_address", "edit_website",
     "edit_notes", "edit_keywords", "edit_row_updated_at", "edit_last_loaded_id",
+    # new ephemeral keys for CKW UI
+    "_ckw_suggest", "edit_ckw_locked_flag", "edit_computed_keywords"
     "_ckw_suggest"
 ]
 
@@ -717,6 +721,8 @@ def _init_edit_form_defaults():
         "edit_row_updated_at": None,
         "edit_last_loaded_id": None,
         "_ckw_suggest": None,
+        "edit_ckw_locked_flag": False,
+        "edit_computed_keywords": "",
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
@@ -730,6 +736,8 @@ def _apply_edit_reset_if_needed():
         for k in EDIT_FORM_KEYS:
             if k in ("edit_vendor_id", "edit_row_updated_at", "edit_last_loaded_id"):
                 st.session_state[k] = None
+            elif k in ("edit_ckw_locked_flag",):
+                st.session_state[k] = False
             else:
                 st.session_state[k] = ""
         if "edit_provider_label" in st.session_state:
@@ -1023,6 +1031,8 @@ with _tabs[1]:
                     "edit_row_updated_at": row.get("updated_at") or "",
                     "edit_last_loaded_id": st.session_state["edit_vendor_id"],
                     "_ckw_suggest": None,
+                    "edit_computed_keywords": row.get("computed_keywords") or "",
+                    "edit_ckw_locked_flag": bool(int(row.get("ckw_locked") or 0)),
                 })
 
         edit_form_key = f"edit_vendor_form_{st.session_state['edit_form_version']}"
@@ -1052,9 +1062,11 @@ with _tabs[1]:
 
                 st.caption("Computed keywords are used for search in the read-only app.")
                 current_row = id_to_row.get(int(st.session_state["edit_vendor_id"])) if st.session_state["edit_vendor_id"] else {}
-                ckw_db = (current_row.get("computed_keywords") or "") if current_row else ""
-                ckw_locked_db = int(current_row.get("ckw_locked") or 0) if current_row else 0
+                ckw_db = (current_row.get("computed_keywords") or "") if current_row else st.session_state.get("edit_computed_keywords", "")
+                ckw_locked_db = int(current_row.get("ckw_locked") or 0) if current_row else int(bool(st.session_state.get("edit_ckw_locked_flag")))
 
+                # Manual lock toggle (DB-backed) — use a unique key name to avoid collisions
+                st.checkbox("Lock (skip bulk recompute)", value=bool(ckw_locked_db), key="edit_ckw_locked_flag")
                 st.checkbox("Lock (skip bulk recompute)", value=bool(ckw_locked_db), key="edit_ckw_locked")
 
                 st.text_area("computed_keywords (editable)", value=ckw_db, height=90, key="edit_computed_keywords")
@@ -1110,6 +1122,11 @@ with _tabs[1]:
                         prev_updated = st.session_state.get("edit_row_updated_at") or ""
                         now = datetime.utcnow().isoformat(timespec="seconds")
 
+                        # Decide lock: if user edited away from suggestion, lock; else auto (0)
+                        ckw_current_val = (st.session_state.get("edit_computed_keywords") or "").strip()
+                        suggested_now   = st.session_state.get("_ckw_suggest") or build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
+                        # honor the explicit checkbox value; fallback to heuristic if unset
+                        ckw_locked_val  = int(bool(st.session_state.get("edit_ckw_locked_flag")))
                         # Suggested now (used if user left field blank)
 
                         suggested_now = st.session_state.get("_ckw_suggest") or build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
@@ -1130,8 +1147,7 @@ with _tabs[1]:
                                    ckw_version=:ckw_version,
                                    updated_at=:now,
                                    updated_by=:user
-                             WHERE id=:id
-                               AND COALESCE(updated_at,'') = COALESCE(:prev_updated,'')
+                             WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
                         """, {
                             "category": cat,
                             "service": svc,
@@ -1142,8 +1158,8 @@ with _tabs[1]:
                             "website": _sanitize_url(st.session_state["edit_website"]),
                             "notes": (st.session_state["edit_notes"] or "").strip(),
                             "keywords": (st.session_state["edit_keywords"] or "").strip(),
-                            "ckw": (st.session_state.get("edit_computed_keywords") or suggested_now),
-                            "ckw_locked": int(bool(st.session_state.get("edit_ckw_locked"))),
+                            "ckw": (ckw_current_val or suggested_now),
+                            "ckw_locked": ckw_locked_val,
                             "ckw_version": CKW_VERSION,
                             "now": now, "user": _updated_by(),
                             "id": int(vid),
@@ -1195,8 +1211,7 @@ with _tabs[1]:
                     prev_updated = (row.iloc[0]["updated_at"] if not row.empty else "") or ""
                     res = _exec_with_retry(ENGINE, """
                         DELETE FROM vendors
-                         WHERE id=:id
-                           AND COALESCE(updated_at,'') = COALESCE(:prev_updated,'')
+                         WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
                     """, {"id": int(vid), "prev_updated": prev_updated})
                     rowcount = res.rowcount or 0
 
@@ -1417,7 +1432,9 @@ with _tabs[4]:
         ver = None
         try:
             with ENGINE.begin() as cx:
-                cx.exec_driver_sql("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL DEFAULT '')")
+                cx.exec_driver_sql(
+                    "CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL DEFAULT '')"
+                )
                 row = cx.execute(sql_text("SELECT v FROM meta WHERE k='CKW_VERSION'")).fetchone()
                 if row and str(row[0]).strip():
                     ver = str(row[0]).strip()
@@ -1436,12 +1453,14 @@ with _tabs[4]:
     except Exception:
         pass
 
+    # ---------- NEW: CKW stats (locks, versions, stale) ----------
 
     # ---- NEW: CKW stats helper ----
     def _ckw_stats(engine: Engine, ver: str) -> dict:
         with engine.connect() as cx:
             total = cx.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0
             locked = cx.execute(sql_text("SELECT COUNT(*) FROM vendors WHERE IFNULL(ckw_locked,0)=1")).scalar() or 0
+            unlocked = total - locked
             unlocked = int(total) - int(locked)
             at_ver = cx.execute(sql_text("SELECT COUNT(*) FROM vendors WHERE ckw_version = :v"), {"v": ver}).scalar() or 0
             stale = cx.execute(sql_text("""
@@ -1450,6 +1469,8 @@ with _tabs[4]:
                   AND (ckw_version IS NULL OR ckw_version <> :v
                        OR computed_keywords IS NULL OR TRIM(computed_keywords) = '')
             """), {"v": ver}).scalar() or 0
+        return {"total": int(total), "locked": int(locked), "unlocked": int(unlocked), "at_version": int(at_ver), "stale_unlocked": int(stale)}
+
         return {
             "total": int(total),
             "locked": int(locked),
@@ -1470,6 +1491,12 @@ with _tabs[4]:
 
     # ---- CKW controls: recompute + bump version (all outside any button blocks) ----
     st.subheader("Computed Keywords")
+    stats = _ckw_stats(ENGINE, CURRENT_VER)
+    st.caption(
+        f"CKW stats — total: {stats['total']}, locked: {stats['locked']}, "
+        f"unlocked: {stats['unlocked']}, at_version: {stats['at_version']}, "
+        f"stale_unlocked: {stats['stale_unlocked']}"
+    )
 
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
@@ -1533,6 +1560,7 @@ with _tabs[4]:
         except Exception as e:
             st.error(f"Recompute (all) failed: {type(e).__name__}: {e}")
 
+    # ---------- NEW: FORCE recompute ALL (overrides locks) ----------
 
     # ---- NEW: Force recompute ALL (override locks) ----
     force_all = st.button(
@@ -1543,6 +1571,10 @@ with _tabs[4]:
     if force_all:
         try:
             with ENGINE.connect() as cx:
+                rows = cx.execute(sql_text("""
+                    SELECT id, category, service, business_name
+                    FROM vendors
+                """)).fetchall()
                 rows = cx.execute(sql_text("SELECT id, category, service, business_name FROM vendors")).fetchall()
             total = len(rows)
             if total == 0:
@@ -1556,6 +1588,11 @@ with _tabs[4]:
                     batch.append({"id": rid, "ckw": ckw, "ver": CURRENT_VER})
                     if len(batch) >= batch_size:
                         _exec_with_retry(ENGINE, "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id", batch)
+                        done += len(batch); batch.clear()
+                        pbar.progress(min(done/total, 1.0))
+                if batch:
+                    _exec_with_retry(ENGINE, "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id", batch)
+                    done += len(batch); pbar.progress(1.0)
                         done += len(batch)
                         batch.clear()
                         pbar.progress(min(done/total, 1.0))
@@ -1567,6 +1604,7 @@ with _tabs[4]:
         except Exception as e:
             st.error(f"Force recompute failed: {type(e).__name__}: {e}")
 
+    # ---------- NEW: Unlock all helper ----------
     # ---- NEW: Unlock all rows ----
     unlock_all = st.button("Unlock all rows (ckw_locked=0)", help="Clears the lock flag on every vendor.")
     if unlock_all:
@@ -1721,7 +1759,7 @@ with _tabs[4]:
             )
             exists = conn.execute(
                 sql_text("SELECT COUNT(*) AS c FROM vendors WHERE business_name=:n"),
-                {"n": str(probe_name)}
+                {"n": probe_name}
             ).scalar() or 0
             trans.rollback()
             conn.close()
