@@ -716,6 +716,37 @@ EDIT_FORM_KEYS = [
     "_ckw_suggest",
 ]
 
+# ---- Session-state safety defaults (defensive) ----
+for _k, _v in {
+    "add_form_version": 0,
+    "edit_form_version": 0,
+    "delete_form_version": 0,
+    "edit_vendor_id": None,
+    "edit_business_name": "",
+    "edit_category": "",
+    "edit_service": "",
+    "edit_contact_name": "",
+    "edit_phone": "",
+    "edit_address": "",
+    "edit_website": "",
+    "edit_notes": "",
+    "edit_keywords": "",
+    "edit_row_updated_at": None,
+    "edit_last_loaded_id": None,
+    "edit_computed_keywords": "",
+    "edit_ckw_locked_flag": False,
+    "_ckw_suggest": None,
+}.items():
+    st.session_state.setdefault(_k, _v)
+
+# ---- Session-state safety defaults (defensive; prevents KeyError if init order shifts) ----
+for _k, _v in {
+    "add_form_version": 0,
+    "edit_form_version": 0,
+    "delete_form_version": 0,
+}.items():
+    st.session_state.setdefault(_k, _v)
+
 
 def _init_edit_form_defaults():
     defaults = {
@@ -1025,9 +1056,9 @@ with _tabs[1]:
             key="edit_vendor_id",
         )
 
-        if st.session_state["edit_vendor_id"] is not None:
-            if st.session_state["edit_last_loaded_id"] != st.session_state["edit_vendor_id"]:
-                row = id_to_row[int(st.session_state["edit_vendor_id"])]
+        if st.session_state.get("edit_vendor_id") is not None:
+            if st.session_state["edit_last_loaded_id"] != st.session_state.get("edit_vendor_id"):
+                row = id_to_row[int(st.session_state.get("edit_vendor_id"))]
                 st.session_state.update({
                     "edit_business_name": row.get("business_name") or "",
                     "edit_category": row.get("category") or "",
@@ -1039,7 +1070,7 @@ with _tabs[1]:
                     "edit_notes": row.get("notes") or "",
                     "edit_keywords": row.get("keywords") or "",
                     "edit_row_updated_at": row.get("updated_at") or "",
-                    "edit_last_loaded_id": st.session_state["edit_vendor_id"],
+                    "edit_last_loaded_id": st.session_state.get("edit_vendor_id"),
                     "_ckw_suggest": None,
                     "edit_computed_keywords": row.get("computed_keywords") or "",
                     "edit_ckw_locked_flag": bool(int(row.get("ckw_locked") or 0)),
@@ -1059,31 +1090,51 @@ with st.form(edit_form_key, clear_on_submit=False):
         st.text_input("Keywords (comma separated)", key="edit_keywords")
 
         # ==== BEGIN: CKW Edit (manual lock + suggest) ====
-        st.caption("Computed keywords are used for search in the read-only app.")
+st.caption("Computed keywords are used for search in the read-only app.")
 
-        current_row = id_to_row.get(int(st.session_state["edit_vendor_id"])) if st.session_state["edit_vendor_id"] else {}
-        ckw_db = (current_row.get("computed_keywords") or "") if current_row else st.session_state.get("edit_computed_keywords", "")
-        ckw_locked_db = int(current_row.get("ckw_locked") or 0) if current_row else int(bool(st.session_state.get("edit_ckw_locked_flag")))
+# Current row and DB defaults
+current_row = id_to_row.get(int(st.session_state["edit_vendor_id"])) if st.session_state.get("edit_vendor_id") else {}
+ckw_db = (current_row.get("computed_keywords") or "").strip() if current_row else ""
+ckw_locked_db = int(current_row.get("ckw_locked") or 0) if current_row else 0
 
-        st.checkbox(
-            "Lock (skip bulk recompute)",
-            value=bool(ckw_locked_db),
-            key="edit_ckw_locked_flag",
-            help="When locked, bulk recompute tools will not overwrite this row’s computed_keywords."
-        )
+# Compute a fresh suggestion for the current form values
+try:
+    suggested_now = _suggest_ckw(
+        category=cat,
+        service=svc,
+        business_name=bn,
+    ).strip()
+except Exception:
+    suggested_now = ""
 
-        st.text_area("computed_keywords (editable)", value=ckw_db, height=90, key="edit_computed_keywords")
+# Stash the suggestion for callbacks
+st.session_state["_ckw_suggest"] = suggested_now
 
-        if st.form_submit_button("Suggest from Category/Service/Name", type="secondary", use_container_width=False):
-            cat = (st.session_state["edit_category"] or "").strip()
-            svc = (st.session_state["edit_service"] or "").strip(" /;,")
-            bn  = (st.session_state["edit_business_name"] or "").strip()
-            st.session_state["_ckw_suggest"] = build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
-            st.session_state["edit_computed_keywords"] = st.session_state["_ckw_suggest"]
+# IMPORTANT: Ensure a default value BEFORE the widget is instantiated
+#  - First time: seed from DB (or suggestion if DB empty)
+#  - If user cleared it to empty, re-seed from DB/suggestion on next open
+if "edit_computed_keywords" not in st.session_state:
+    st.session_state["edit_computed_keywords"] = ckw_db or suggested_now
+elif (st.session_state["edit_computed_keywords"] or "").strip() == "" and (ckw_db or suggested_now):
+    st.session_state["edit_computed_keywords"] = ckw_db or suggested_now
 
-        if st.session_state.get("_ckw_suggest"):
-            st.caption("Suggested: " + st.session_state["_ckw_suggest"])
-        # ==== END: CKW Edit (manual lock + suggest) ====
+# Callback to copy the live suggestion into the widget value
+def _apply_ckw_suggestion():
+    st.session_state["edit_computed_keywords"] = st.session_state.get("_ckw_suggest", "")
+
+# Controls (place the button BEFORE the input so callback runs first in the run)
+c1, c2 = st.columns([1, 3])
+with c1:
+    st.checkbox("Lock CKW", key="edit_ckw_locked", value=bool(ckw_locked_db), help="Prevents bulk recompute from altering this row.")
+    st.button("Use suggestion", on_click=_apply_ckw_suggestion, help="Replace the text field with the current suggestion.")
+with c2:
+    st.text_input(
+        "computed_keywords (editable)",
+        key="edit_computed_keywords",
+        help="Comma-separated search terms (lowercase preferred).",
+    )
+    st.caption(f"Suggested now: {suggested_now or '—'}")
+# ==== END: CKW Edit (manual lock + suggest) ====
 
     edited = st.form_submit_button("Save Changes")
 
@@ -1172,6 +1223,27 @@ if edited:
 st.markdown("---")
 st.markdown("---")
 st.subheader("Delete Provider")
+
+# --- Safety: ensure ids/id_to_row/_fmt_vendor exist (Delete section may be outside earlier scope) ---
+if "ids" not in globals() or "id_to_row" not in globals() or "_fmt_vendor" not in globals():
+    df_all = load_df(ENGINE)
+    try:
+        ids = df_all["id"].astype(int).tolist()
+    except Exception:
+        ids = []
+    id_to_row = {int(r["id"]): r for _, r in df_all.iterrows()}
+    def _fmt_vendor(i: int | None) -> str:
+        if i is None:
+            return "— Select —"
+        r = id_to_row.get(int(i))
+        if r is None:
+            return f"{i}"
+        cat = (r.get("category") or "")
+        svc = (r.get("service") or "")
+        tail = " / ".join([x for x in (cat, svc) if x]).strip(" /")
+        name = str(r.get("business_name") or "")
+        return f"{name} — {tail}" if tail else name
+# -------------------------------------------------------------------
 
 sel_label_del = st.selectbox(
     "Select provider to delete (type to search)",
