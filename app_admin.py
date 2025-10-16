@@ -624,6 +624,7 @@ def _join_kw(terms: list[str], max_terms: int = 16) -> str:
         seen.add(tt); out.append(tt)
         if len(out) >= max_terms:
             break
+        return ", ".join(out)
     return ", ".join(out)
 
 def _kw_from_row_fast(row: dict) -> str:
@@ -698,13 +699,23 @@ def _queue_add_form_reset():
     st.session_state["_pending_add_reset"] = True
 
 EDIT_FORM_KEYS = [
-    "edit_vendor_id", "edit_business_name", "edit_category", "edit_service",
-    "edit_contact_name", "edit_phone", "edit_address", "edit_website",
-    "edit_notes", "edit_keywords", "edit_row_updated_at", "edit_last_loaded_id",
-    # new ephemeral keys for CKW UI
-    "_ckw_suggest", "edit_ckw_locked_flag", "edit_computed_keywords"
-    "_ckw_suggest"
+    "edit_vendor_id",
+    "edit_business_name",
+    "edit_category",
+    "edit_service",
+    "edit_contact_name",
+    "edit_phone",
+    "edit_address",
+    "edit_website",
+    "edit_notes",
+    "edit_keywords",
+    "edit_row_updated_at",
+    "edit_last_loaded_id",
+    "edit_computed_keywords",
+    "edit_ckw_locked_flag",
+    "_ckw_suggest",
 ]
+
 
 def _init_edit_form_defaults():
     defaults = {
@@ -915,7 +926,6 @@ with _tabs[1]:
                 height=90,
                 key="add_computed_keywords",
             )
-
             # ==== END: CKW on Add (manual lock + preview) ====
 
         submitted = st.form_submit_button("Add Provider")
@@ -1034,137 +1044,132 @@ with _tabs[1]:
                     "edit_computed_keywords": row.get("computed_keywords") or "",
                     "edit_ckw_locked_flag": bool(int(row.get("ckw_locked") or 0)),
                 })
+edit_form_key = f"edit_vendor_form_{st.session_state['edit_form_version']}"
+with st.form(edit_form_key, clear_on_submit=False):
+    col1, col2 = st.columns(2)
 
-        edit_form_key = f"edit_vendor_form_{st.session_state['edit_form_version']}"
-        with st.form(edit_form_key, clear_on_submit=False):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.text_input("Provider *", key="edit_business_name")
-                cats = list_names("categories")
-                servs = list_names("services")
-                _edit_cat_options = [""] + (cats or [])
-                if (st.session_state.get("edit_category") or "") not in _edit_cat_options:
-                    st.session_state["edit_category"] = ""
-                st.selectbox("Category *", options=_edit_cat_options, key="edit_category", placeholder="Select category")
-                _edit_svc_options = [""] + (servs or [])
-                if (st.session_state.get("edit_service") or "") not in _edit_svc_options:
-                    st.session_state["edit_service"] = ""
-                st.selectbox("Service (optional)", options=_edit_svc_options, key="edit_service")
-                st.text_input("Contact Name", key="edit_contact_name")
-                st.text_input("Phone (10 digits or blank)", key="edit_phone")
-            with col2:
-                st.text_area("Address", height=80, key="edit_address")
-                st.text_input("Website (https://…)", key="edit_website")
-                st.text_area("Notes", height=100, key="edit_notes")
-                st.text_input("Keywords (comma separated)", key="edit_keywords")
+    with col1:
+        st.text_input("Provider *", key="edit_business_name")
+        # ... other col1 inputs (category/service/contact/phone) ...
 
-                # ==== BEGIN: CKW Edit (manual lock + suggest) ====
+    with col2:
+        st.text_area("Address", height=80, key="edit_address")
+        st.text_input("Website (https://…)", key="edit_website")
+        st.text_area("Notes", height=100, key="edit_notes")
+        st.text_input("Keywords (comma separated)", key="edit_keywords")
 
-                st.caption("Computed keywords are used for search in the read-only app.")
-                current_row = id_to_row.get(int(st.session_state["edit_vendor_id"])) if st.session_state["edit_vendor_id"] else {}
-                ckw_db = (current_row.get("computed_keywords") or "") if current_row else st.session_state.get("edit_computed_keywords", "")
-                ckw_locked_db = int(current_row.get("ckw_locked") or 0) if current_row else int(bool(st.session_state.get("edit_ckw_locked_flag")))
+        # ==== BEGIN: CKW Edit (manual lock + suggest) ====
+        st.caption("Computed keywords are used for search in the read-only app.")
 
-                # Manual lock toggle (DB-backed) — use a unique key name to avoid collisions
-                st.checkbox("Lock (skip bulk recompute)", value=bool(ckw_locked_db), key="edit_ckw_locked_flag")
-                st.checkbox("Lock (skip bulk recompute)", value=bool(ckw_locked_db), key="edit_ckw_locked")
+        current_row = id_to_row.get(int(st.session_state["edit_vendor_id"])) if st.session_state["edit_vendor_id"] else {}
+        ckw_db = (current_row.get("computed_keywords") or "") if current_row else st.session_state.get("edit_computed_keywords", "")
+        ckw_locked_db = int(current_row.get("ckw_locked") or 0) if current_row else int(bool(st.session_state.get("edit_ckw_locked_flag")))
 
-                st.text_area("computed_keywords (editable)", value=ckw_db, height=90, key="edit_computed_keywords")
+        st.checkbox(
+            "Lock (skip bulk recompute)",
+            value=bool(ckw_locked_db),
+            key="edit_ckw_locked_flag",
+            help="When locked, bulk recompute tools will not overwrite this row’s computed_keywords."
+        )
 
-                # Manual lock toggle (DB-backed)
-                st.checkbox("Lock (skip bulk recompute)", value=bool(ckw_locked_db), key="edit_ckw_locked")
+        st.text_area("computed_keywords (editable)", value=ckw_db, height=90, key="edit_computed_keywords")
 
-                # Editable CKW field
-                st.text_area(
-                    "computed_keywords (editable)",
-                    value=ckw_db,
-                    height=90,
-                    key="edit_computed_keywords",
+        if st.form_submit_button("Suggest from Category/Service/Name", type="secondary", use_container_width=False):
+            cat = (st.session_state["edit_category"] or "").strip()
+            svc = (st.session_state["edit_service"] or "").strip(" /;,")
+            bn  = (st.session_state["edit_business_name"] or "").strip()
+            st.session_state["_ckw_suggest"] = build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
+            st.session_state["edit_computed_keywords"] = st.session_state["_ckw_suggest"]
+
+        if st.session_state.get("_ckw_suggest"):
+            st.caption("Suggested: " + st.session_state["_ckw_suggest"])
+        # ==== END: CKW Edit (manual lock + suggest) ====
+
+    edited = st.form_submit_button("Save Changes")
+
+if edited:
+    edit_nonce = _nonce("edit")
+    if st.session_state.get("edit_last_done") == edit_nonce:
+        st.info("Edit already processed.")
+        st.stop()
+
+    vid = st.session_state.get("edit_vendor_id")
+    if vid is None:
+        st.error("Select a provider first.")
+    else:
+        bn  = (st.session_state["edit_business_name"] or "").strip()
+        cat = (st.session_state["edit_category"] or "").strip()
+        svc = (st.session_state["edit_service"] or "").strip(" /;,")
+        phone_norm = _normalize_phone(st.session_state["edit_phone"])
+
+        if phone_norm and len(phone_norm) != 10:
+            st.error("Phone must be 10 digits or blank.")
+        elif not bn or not cat:
+            st.error("Provider and Category are required.")
+        else:
+            try:
+                prev_updated = st.session_state.get("edit_row_updated_at") or ""
+                now = datetime.utcnow().isoformat(timespec="seconds")
+
+                # Decide CKW + lock values once
+                ckw_current_val = (st.session_state.get("edit_computed_keywords") or "").strip()
+                suggested_now   = st.session_state.get("_ckw_suggest") or build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
+                ckw_locked_val  = int(bool(st.session_state.get("edit_ckw_locked_flag")))
+                ckw_final       = ckw_current_val or suggested_now
+
+                res = _exec_with_retry(
+                    ENGINE,
+                    """
+                    UPDATE vendors
+                       SET category=:category,
+                           service=NULLIF(:service, ''),
+                           business_name=:business_name,
+                           contact_name=:contact_name,
+                           phone=:phone,
+                           address=:address,
+                           website=:website,
+                           notes=:notes,
+                           keywords=:keywords,
+                           computed_keywords=:ckw,
+                           ckw_locked=:ckw_locked,
+                           ckw_version=:ckw_version,
+                           updated_at=:now,
+                           updated_by=:user
+                     WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
+                    """,
+                    {
+                        "category": cat,
+                        "service": svc,
+                        "business_name": bn,
+                        "contact_name": (st.session_state["edit_contact_name"] or "").strip(),
+                        "phone": phone_norm,
+                        "address": (st.session_state["edit_address"] or "").strip(),
+                        "website": _sanitize_url(st.session_state.get("edit_website") or ""),
+                        "notes": (st.session_state["edit_notes"] or "").strip(),
+                        "keywords": (st.session_state["edit_keywords"] or "").strip(),
+                        "ckw": ckw_final,
+                        "ckw_locked": ckw_locked_val,
+                        "ckw_version": CKW_VERSION,
+                        "now": now,
+                        "user": _updated_by(),
+                        "id": int(vid),
+                        "prev_updated": prev_updated,
+                    },
                 )
-
-                # One-click suggestion
-
-                if st.form_submit_button("Suggest from Category/Service/Name", type="secondary", use_container_width=False):
-                    cat = (st.session_state["edit_category"] or "").strip()
-                    svc = (st.session_state["edit_service"] or "").strip(" /;,")
-                    bn  = (st.session_state["edit_business_name"] or "").strip()
-                    st.session_state["_ckw_suggest"] = build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
-                    st.session_state["edit_computed_keywords"] = st.session_state["_ckw_suggest"]
-
-                if st.session_state.get("_ckw_suggest"):
-                    st.caption("Suggested: " + st.session_state["_ckw_suggest"])
-
-                # ==== END: CKW Edit (manual lock + suggest) ====
-
-
-            edited = st.form_submit_button("Save Changes")
-
-        if edited:
-            edit_nonce = _nonce("edit")
-            if st.session_state.get("edit_last_done") == edit_nonce:
-                st.info("Edit already processed.")
-                st.stop()
-
-            vid = st.session_state.get("edit_vendor_id")
-            if vid is None:
-                st.error("Select a provider first.")
-            else:
-                bn  = (st.session_state["edit_business_name"] or "").strip()
-                cat = (st.session_state["edit_category"] or "").strip()
-                svc = (st.session_state["edit_service"] or "").strip(" /;,")
-                phone_norm = _normalize_phone(st.session_state["edit_phone"])
-                if phone_norm and len(phone_norm) != 10:
-                    st.error("Phone must be 10 digits or blank.")
-                elif not bn or not cat:
-                    st.error("Provider and Category are required.")
+                rowcount = int(getattr(res, "rowcount", 0) or 0)
+                if rowcount == 0:
+                    st.warning("No changes applied (record may have been updated elsewhere). Refresh and try again.")
                 else:
-                    try:
-                        prev_updated = st.session_state.get("edit_row_updated_at") or ""
-                        now = datetime.utcnow().isoformat(timespec="seconds")
+                    st.success(f"Provider updated: {bn}")
+                    st.session_state["edit_last_done"] = edit_nonce
+                    _queue_edit_form_reset()
+                    _nonce_rotate("edit")
+                    list_names.clear()
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Update failed: {e}")
 
-                        # Decide lock: if user edited away from suggestion, lock; else auto (0)
-                        ckw_current_val = (st.session_state.get("edit_computed_keywords") or "").strip()
-                        suggested_now   = st.session_state.get("_ckw_suggest") or build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
-                        # honor the explicit checkbox value; fallback to heuristic if unset
-                        ckw_locked_val  = int(bool(st.session_state.get("edit_ckw_locked_flag")))
-                        # Suggested now (used if user left field blank)
 
-                        suggested_now = st.session_state.get("_ckw_suggest") or build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
-
-                        res = _exec_with_retry(ENGINE, """
-                            UPDATE vendors
-                               SET category=:category,
-                                   service=NULLIF(:service, ''),
-                                   business_name=:business_name,
-                                   contact_name=:contact_name,
-                                   phone=:phone,
-                                   address=:address,
-                                   website=:website,
-                                   notes=:notes,
-                                   keywords=:keywords,
-                                   computed_keywords=:ckw,
-                                   ckw_locked=:ckw_locked,
-                                   ckw_version=:ckw_version,
-                                   updated_at=:now,
-                                   updated_by=:user
-                             WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
-                        """, {
-                            "category": cat,
-                            "service": svc,
-                            "business_name": bn,
-                            "contact_name": (st.session_state["edit_contact_name"] or "").strip(),
-                            "phone": phone_norm,
-                            "address": (st.session_state["edit_address"] or "").strip(),
-                            "website": _sanitize_url(st.session_state["edit_website"]),
-                            "notes": (st.session_state["edit_notes"] or "").strip(),
-                            "keywords": (st.session_state["edit_keywords"] or "").strip(),
-                            "ckw": (ckw_current_val or suggested_now),
-                            "ckw_locked": ckw_locked_val,
-                            "ckw_version": CKW_VERSION,
-                            "now": now, "user": _updated_by(),
-                            "id": int(vid),
-                            "prev_updated": prev_updated,
-                        })
                         rowcount = res.rowcount or 0
                         if rowcount == 0:
                             st.warning("No changes applied (stale selection or already updated). Refresh and try again.")
@@ -1423,11 +1428,7 @@ with _tabs[4]:
             except Exception as e:
                 st.error(f"Integrity test failed: {type(e).__name__}: {e}")
 
-
     # ---- CKW version resolve + index ----
-
-    # -- Helper: resolve the current CKW version (prefers DB meta; falls back to secret or default) --
-
     def _ckw_current_version() -> str:
         ver = None
         try:
@@ -1452,51 +1453,43 @@ with _tabs[4]:
         _exec_with_retry(ENGINE, "CREATE INDEX IF NOT EXISTS idx_vendors_ckw_status ON vendors(ckw_locked, ckw_version)")
     except Exception:
         pass
+# ---- CKW stats helper ----
+def _ckw_stats(engine: Engine, ver: str) -> dict:
+    q = sql_text("""
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN IFNULL(ckw_locked,0)=1 THEN 1 ELSE 0 END) AS locked,
+            SUM(CASE WHEN IFNULL(ckw_locked,0)=0 THEN 1 ELSE 0 END) AS unlocked,
+            SUM(CASE WHEN ckw_version = :v THEN 1 ELSE 0 END) AS at_ver,
+            SUM(
+                CASE
+                    WHEN IFNULL(ckw_locked,0)=0
+                     AND (ckw_version IS NULL OR ckw_version <> :v
+                          OR computed_keywords IS NULL OR TRIM(computed_keywords) = '')
+                    THEN 1 ELSE 0
+                END
+            ) AS stale_unlocked
+        FROM vendors
+    """)
+    with engine.connect() as cx:
+        row = cx.execute(q, {"v": ver}).mappings().one()
 
-    # ---------- NEW: CKW stats (locks, versions, stale) ----------
+    return {
+        "total": int(row.get("total") or 0),
+        "locked": int(row.get("locked") or 0),
+        "unlocked": int(row.get("unlocked") or 0),
+        "at_version": int(row.get("at_ver") or 0),
+        "stale_unlocked": int(row.get("stale_unlocked") or 0),
+    }
 
-    # ---- NEW: CKW stats helper ----
-    def _ckw_stats(engine: Engine, ver: str) -> dict:
-        with engine.connect() as cx:
-            total = cx.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0
-            locked = cx.execute(sql_text("SELECT COUNT(*) FROM vendors WHERE IFNULL(ckw_locked,0)=1")).scalar() or 0
-            unlocked = total - locked
-            unlocked = int(total) - int(locked)
-            at_ver = cx.execute(sql_text("SELECT COUNT(*) FROM vendors WHERE ckw_version = :v"), {"v": ver}).scalar() or 0
-            stale = cx.execute(sql_text("""
-                SELECT COUNT(*) FROM vendors
-                WHERE IFNULL(ckw_locked,0)=0
-                  AND (ckw_version IS NULL OR ckw_version <> :v
-                       OR computed_keywords IS NULL OR TRIM(computed_keywords) = '')
-            """), {"v": ver}).scalar() or 0
-        return {"total": int(total), "locked": int(locked), "unlocked": int(unlocked), "at_version": int(at_ver), "stale_unlocked": int(stale)}
-
-        return {
-            "total": int(total),
-            "locked": int(locked),
-            "unlocked": int(unlocked),
-            "at_version": int(at_ver),
-            "stale_unlocked": int(stale),
-        }
-
-    # ---- CKW controls ----
-    st.subheader("Computed Keywords")
-
-    stats = _ckw_stats(ENGINE, CURRENT_VER)
-    st.caption(
-        f"CKW stats — total: {stats['total']}, locked: {stats['locked']}, "
-        f"unlocked: {stats['unlocked']}, at_version: {stats['at_version']}, "
-        f"stale_unlocked: {stats['stale_unlocked']}"
-    )
-
-    # ---- CKW controls: recompute + bump version (all outside any button blocks) ----
-    st.subheader("Computed Keywords")
-    stats = _ckw_stats(ENGINE, CURRENT_VER)
-    st.caption(
-        f"CKW stats — total: {stats['total']}, locked: {stats['locked']}, "
-        f"unlocked: {stats['unlocked']}, at_version: {stats['at_version']}, "
-        f"stale_unlocked: {stats['stale_unlocked']}"
-    )
+# ---- CKW controls ----
+st.subheader("Computed Keywords")
+stats = _ckw_stats(ENGINE, CURRENT_VER)
+st.caption(
+    f"CKW stats — total: {stats['total']}, locked: {stats['locked']}, "
+    f"unlocked: {stats['unlocked']}, at_version: {stats['at_version']}, "
+    f"stale_unlocked: {stats['stale_unlocked']}"
+)
 
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
@@ -1559,50 +1552,61 @@ with _tabs[4]:
             _do_recompute(_rows_for_all_unlocked(ENGINE), "ALL unlocked", batch_sz)
         except Exception as e:
             st.error(f"Recompute (all) failed: {type(e).__name__}: {e}")
+# ---- NEW: Force recompute ALL (override locks) ----
+force_all = st.button(
+    "FORCE recompute ALL (override locks)",
+    type="secondary",
+    help="Rebuilds computed_keywords for every row and sets ckw_version to CURRENT_VER, ignoring ckw_locked."
+)
 
-    # ---------- NEW: FORCE recompute ALL (overrides locks) ----------
+if force_all:
+    try:
+        # Pull rows as dictionaries for easy field access
+        with ENGINE.connect() as cx:
+            rows = cx.execute(sql_text(
+                "SELECT id, category, service, business_name FROM vendors"
+            )).mappings().all()
 
-    # ---- NEW: Force recompute ALL (override locks) ----
-    force_all = st.button(
-        "FORCE recompute ALL (override locks)",
-        type="secondary",
-        help="Rebuilds computed_keywords for every row and sets ckw_version to CURRENT_VER, ignoring ckw_locked."
-    )
-    if force_all:
-        try:
-            with ENGINE.connect() as cx:
-                rows = cx.execute(sql_text("""
-                    SELECT id, category, service, business_name
-                    FROM vendors
-                """)).fetchall()
-                rows = cx.execute(sql_text("SELECT id, category, service, business_name FROM vendors")).fetchall()
-            total = len(rows)
-            if total == 0:
-                st.success("No rows.")
-            else:
-                done, batch, batch_size = 0, [], int(batch_sz)
-                pbar = st.progress(0)
-                for r in rows:
-                    rid, cat, svc, bn = int(r[0]), (r[1] or ""), (r[2] or ""), (r[3] or "")
-                    ckw = build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
-                    batch.append({"id": rid, "ckw": ckw, "ver": CURRENT_VER})
-                    if len(batch) >= batch_size:
-                        _exec_with_retry(ENGINE, "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id", batch)
-                        done += len(batch); batch.clear()
-                        pbar.progress(min(done/total, 1.0))
-                if batch:
-                    _exec_with_retry(ENGINE, "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id", batch)
-                    done += len(batch); pbar.progress(1.0)
-                        done += len(batch)
-                        batch.clear()
-                        pbar.progress(min(done/total, 1.0))
-                if batch:
-                    _exec_with_retry(ENGINE, "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id", batch)
+        total = len(rows)
+        if total == 0:
+            st.success("No rows.")
+        else:
+            done = 0
+            batch = []
+            batch_size = int(batch_sz)
+            pbar = st.progress(0)
+
+            for r in rows:
+                rid = int(r["id"])
+                cat = r.get("category") or ""
+                svc = r.get("service") or ""
+                bn  = r.get("business_name") or ""
+
+                ckw = build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
+                batch.append({"id": rid, "ckw": ckw, "ver": CURRENT_VER})
+
+                if len(batch) >= batch_size:
+                    _exec_with_retry(
+                        ENGINE,
+                        "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id",
+                        batch,
+                    )
                     done += len(batch)
-                    pbar.progress(1.0)
-                st.success(f"Force recompute completed: {done} row(s) updated.")
-        except Exception as e:
-            st.error(f"Force recompute failed: {type(e).__name__}: {e}")
+                    batch.clear()
+                    pbar.progress(min(done / total, 1.0))
+
+            if batch:
+                _exec_with_retry(
+                    ENGINE,
+                    "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id",
+                    batch,
+                )
+                done += len(batch)
+                pbar.progress(1.0)
+
+            st.success(f"Force recompute completed: {done} row(s) updated.")
+    except Exception as e:
+        st.error(f"Force recompute failed: {type(e).__name__}: {e}")
 
     # ---------- NEW: Unlock all helper ----------
     # ---- NEW: Unlock all rows ----
