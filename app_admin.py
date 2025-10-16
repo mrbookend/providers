@@ -567,7 +567,7 @@ def rename_service_and_cascade(engine: Engine, old: str, new: str) -> None:
     with engine.begin() as conn:
         conn.execute(sql_text("INSERT OR IGNORE INTO services(name) VALUES(:n)"), {"n": new})
         conn.execute(sql_text("UPDATE vendors SET service=:new WHERE service=:old"), {"new": new, "old": old})
-        conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"old": old})  # fixed param name
+        conn.execute(sql_text("DELETE FROM services WHERE name=:old"), {"name": old})
 
 def delete_service_with_reassign(engine: Engine, tgt: str, repl: str) -> None:
     with engine.begin() as conn:
@@ -624,6 +624,7 @@ def _join_kw(terms: list[str], max_terms: int = 16) -> str:
         seen.add(tt); out.append(tt)
         if len(out) >= max_terms:
             break
+        return ", ".join(out)
     return ", ".join(out)
 
 def _kw_from_row_fast(row: dict) -> str:
@@ -1168,55 +1169,58 @@ if edited:
             except Exception as e:
                 st.error(f"Update failed: {e}")
 
-        st.markdown("---")
-        st.subheader("Delete Provider")
+st.markdown("---")
+st.markdown("---")
+st.subheader("Delete Provider")
 
-        sel_label_del = st.selectbox(
-            "Select provider to delete (type to search)",
-            options=["— Select —"] + [ _fmt_vendor(i) for i in ids ],
-            key="delete_provider_label",
-        )
-        if sel_label_del != "— Select —":
-            rev = { _fmt_vendor(i): i for i in ids }
-            st.session_state["delete_vendor_id"] = int(rev.get(sel_label_del))
-        else:
-            st.session_state["delete_vendor_id"] = None
+sel_label_del = st.selectbox(
+    "Select provider to delete (type to search)",
+    options=["— Select —"] + [ _fmt_vendor(i) for i in ids ],
+    key="delete_provider_label",
+)
+if sel_label_del != "— Select —":
+    rev = { _fmt_vendor(i): i for i in ids }
+    st.session_state["delete_vendor_id"] = int(rev.get(sel_label_del))
+else:
+    st.session_state["delete_vendor_id"] = None
 
-        del_form_key = f"delete_vendor_form_{st.session_state['delete_form_version']}"
-        with st.form(del_form_key, clear_on_submit=False):
-            deleted = st.form_submit_button("Delete Provider")
+del_form_key = f"delete_vendor_form_{st.session_state['delete_form_version']}"
+with st.form(del_form_key, clear_on_submit=False):
+    deleted = st.form_submit_button("Delete Provider")
 
-        if deleted:
-            del_nonce = _nonce("delete")
-            if st.session_state.get("delete_last_done") == del_nonce:
-                st.info("Delete already processed.")
-                st.stop()
+if deleted:
+    del_nonce = _nonce("delete")
+    if st.session_state.get("delete_last_done") == del_nonce:
+        st.info("Delete already processed.")
+        st.stop()
 
-            vid = st.session_state.get("delete_vendor_id")
-            if vid is None:
-                st.error("Select a provider first.")
+    vid = st.session_state.get("delete_vendor_id")
+    if vid is None:
+        st.error("Select a provider first.")
+    else:
+        try:
+            row = df_all.loc[df_all["id"] == int(vid)]
+            prev_updated = (row.iloc[0]["updated_at"] if not row.empty else "") or ""
+            res = _exec_with_retry(
+                ENGINE,
+                """
+                DELETE FROM vendors
+                 WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
+                """,
+                {"id": int(vid), "prev_updated": prev_updated},
+            )
+            rowcount = int(getattr(res, "rowcount", 0) or 0)
+            if rowcount == 0:
+                st.warning("No delete performed (stale selection). Refresh and try again.")
             else:
-                try:
-                    row = df_all.loc[df_all["id"] == int(vid)]
-                    prev_updated = (row.iloc[0]["updated_at"] if not row.empty else "") or ""
-                    res = _exec_with_retry(ENGINE, """
-                        DELETE FROM vendors
-                         WHERE id=:id AND (updated_at=:prev_updated OR :prev_updated='')
-                    """, {"id": int(vid), "prev_updated": prev_updated})
-                    rowcount = res.rowcount or 0
-
-                    if rowcount == 0:
-                        st.warning("No delete performed (stale selection). Refresh and try again.")
-                    else:
-                        st.session_state["delete_last_done"] = del_nonce
-                        st.success("Provider deleted.")
-                        _queue_delete_form_reset()
-                        _nonce_rotate("delete")
-                        list_names.clear()
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"Delete failed: {e}")
-
+                st.session_state["delete_last_done"] = del_nonce
+                st.success("Provider deleted.")
+                _queue_delete_form_reset()
+                _nonce_rotate("delete")
+                list_names.clear()
+                st.rerun()
+        except Exception as e:
+            st.error(f"Delete failed: {e}")
 # ---------- Category Admin
 with _tabs[2]:
     st.caption("Category is required. Manage the reference list and reassign providers safely.")
@@ -1476,13 +1480,13 @@ st.caption(
     f"stale_unlocked: {stats['stale_unlocked']}"
 )
 
-    c1, c2, c3 = st.columns([1, 1, 1])
-    with c1:
-        batch_sz = st.number_input("Batch size", min_value=50, max_value=1000, value=300, step=50)
-    with c2:
-        run_stale = st.button("Recompute unlocked & stale", type="primary", use_container_width=True)
-    with c3:
-        run_all = st.button("Recompute ALL unlocked", type="secondary", use_container_width=True)
+c1, c2, c3 = st.columns([1, 1, 1])
+with c1:
+    batch_sz = st.number_input("Batch size", min_value=50, max_value=1000, value=300, step=50)
+with c2:
+    run_stale = st.button("Recompute unlocked & stale", type="primary", use_container_width=True)
+with c3:
+    run_all = st.button("Recompute ALL unlocked", type="secondary", use_container_width=True)
 
     def _rows_for_stale(engine: Engine, ver: str) -> list[tuple]:
         with engine.connect() as cx:
@@ -1978,4 +1982,3 @@ if _SHOW_DEBUG:
                 st.json(probe)
             except Exception as e:
                 st.error(f"Probe failed: {e.__class__.__name__}: {e}")
-# ==== END FILE ====
