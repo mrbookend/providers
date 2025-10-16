@@ -64,25 +64,30 @@ def _get_data_version(engine: Engine) -> str:
         return "0"
 
 @st.cache_data(show_spinner=False)
-def load_df(engine: Engine, version: str) -> pd.DataFrame:
+@st.cache_data(show_spinner=False)
+def load_df(_engine: Engine, version: str) -> pd.DataFrame:
     q = """
     SELECT id, business_name, category, service, phone, website, notes, computed_keywords
       FROM vendors
      WHERE deleted_at IS NULL
      ORDER BY business_name COLLATE NOCASE
     """
-    with engine.connect() as cx:
+    with _engine.connect() as cx:
         df = pd.read_sql(sql_text(q), cx)
     return df
 
+
 def _fmt_phone(d: str) -> str:
     d = "".join(ch for ch in (d or "") if ch.isdigit())
-    if len(d)==10: return f"({d[:3]}) {d[3:6]}-{d[6:]}"
+    if len(d) == 10:
+        return f"({d[:3]}) {d[3:6]}-{d[6:]}"
     return d
+
 
 def _filter(df: pd.DataFrame, q: str) -> pd.DataFrame:
     qn = (q or "").strip().lower()
-    if not qn: return df
+    if not qn:
+        return df
     return df[
         df["business_name"].str.lower().str.contains(qn, na=False) |
         df["category"].str.lower().str.contains(qn, na=False) |
