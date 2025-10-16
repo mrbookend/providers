@@ -1569,38 +1569,52 @@ with c3:
             """), {"ver": ver}).fetchall()
 
     def _rows_for_all_unlocked(engine: Engine) -> list[tuple]:
-        with engine.connect() as cx:
-            return cx.execute(sql_text("""
-                SELECT id, category, service, business_name
-                  FROM vendors
-                 WHERE IFNULL(ckw_locked,0)=0
-            """)).fetchall()
+    with engine.connect() as cx:
+        return cx.execute(sql_text("""
+            SELECT id, category, service, business_name
+              FROM vendors
+             WHERE IFNULL(ckw_locked,0)=0
+        """)).fetchall()
 
-    def _do_recompute(rows: list[tuple], label: str, batch: int):
-        total = len(rows)
-        if total == 0:
-            st.success(f"No rows to update for: {label}.")
-            return
-        st.write(f"{label}: **{total}** row(s) to update…")
-        done = 0
-        todo: list[dict] = []
-        pbar = st.progress(0)
-        for r in rows:
-                rid, cat, svc, bn = int(r[0]), (r[1] or ""), (r[2] or ""), (r[3] or "")
-                seed = _load_ckw_seed(cat, svc)
-                ckw = seed or build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
-                todo.append({"id": rid, "ckw": ckw, "ver": CURRENT_VER})
+def _do_recompute(rows: list[tuple], label: str, batch: int):
+    total = len(rows)
+    if total == 0:
+        st.success(f"No rows to update for: {label}.")
+        return
 
-            if len(todo) >= int(batch):
-                _exec_with_retry(ENGINE, "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id", todo)
-                done += len(todo)
-                todo.clear()
-                pbar.progress(min(done / total, 1.0))
-        if todo:
-            _exec_with_retry(ENGINE, "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id", todo)
+    st.write(f"{label}: **{total}** row(s) to update…")
+    done = 0
+    todo: list[dict] = []
+    pbar = st.progress(0)
+
+    for r in rows:
+        rid, cat, svc, bn = int(r[0]), (r[1] or ""), (r[2] or ""), (r[3] or "")
+        seed = _load_ckw_seed(cat, svc)
+        ckw = seed or build_computed_keywords(cat, svc, bn, CKW_MAX_TERMS)
+        todo.append({"id": rid, "ckw": ckw, "ver": CURRENT_VER})
+
+        if len(todo) >= int(batch):
+            _exec_with_retry(
+                ENGINE,
+                "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id",
+                todo,
+            )
             done += len(todo)
-            pbar.progress(1.0)
-        st.success(f"{label}: updated {done} row(s).")
+            todo.clear()
+            pbar.progress(min(done / total, 1.0))
+
+    if todo:
+        _exec_with_retry(
+            ENGINE,
+            "UPDATE vendors SET computed_keywords=:ckw, ckw_version=:ver WHERE id=:id",
+            todo,
+        )
+        done += len(todo)
+        pbar.progress(1.0)
+
+    st.success(f"{label}: updated {done} row(s).")
+
+
 
     if run_stale:
         try:
