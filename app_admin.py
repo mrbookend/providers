@@ -1569,12 +1569,14 @@ with c3:
             """), {"ver": ver}).fetchall()
 
     def _rows_for_all_unlocked(engine: Engine) -> list[tuple]:
-    with engine.connect() as cx:
-        return cx.execute(sql_text("""
-            SELECT id, category, service, business_name
-              FROM vendors
-             WHERE IFNULL(ckw_locked,0)=0
-        """)).fetchall()
+        with engine.connect() as cx:
+            return cx.execute(sql_text("""
+                SELECT id, category, service, business_name
+                  FROM vendors
+                 WHERE IFNULL(ckw_locked,0)=0
+            """)).fetchall()
+
+
 
 def _do_recompute(rows: list[tuple], label: str, batch: int):
     total = len(rows)
@@ -1613,6 +1615,7 @@ def _do_recompute(rows: list[tuple], label: str, batch: int):
         pbar.progress(1.0)
 
     st.success(f"{label}: updated {done} row(s).")
+
 
 
 
