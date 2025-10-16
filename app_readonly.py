@@ -64,16 +64,17 @@ def _get_data_version(engine: Engine) -> str:
         return "0"
 
 @st.cache_data(show_spinner=False)
-def load_df(engine: Engine, version: str) -> pd.DataFrame:
+def load_df(_engine: Engine, version: str) -> pd.DataFrame:
     q = """
     SELECT id, business_name, category, service, phone, website, notes, computed_keywords
       FROM vendors
      WHERE deleted_at IS NULL
      ORDER BY business_name COLLATE NOCASE
     """
-    with engine.connect() as cx:
+    with _engine.connect() as cx:
         df = pd.read_sql(sql_text(q), cx)
     return df
+
 
 def _fmt_phone(d: str) -> str:
     d = "".join(ch for ch in (d or "") if ch.isdigit())
