@@ -956,15 +956,16 @@ with _tabs[1]:
             st.text_area("Notes", height=100, key="add_notes")
             st.text_input("Keywords (comma separated)", key="add_keywords")
 
-            # ==== BEGIN: CKW on Add (manual lock + preview) ====
-            st.checkbox("Lock computed keywords on create", value=False, key="add_ckw_locked")
             if st.form_submit_button("Suggest computed keywords", type="secondary"):
                 _bn = (st.session_state["add_business_name"] or "").strip()
                 _cat = (st.session_state["add_category"] or "").strip()
                 _svc = (st.session_state["add_service"] or "").strip(" /;,")
                 # Prefer stored seed for (Category, Service); fall back to rules-driven builder
                 _seed = _load_ckw_seed(_cat, _svc)
-                st.session_state["_ckw_add_suggest"] = (_seed or build_computed_keywords(_cat, _svc, _bn, CKW_MAX_TERMS))
+                _suggestion = _seed or build_computed_keywords(_cat, _svc, _bn, CKW_MAX_TERMS)
+                st.session_state["_ckw_add_suggest"] = _suggestion
+                st.session_state["add_computed_keywords"] = _suggestion
+
             st.text_area(
                 "computed_keywords (optional; leave blank to auto-generate)",
                 value=st.session_state.get("_ckw_add_suggest", ""),
