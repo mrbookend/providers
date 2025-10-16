@@ -1245,6 +1245,18 @@ with st.form(edit_form_key, clear_on_submit=False):
         # ==== END: CKW Edit (manual lock + suggest) ====
     edited = st.form_submit_button("Save Changes")
 
+    # ---- CKW: if unlocked, always recompute from algorithm on save
+    if edited:
+        _cat = (st.session_state.get("edit_category") or "").strip()
+        _svc = (st.session_state.get("edit_service") or "").strip()
+        _bn  = (st.session_state.get("edit_business_name") or "").strip()
+        _locked = bool(st.session_state.get("edit_ckw_locked_flag"))
+        if not _locked:
+            try:
+                st.session_state["edit_computed_keywords"] = _suggest_ckw(_cat, _svc, _bn).strip()
+            except Exception:
+                pass
+
     # ---- CKW: if unlocked and field is blank, use algorithmic suggestion
     if edited:
         _cat = (st.session_state.get("edit_category") or "").strip()
