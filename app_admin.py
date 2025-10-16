@@ -19,6 +19,64 @@ import pandas as pd
 import requests
 import sqlalchemy
 import streamlit as st
+# ==== BEGIN: CKW algorithm helpers ====
+import re as _re
+
+CKW_MAX_TERMS = int(st.secrets.get("CKW_MAX_TERMS", 16))
+
+def _ckw_norm_words(text: str) -> list[str]:
+    s = (text or "").lower()
+    s = _re.sub(r"[^a-z0-9\s\-&/]", " ", s)
+    s = _re.sub(r"\s+", " ", s).strip()
+    return s.split(" ") if s else []
+
+def _ckw_dedupe_preserve(seq):
+    seen, out = set(), []
+    for x in seq:
+        if not x or x in seen:
+            continue
+        seen.add(x); out.append(x)
+    return out
+
+def _ckw_seed_terms_for(category: str, service: str) -> list[str]:
+    seeds_map = st.secrets.get("CKW_SEEDS", {})  # {"Beauty|Nail Salon":["manicure","pedicure",...], ...}
+    key = f"{(category or '').strip()}|{(service or '').strip()}"
+    base = seeds_map.get(key, [])
+    return [t.lower().strip() for t in base if t and isinstance(t, str)]
+
+def _ckw_expand_synonyms(terms: list[str]) -> list[str]:
+    syn = st.secrets.get("CKW_SYNONYMS", {})  # {"manicure":["mani"], "pedicure":["pedi"], ...}
+    out = list(terms)
+    for t in terms:
+        for e in syn.get(t, []):
+            if e and isinstance(e, str):
+                out.append(e.lower().strip())
+    return out
+
+def _suggest_ckw(category: str, service: str, business_name: str) -> str:
+    # 1) Seeds from (category, service)
+    seeds = _ckw_seed_terms_for(category, service)
+
+    # 2) Words from service/category (normalized)
+    cat_words = _ckw_norm_words(category)
+    svc_words = _ckw_norm_words(service)
+
+    # 3) Optional business_name hints (only 4+ chars to avoid noise)
+    bn_words = [w for w in _ckw_norm_words(business_name) if len(w) >= 4]
+
+    # 4) Combine, expand, normalize
+    raw = seeds + svc_words + cat_words + bn_words
+    raw = [w.strip(" -/") for w in raw if w]
+    raw = _ckw_expand_synonyms(raw)
+
+    # 5) Dedupe (stable) and cap
+    raw = _ckw_dedupe_preserve(raw)
+    if CKW_MAX_TERMS > 0:
+        raw = raw[:CKW_MAX_TERMS]
+
+    return ", ".join(raw)
+# ==== END: CKW algorithm helpers ====
+
 from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
 
@@ -1189,6 +1247,19 @@ with st.form(edit_form_key, clear_on_submit=False):
 
         # ==== END: CKW Edit (manual lock + suggest) ====
     edited = st.form_submit_button("Save Changes")
+
+    # ---- CKW: if unlocked and field is blank, use algorithmic suggestion
+    if edited:
+        _cat = (st.session_state.get("edit_category") or "").strip()
+        _svc = (st.session_state.get("edit_service") or "").strip()
+        _bn  = (st.session_state.get("edit_business_name") or "").strip()
+        _locked = bool(st.session_state.get("edit_ckw_locked_flag"))
+        _user_ckw = (st.session_state.get("edit_computed_keywords") or "").strip()
+        if not _locked and not _user_ckw:
+            try:
+                st.session_state["edit_computed_keywords"] = _suggest_ckw(_cat, _svc, _bn).strip()
+            except Exception:
+                pass
 
 if edited:
     edit_nonce = _nonce("edit")
