@@ -1152,40 +1152,43 @@ with st.form(edit_form_key, clear_on_submit=False):
         st.caption("Computed keywords are used for search in the read-only app.")
 
 
-        # Current row and DB defaults
+        # Current row and DB defaults (avoid Series truthiness)
 
-        current_row = id_to_row.get(int(st.session_state["edit_vendor_id"])) if st.session_state.get("edit_vendor_id") else {}
+        _vid = st.session_state.get("edit_vendor_id")
 
-        ckw_db = (current_row.get("computed_keywords") or "").strip() if current_row else ""
+        current_row = id_to_row.get(int(_vid)) if _vid is not None else None
 
-        ckw_locked_db = int(current_row.get("ckw_locked") or 0) if current_row else 0
+        if hasattr(current_row, "to_dict"):
+
+            current_row = current_row.to_dict()
+
+        if current_row is None:
+
+            current_row = {}
+
+
+        ckw_db = str(current_row.get("computed_keywords") or "").strip()
+
+        ckw_locked_db = int(current_row.get("ckw_locked") or 0)
 
 
         # Compute a fresh suggestion for the current form values
 
         try:
 
-            suggested_now = _suggest_ckw(
-
-                category=cat,
-
-                service=svc,
-
-                business_name=bn,
-
-            ).strip()
+            suggested_now = _suggest_ckw(category=cat, service=svc, business_name=bn).strip()
 
         except Exception:
 
             suggested_now = ""
 
 
-        # Stash the suggestion for callbacks
+        # Stash the suggestion for the (form-safe) callback
 
         st.session_state["_ckw_suggest"] = suggested_now
 
 
-        # IMPORTANT: Ensure a default value BEFORE the widget is instantiated
+        # Ensure a default value BEFORE the widget is instantiated
 
         if "edit_computed_keywords" not in st.session_state:
 
@@ -1203,7 +1206,7 @@ with st.form(edit_form_key, clear_on_submit=False):
             st.session_state["edit_computed_keywords"] = st.session_state.get("_ckw_suggest", "")
 
 
-        # Controls (stay inside the form; only form_submit_button has a callback)
+        # Controls (inside the form; only form_submit_button has callback)
 
         c1, c2 = st.columns([1, 3])
 
@@ -1221,13 +1224,7 @@ with st.form(edit_form_key, clear_on_submit=False):
 
             )
 
-            use_suggest = st.form_submit_button(
-
-                "Use suggestion",
-
-                on_click=_apply_ckw_suggestion_cb
-
-            )
+            st.form_submit_button("Use suggestion", on_click=_apply_ckw_suggestion_cb)
 
         with c2:
 
