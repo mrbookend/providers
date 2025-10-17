@@ -106,6 +106,7 @@ def load_df(version: str) -> pd.DataFrame:
 # =============================
 # Formatting / Filtering
 # =============================
+
 def _fmt_phone(d: str) -> str:
     d = "".join(ch for ch in (d or "") if ch.isdigit())
     if len(d) == 10:
