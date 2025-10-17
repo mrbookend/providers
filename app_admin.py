@@ -9,6 +9,7 @@ st.set_page_config(page_title="HCR Providers — Admin", page_icon="🛠️", la
 import os, re, time, sys, html, json, textwrap
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import pandas as pd
 from sqlalchemy import create_engine, text as sql_text
@@ -20,13 +21,11 @@ try:
 except Exception:
     pass
 
-from urllib.parse import urlparse
-
 # =============================
 # Configuration / Constants
 # =============================
 
-APP_VER = "admin-2025-10-17.0"
+APP_VER = "admin-2025-10-17.1"
 CKW_VERSION = "ckw-2025-10-16a"  # bump when generator changes
 MAX_ROWS = 1000
 
@@ -54,8 +53,8 @@ SHOW_STATUS = _as_bool(_get_secret("ADMIN_SHOW_STATUS", True), True)
 SHOW_DIAGS  = _as_bool(_get_secret("ADMIN_SHOW_DIAGS", False), False)
 DB_STRATEGY = str(_get_secret("DB_STRATEGY", "embedded_replica")).strip().lower()
 
-TURSO_URL   = str(_get_secret("TURSO_DATABASE_URL", "") or "").strip()
-TURSO_TOKEN = str(_get_secret("TURSO_AUTH_TOKEN", "") or "").strip()
+TURSO_URL     = str(_get_secret("TURSO_DATABASE_URL", "") or "").strip()
+TURSO_TOKEN   = str(_get_secret("TURSO_AUTH_TOKEN", "") or "").strip()
 EMBEDDED_PATH = str(_get_secret("EMBEDDED_DB_PATH", "vendors-embedded.db") or "").strip()
 
 # =============================
@@ -75,7 +74,6 @@ def _libsql_url_with_token(raw: str, tok: str) -> str:
     if "tls=" not in url:
         url += ("&" if "?" in url else "?") + "tls=true"
     return url
-
 @st.cache_resource(show_spinner=False)
 def build_engine() -> Engine:
     """
@@ -97,24 +95,22 @@ def build_engine() -> Engine:
         eng = create_engine(dsn, pool_pre_ping=True, pool_recycle=300)
 
     elif DB_STRATEGY == "turso_only":
-elif DB_STRATEGY == "turso_only":
-    # Prefer a single full URL (host + ?authToken=... [+tls=true]) if provided in secrets
-    full = str(_get_secret("LIBSQL_URL_FULL", "") or "").strip()
-    if full.startswith("libsql://") and "authToken=" in full:
-        url = full
-        host = urlparse(url).netloc
-    else:
-        # Fall back to assembling from separate secrets
-        if not TURSO_URL.startswith("libsql://"):
-            st.error("DB_STRATEGY=turso_only but TURSO_DATABASE_URL is not a libsql:// URL.")
-            st.stop()
-        url = _libsql_url_with_token(TURSO_URL, TURSO_TOKEN)
-        host = urlparse(url).netloc
+        # Prefer a single full URL (host + ?authToken=... [+tls=true]) if provided in secrets
+        full = str(_get_secret("LIBSQL_URL_FULL", "") or "").strip()
+        if full.startswith("libsql://") and "authToken=" in full:
+            url = full
+            host = urlparse(url).netloc
+        else:
+            # Fall back to assembling from separate secrets
+            if not TURSO_URL.startswith("libsql://"):
+                st.error("DB_STRATEGY=turso_only but TURSO_DATABASE_URL is not a libsql:// URL.")
+                st.stop()
+            url = _libsql_url_with_token(TURSO_URL, TURSO_TOKEN)
+            host = urlparse(url).netloc
 
-    dsn = f"sqlite+libsql:///?url={url}"
-    target_desc = f"turso:{host}"
-    eng = create_engine(dsn, pool_pre_ping=True, pool_recycle=300)
-
+        dsn = f"sqlite+libsql:///?url={url}"
+        target_desc = f"turso:{host}"
+        eng = create_engine(dsn, pool_pre_ping=True, pool_recycle=300)
 
     else:
         # Fallback to embedded file if strategy unrecognized
@@ -137,6 +133,7 @@ elif DB_STRATEGY == "turso_only":
         st.sidebar.info(f"DB strategy: {DB_STRATEGY} | Target: {target_desc}")
 
     return eng
+
 
 
 def _exec_with_retry(engine: Engine, sql: str, params: Optional[dict]=None, tries: int=3, delay: float=0.25):
@@ -369,7 +366,9 @@ def run_auto_maintenance(engine: Engine, seeds: Dict[Tuple[str,str], str]) -> di
         _exec_with_retry(engine, "UPDATE meta SET value=:ts WHERE key='last_maintenance'", {"ts": _now_utc_iso()})
     return stats
 
-from urllib.parse import urlparse
+# =============================
+# Diagnostics (expander)
+# =============================
 
 with st.expander("Diagnose connection (tables & counts)"):
     try:
@@ -404,9 +403,6 @@ with st.expander("Diagnose connection (tables & counts)"):
                 })
             else:
                 st.warning("Table 'vendors' not found via this connection.")
-    except Exception as e:
-        st.error(f"Diag query failed: {e}")
-
     except Exception as e:
         st.error(f"Diag query failed: {e}")
 
