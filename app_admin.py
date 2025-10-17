@@ -341,6 +341,25 @@ def run_auto_maintenance(engine: Engine, seeds: Dict[Tuple[str,str], str]) -> di
         _exec_with_retry(engine, "UPDATE meta SET value=:ts WHERE key='last_maintenance'", {"ts": _now_utc_iso()})
     return stats
 
+with st.expander("Diagnose connection (tables & counts)"):
+    try:
+        with engine.connect() as cx:
+            tables = [r[0] for r in cx.execute(sql_text(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            )).fetchall()]
+            st.write({"tables": tables})
+
+            # Show counts if vendors exists
+            if "vendors" in tables:
+                total = cx.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0
+                active = cx.execute(sql_text("SELECT COUNT(*) FROM vendors WHERE deleted_at IS NULL")).scalar() or 0
+                deleted = cx.execute(sql_text("SELECT COUNT(*) FROM vendors WHERE deleted_at IS NOT NULL")).scalar() or 0
+                st.write({"vendors_total": total, "vendors_active": active, "vendors_deleted": deleted})
+            else:
+                st.warning("Table 'vendors' not found in this connection.")
+    except Exception as e:
+        st.error(f"Diag query failed: {e}")
+
 # =============================
 # UI Helpers
 # =============================
