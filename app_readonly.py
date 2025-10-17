@@ -8,7 +8,6 @@ st.set_page_config(page_title="HCR Providers — Read-Only", page_icon="📇", l
 
 import os
 import re
-from typing import Optional
 import pandas as pd
 from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
@@ -19,7 +18,7 @@ try:
 except Exception:
     pass
 
-APP_VER = "readonly-2025-10-16.3"
+APP_VER = "readonly-2025-10-16.4"
 
 # =============================
 # Secrets / Config helpers
@@ -52,28 +51,21 @@ EMBEDDED_PATH = _get_secret("EMBEDDED_DB_PATH", "vendors-embedded.db")
 # =============================
 @st.cache_resource(show_spinner=False)
 def build_engine() -> Engine:
-    """
-    Build a stable SQLAlchemy Engine. Cached so all calls reuse one instance.
-    """
+    """Build a stable SQLAlchemy Engine. Cached so all calls reuse one instance."""
     if DB_STRATEGY == "embedded_replica":
         path = EMBEDDED_PATH if os.path.isabs(EMBEDDED_PATH) else os.path.join(os.getcwd(), EMBEDDED_PATH)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         url = f"sqlite+libsql:///{path}"
     elif DB_STRATEGY == "turso_only":
-        # Expect TURSO_URL to already include the authToken query param
         url = TURSO_URL or ""
     else:
-        # Fallback to embedded path
         path = EMBEDDED_PATH if os.path.isabs(EMBEDDED_PATH) else os.path.join(os.getcwd(), EMBEDDED_PATH)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         url = f"sqlite+libsql:///{path}"
-
     return create_engine(url, pool_pre_ping=True, pool_recycle=300)
 
 def _get_data_version(engine: Engine) -> str:
-    """
-    Read meta.data_version so our cached data reloads after writes.
-    """
+    """Read meta.data_version so our cached data reloads after writes."""
     try:
         with engine.connect() as cx:
             v = cx.execute(sql_text("SELECT value FROM meta WHERE key='data_version'")).scalar()
@@ -83,14 +75,13 @@ def _get_data_version(engine: Engine) -> str:
 
 # =============================
 # Data load (cached)
+#  NOTE: Use a NEW NAME to avoid any stale cached signature.
 # =============================
 @st.cache_data(show_spinner=False)
-def load_df(version: str) -> pd.DataFrame:
+def load_df_v3(version: str) -> pd.DataFrame:
     """
     Load active providers (deleted_at IS NULL).
-    NOTE: We intentionally DO NOT pass the Engine as an argument because
-    cached functions must hash their args. We just call build_engine()
-    here; it's a cached resource so it won't rebuild.
+    We DO NOT take an Engine arg (unhashable). Build it inside.
     """
     _engine = build_engine()
     q = """
@@ -106,7 +97,6 @@ def load_df(version: str) -> pd.DataFrame:
 # =============================
 # Formatting / Filtering
 # =============================
-
 def _fmt_phone(d: str) -> str:
     d = "".join(ch for ch in (d or "") if ch.isdigit())
     if len(d) == 10:
@@ -131,7 +121,7 @@ def _filter(df: pd.DataFrame, q: str) -> pd.DataFrame:
 def main():
     st.title("HCR Providers — Read-Only")
 
-    # Build engine once for non-cached calls/status; cached loader builds/uses its own.
+    # Build engine once for status / version read; cached loader builds its own.
     engine = build_engine()
     version = _get_data_version(engine)
 
@@ -139,7 +129,7 @@ def main():
     q = st.text_input("Search", key="q", placeholder="e.g., roofer, manicure, irrigation, Bosch…")
 
     # --- Load + filter ---
-    df = load_df(version)
+    df = load_df_v3(version)  # <— new function name to force cache reset
     dfv = _filter(df, q)
 
     st.caption(f"{len(dfv)} of {len(df)} providers")
