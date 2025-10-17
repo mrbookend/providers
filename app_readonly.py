@@ -85,6 +85,7 @@ def _get_data_version(engine: Engine) -> str:
 # Data load (cached)
 # =============================
 @st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def load_df(version: str) -> pd.DataFrame:
     """
     Load active providers (deleted_at IS NULL).
@@ -106,11 +107,13 @@ def load_df(version: str) -> pd.DataFrame:
 # =============================
 # Formatting / Filtering
 # =============================
+
 def _fmt_phone(d: str) -> str:
     d = "".join(ch for ch in (d or "") if ch.isdigit())
     if len(d) == 10:
         return f"({d[:3]}) {d[3:6]}-{d[6:]}"
     return d
+
 
 def _filter(df: pd.DataFrame, q: str) -> pd.DataFrame:
     qn = (q or "").strip().lower()
