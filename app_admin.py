@@ -349,10 +349,14 @@ with st.expander("Diagnose connection (tables & counts)"):
         diag_eng = build_engine()
 
         # Show effective target (safe)
-        raw = str(_get_secret("TURSO_DATABASE_URL","")).strip()
-        tok = str(_get_secret("TURSO_AUTH_TOKEN","")).strip()
+        raw = str(_get_secret("TURSO_DATABASE_URL", "")).strip()
+        tok = str(_get_secret("TURSO_AUTH_TOKEN", "")).strip()
         host = urlparse(raw).netloc if raw else "(none)"
-        st.write({"strategy": DB_STRATEGY, "turso_host_secret": host, "has_token": bool(tok)})
+        st.write({
+            "strategy": DB_STRATEGY,
+            "turso_host_secret": host,
+            "has_token": bool(tok),
+        })
 
         with diag_eng.connect() as cx:
             tables = [r[0] for r in cx.execute(sql_text(
@@ -360,13 +364,21 @@ with st.expander("Diagnose connection (tables & counts)"):
             )).fetchall()]
             st.write({"tables": tables})
 
+            # Show counts if vendors exists
             if "vendors" in tables:
                 total = cx.execute(sql_text("SELECT COUNT(*) FROM vendors")).scalar() or 0
                 active = cx.execute(sql_text("SELECT COUNT(*) FROM vendors WHERE deleted_at IS NULL")).scalar() or 0
                 deleted = cx.execute(sql_text("SELECT COUNT(*) FROM vendors WHERE deleted_at IS NOT NULL")).scalar() or 0
-                st.write({"vendors_total": total, "vendors_active": active, "vendors_deleted": deleted})
+                st.write({
+                    "vendors_total": total,
+                    "vendors_active": active,
+                    "vendors_deleted": deleted
+                })
             else:
                 st.warning("Table 'vendors' not found via this connection.")
+    except Exception as e:
+        st.error(f"Diag query failed: {e}")
+
     except Exception as e:
         st.error(f"Diag query failed: {e}")
 
