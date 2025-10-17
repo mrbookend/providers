@@ -104,6 +104,7 @@ def load_df(version: str) -> pd.DataFrame:
         df = pd.read_sql(sql_text(q), cx)
     return df
 
+
 # =============================
 # Formatting / Filtering
 # =============================
