@@ -58,3 +58,14 @@ vendors-embedded.db
 
 # Local backups
 app_admin_backup_*.py
+# Local artifacts & backups
+.streamlit/
+*.db
+*.db-*
+*.db.*
+*.bak.*
+*backup-*.db
+vendors.sql
+*.script
+*.diff
+*.prepatch.*

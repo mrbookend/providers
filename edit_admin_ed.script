@@ -1,0 +1,198 @@
+H
+
+" --- Add AUTO_LEARN_SEEDS after CKW_MAX_TERMS ---
+/^CKW_MAX_TERMS =/ a
+AUTO_LEARN_SEEDS = bool(st.secrets.get("AUTO_LEARN_SEEDS", True))
+.
+
+" --- Insert CKW seed schema + helpers before the Computed Keywords header ---
+/^# -----------------------------/
+/^# -----------------------------\n# Computed Keywords — rule-driven builder/ i
+# -----------------------------
+# CKW seed store (persisted memory per (category, service))
+# -----------------------------
+def ensure_ckw_seed_schema(engine: Engine) -> None:
+    ddls = [
+        """
+        CREATE TABLE IF NOT EXISTS ckw_seeds (
+          category   TEXT NOT NULL,
+          service    TEXT NOT NULL,
+          seed       TEXT NOT NULL,
+          version    INTEGER NOT NULL DEFAULT 1,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY(category, service)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_ckw_seeds_cat_svc ON ckw_seeds(category, service)",
+    ]
+    for stmt in ddls:
+        _exec_with_retry(engine, stmt)
+
+def upsert_ckw_seed(category: str, service: str, seed: str, version: int | str) -> None:
+    c = (category or "").strip()
+    s = (service or "").strip()
+    if not (c and s and (seed or "").strip()):
+        return
+    try:
+        ver = int(version) if str(version).isdigit() else 1
+    except Exception:
+        ver = 1
+    _exec_with_retry(
+        ENGINE,
+        """
+        INSERT INTO ckw_seeds(category, service, seed, version)
+        VALUES (:c, :s, :seed, :ver)
+        ON CONFLICT(category, service) DO UPDATE SET
+          seed       = excluded.seed,
+          version    = excluded.version,
+          updated_at = datetime('now')
+        """,
+        {"c": c, "s": s, "seed": seed.strip(), "ver": ver},
+    )
+
+def get_ckw_seed(category: str, service: str) -> str | None:
+    c = (category or "").strip()
+    s = (service or "").strip()
+    if not (c and s):
+        return None
+    with ENGINE.connect() as cx:
+        row = cx.execute(
+            sql_text("SELECT seed FROM ckw_seeds WHERE category=:c AND service=:s"),
+            {"c": c, "s": s},
+        ).fetchone()
+        return (row[0] if row else None)
+
+.
+
+" --- Make _seed_for prefer persisted seeds (minimal, robust tweak) ---
+/^def _seed_for\(category: str, service: str, rules_key: str\) -> list\[str\]:/
++1 a
+    # Prefer persisted seed if present
+    try:
+        _c = _ckw_clean(category)
+        _s = _ckw_clean(service)
+        _persist = get_ckw_seed(_c, _s)
+        if _persist:
+            try:
+                return [t.strip() for t in re.split(r"[,\n]", _persist) if t.strip()]
+            except Exception:
+                return [_persist.strip()]
+    except Exception:
+        pass
+.
+
+" --- Ensure seed schema exists in ensure_schema (after last vendors index) ---
+/idx_vendors_ckw        ON vendors\(computed_keywords\)/
+a
+
+    -- seed table is idempotent; ensure it exists
+    BEGIN
+    ;
+.
+a
+    END
+    ;
+.
+-2
+a
+    /* python: ensure from app layer (try/except) */
+.
+a
+    try:
+        ensure_ckw_seed_schema(engine)
+    except Exception:
+        pass
+.
+
+" --- Ensure seed schema exists in _ensure_ckw_columns tail ---
+/def _ensure_ckw_columns\(engine: Engine\) -> None:/
+/except Exception:\n\s*pass/ a
+    try:
+        ensure_ckw_seed_schema(engine)
+    except Exception:
+        pass
+.
+
+" --- Add 'remember seeds' checkbox in Add form, next to lock checkbox ---
+/st\.checkbox\("Lock computed keywords on create", value=False, key="add_ckw_locked"\)/
++1 a
+            st.checkbox("Remember these keywords for this Category/Service", value=AUTO_LEARN_SEEDS, key="add_remember_seed")
+.
+
+" --- On Add submit, persist seed after successful INSERT (place before 'add_last_done') ---
+/st\.session_state\["add_last_done"\] = add_nonce/
+i
+                # Learn seed on Add (non-blocking)
+                try:
+                    _remember = bool(st.session_state.get("add_remember_seed", AUTO_LEARN_SEEDS))
+                except Exception:
+                    _remember = AUTO_LEARN_SEEDS
+                if _remember:
+                    try:
+                        _seed_src = (st.session_state.get("add_computed_keywords") or "").strip() or suggested_ckw
+                        if _seed_src:
+                            upsert_ckw_seed(category, service, _seed_src, CKW_VERSION)
+                    except Exception as _e:
+                        if _SHOW_DEBUG: st.warning(f"Seed upsert (Add) skipped: {_e}")
+.
+
+" --- Add default toggle into _init_edit_form_defaults defaults dict ---
+/def _init_edit_form_defaults\(\):/,/for k, v in defaults\.items\(\):/ g/^        "edit_computed_keywords": "",/ a
+        "edit_remember_seed": AUTO_LEARN_SEEDS,
+.
+
+" --- Add 'remember seeds' checkbox in Edit UI (after END: CKW Edit caption) ---
+/# ==== END: CKW Edit \(manual lock \+ suggest\) ====/ a
+        st.checkbox("Remember these keywords for this Category/Service",
+                    value=st.session_state.get("edit_remember_seed", AUTO_LEARN_SEEDS),
+                    key="edit_remember_seed")
+.
+
+" --- On Edit save, persist seed after UPDATE ---
+/rowcount = int\(getattr\(res, "rowcount", 0\) or 0\)/
+a
+                # Learn seed on Edit (non-blocking)
+                try:
+                    _remember = bool(st.session_state.get("edit_remember_seed", AUTO_LEARN_SEEDS))
+                except Exception:
+                    _remember = AUTO_LEARN_SEEDS
+                if rowcount > 0 and _remember:
+                    try:
+                        _seed_src = (st.session_state.get("edit_computed_keywords") or "").strip() or suggested_now
+                        if _seed_src:
+                            upsert_ckw_seed(cat, svc, _seed_src, CKW_VERSION)
+                    except Exception as _e:
+                        if _SHOW_DEBUG: st.warning(f"Seed upsert (Edit) skipped: {_e}")
+.
+
+" --- Add CKW Seed Coverage probe near end of Maintenance (after VACUUM button) ---
+/st\.error\(f"VACUUM failed: {e}"\)/
+a
+
+# ---- CKW Seed Coverage Probe ----
+with st.expander("CKW Seed Coverage", expanded=False):
+    try:
+        with ENGINE.connect() as cx:
+            rows = cx.execute(sql_text("""
+                WITH pairs AS (
+                  SELECT DISTINCT TRIM(category) AS category, TRIM(service) AS service
+                    FROM vendors
+                   WHERE IFNULL(category,'') <> '' AND IFNULL(service,'') <> ''
+                )
+                SELECT p.category, p.service,
+                       CASE WHEN s.seed IS NOT NULL THEN 1 ELSE 0 END AS has_seed,
+                       COALESCE(s.version, 0) AS seed_version
+                  FROM pairs p
+                  LEFT JOIN ckw_seeds s
+                    ON s.category = p.category AND s.service = p.service
+                 ORDER BY has_seed ASC, p.category, p.service;
+            """)).mappings().all()
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No (category, service) pairs found.")
+    except Exception as e:
+        st.error(f"Coverage probe failed: {type(e).__name__}: {e}")
+.
+
+wq
