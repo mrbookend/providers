@@ -195,13 +195,27 @@ CREATE TABLE IF NOT EXISTS ckw_seeds (
 """
 
 def ensure_schema(engine: Engine):
-    # Per-statement retries so transient Hrana/libsql blips don't break boot
+    if DB_STRATEGY != "embedded_replica":
+        # On Turso: DO NOT create schema; verify required tables exist and fail fast if not.
+        try:
+            with engine.connect() as cx:
+                has = cx.execute(sql_text(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='vendors'"
+                )).scalar()
+            if not has:
+                st.error("Schema missing on Turso (no 'vendors'). Refusing to create tables on prod.")
+                st.stop()
+        except Exception as e:
+            st.error(f"Schema preflight failed: {e}")
+            st.stop()
+        return
+
+    # Embedded only: create/ensure local schema
     _exec_with_retry(engine, DDL_META)
     _exec_with_retry(engine, DDL_VENDORS)
     for ddl in DDL_INDEXES:
         _exec_with_retry(engine, ddl)
     _exec_with_retry(engine, DDL_CKW_SEEDS)
-    # meta keys
     _exec_with_retry(engine, "INSERT OR IGNORE INTO meta(key,value) VALUES('data_version','0');")
     _exec_with_retry(engine, "INSERT OR IGNORE INTO meta(key,value) VALUES('last_maintenance','');")
 
