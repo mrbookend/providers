@@ -25,7 +25,7 @@ except Exception:
 # Configuration / Constants
 # =============================
 
-APP_VER = "admin-2025-10-17.1"
+APP_VER = "admin-2025-10-17.2"
 CKW_VERSION = "ckw-2025-10-16a"  # bump when generator changes
 MAX_ROWS = 1000
 
@@ -74,6 +74,7 @@ def _libsql_url_with_token(raw: str, tok: str) -> str:
     if "tls=" not in url:
         url += ("&" if "?" in url else "?") + "tls=true"
     return url
+
 @st.cache_resource(show_spinner=False)
 def build_engine() -> Engine:
     """
@@ -133,7 +134,6 @@ def build_engine() -> Engine:
         st.sidebar.info(f"DB strategy: {DB_STRATEGY} | Target: {target_desc}")
 
     return eng
-
 
 
 def _exec_with_retry(engine: Engine, sql: str, params: Optional[dict]=None, tries: int=3, delay: float=0.25):
@@ -213,6 +213,19 @@ def ensure_schema(engine: Engine):
         return
 
     # Embedded only: create/ensure local schema
+    _exec_with_retry(engine, DDL_META)
+    _exec_with_retry(engine, DDL_VENDORS)
+    for ddl in DDL_INDEXES:
+        _exec_with_retry(engine, ddl)
+    _exec_with_retry(engine, DDL_CKW_SEEDS)
+    _exec_with_retry(engine, "INSERT OR IGNORE INTO meta(key,value) VALUES('data_version','0');")
+    _exec_with_retry(engine, "INSERT OR IGNORE INTO meta(key,value) VALUES('last_maintenance','');")
+
+def _bootstrap_schema(engine: Engine):
+    """
+    One-time bootstrap that *always* executes DDLs on the current connection,
+    regardless of DB_STRATEGY. Safe to run multiple times (IF NOT EXISTS guards).
+    """
     _exec_with_retry(engine, DDL_META)
     _exec_with_retry(engine, DDL_VENDORS)
     for ddl in DDL_INDEXES:
@@ -603,6 +616,45 @@ def main():
     with tabs[2]:
         st.subheader("Maintenance")
         st.caption("Auto-Maintenance already ran on startup. Use this if you changed seeds or after CSV append.")
+
+        # ==== BEGIN: One-time Schema Bootstrap (prod, empty DB or missing 'vendors') ====
+        with st.expander("One-time Schema Bootstrap (EMPTY Turso only)", expanded=False):
+            st.caption(
+                "Use this ONLY if your Turso DB is empty or missing the 'vendors' table. "
+                "This creates required tables and indexes. Afterwards, use CSV Restore (Append-Only)."
+            )
+            db_empty = False
+            vendors_missing = False
+            err = None
+            try:
+                with engine.connect() as cx:
+                    any_tbl = cx.execute(sql_text("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1")).fetchone()
+                    db_empty = (any_tbl is None)
+                    has_vendors = cx.execute(sql_text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vendors'")).fetchone()
+                    vendors_missing = (has_vendors is None)
+            except Exception as e:
+                err = e
+
+            if err:
+                st.error(f"DB check failed: {err}")
+            else:
+                if db_empty or vendors_missing:
+                    colA, colB = st.columns(2)
+                    with colA:
+                        confirm = st.checkbox("I understand this will create the production schema.", key="confirm_bootstrap_schema")
+                    with colB:
+                        really = st.checkbox("Yes, do it now (ONE TIME).", key="really_bootstrap_schema")
+                    if confirm and really and st.button("Create schema now", type="primary"):
+                        try:
+                            _bootstrap_schema(engine)
+                            st.success("Schema created/ensured. Now use CSV Restore (Append-Only) to load your data.")
+                            st.stop()
+                        except Exception as e:
+                            st.error(f"Schema creation failed: {e}")
+                else:
+                    st.info("This database already has required tables. Bootstrap is disabled.")
+        # ==== END: One-time Schema Bootstrap ====
+
         c1, c2, c3 = st.columns([1,1,2])
 
         with c1:
