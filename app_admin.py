@@ -97,22 +97,24 @@ def build_engine() -> Engine:
         eng = create_engine(dsn, pool_pre_ping=True, pool_recycle=300)
 
     elif DB_STRATEGY == "turso_only":
-        # Prefer a single full URL (host + ?authToken=... [+tls=true]) if provided in secrets
-        full = str(_get_secret("LIBSQL_URL_FULL", "") or "").strip()
-        if full.startswith("libsql://") and "authToken=" in full:
-            url = full
-            host = urlparse(url).netloc
-        else:
-            # Fall back to assembling from separate secrets
-            if not TURSO_URL.startswith("libsql://"):
-                st.error("DB_STRATEGY=turso_only but TURSO_DATABASE_URL is not a libsql:// URL.")
-                st.stop()
-            url = _libsql_url_with_token(TURSO_URL, TURSO_TOKEN)
-            host = urlparse(url).netloc
+elif DB_STRATEGY == "turso_only":
+    # Prefer a single full URL (host + ?authToken=... [+tls=true]) if provided in secrets
+    full = str(_get_secret("LIBSQL_URL_FULL", "") or "").strip()
+    if full.startswith("libsql://") and "authToken=" in full:
+        url = full
+        host = urlparse(url).netloc
+    else:
+        # Fall back to assembling from separate secrets
+        if not TURSO_URL.startswith("libsql://"):
+            st.error("DB_STRATEGY=turso_only but TURSO_DATABASE_URL is not a libsql:// URL.")
+            st.stop()
+        url = _libsql_url_with_token(TURSO_URL, TURSO_TOKEN)
+        host = urlparse(url).netloc
 
-        dsn = f"sqlite+libsql:///?url={url}"
-        target_desc = f"turso:{host}"
-        eng = create_engine(dsn, pool_pre_ping=True, pool_recycle=300)
+    dsn = f"sqlite+libsql:///?url={url}"
+    target_desc = f"turso:{host}"
+    eng = create_engine(dsn, pool_pre_ping=True, pool_recycle=300)
+
 
     else:
         # Fallback to embedded file if strategy unrecognized
