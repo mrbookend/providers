@@ -74,7 +74,6 @@ def _libsql_url_with_token(raw: str, tok: str) -> str:
     if "tls=" not in url:
         url += ("&" if "?" in url else "?") + "tls=true"
     return url
-
 @st.cache_resource(show_spinner=False)
 def build_engine() -> Engine:
     """
@@ -134,6 +133,7 @@ def build_engine() -> Engine:
         st.sidebar.info(f"DB strategy: {DB_STRATEGY} | Target: {target_desc}")
 
     return eng
+
 
 
 def _exec_with_retry(engine: Engine, sql: str, params: Optional[dict]=None, tries: int=3, delay: float=0.25):
