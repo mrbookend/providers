@@ -80,10 +80,11 @@ def _libsql_url_with_token(raw: str, tok: str) -> str:
 def build_engine() -> Engine:
     """
     Build a stable engine.
-      - embedded_replica: use local embedded file (sqlite+libsql:///path)
-      - turso_only: use remote Turso via sqlite+libsql:///?url=libsql://... (with token/tls)
+      - embedded_replica: local embedded file (sqlite+libsql:///path)
+      - turso_only: remote Turso via sqlite+libsql:///?url=libsql://... (with token/tls)
     """
     target_desc = ""
+
     if DB_STRATEGY == "embedded_replica":
         # Local embedded replica file path
         if not os.path.isabs(EMBEDDED_PATH):
@@ -94,14 +95,16 @@ def build_engine() -> Engine:
         dsn = f"sqlite+libsql:///{embedded}"
         target_desc = f"embedded:{embedded}"
         eng = create_engine(dsn, pool_pre_ping=True, pool_recycle=300)
+
     elif DB_STRATEGY == "turso_only":
-    # NEW: prefer a single, explicit URL if provided
+elif DB_STRATEGY == "turso_only":
+    # Prefer a single full URL (host + ?authToken=... [+tls=true]) if provided in secrets
     full = str(_get_secret("LIBSQL_URL_FULL", "") or "").strip()
     if full.startswith("libsql://") and "authToken=" in full:
         url = full
         host = urlparse(url).netloc
     else:
-        # fall back to assembling from separate secrets
+        # Fall back to assembling from separate secrets
         if not TURSO_URL.startswith("libsql://"):
             st.error("DB_STRATEGY=turso_only but TURSO_DATABASE_URL is not a libsql:// URL.")
             st.stop()
@@ -111,6 +114,7 @@ def build_engine() -> Engine:
     dsn = f"sqlite+libsql:///?url={url}"
     target_desc = f"turso:{host}"
     eng = create_engine(dsn, pool_pre_ping=True, pool_recycle=300)
+
 
     else:
         # Fallback to embedded file if strategy unrecognized
@@ -133,6 +137,7 @@ def build_engine() -> Engine:
         st.sidebar.info(f"DB strategy: {DB_STRATEGY} | Target: {target_desc}")
 
     return eng
+
 
 def _exec_with_retry(engine: Engine, sql: str, params: Optional[dict]=None, tries: int=3, delay: float=0.25):
     last = None
