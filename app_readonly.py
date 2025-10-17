@@ -81,7 +81,7 @@ def _get_data_version(engine: Engine) -> str:
 def load_df_v3(version: str) -> pd.DataFrame:
     """
     Load active providers (deleted_at IS NULL).
-    We DO NOT take an Engine arg (unhashable). Build it inside.
+    We do NOT accept an Engine arg (unhashable). Build it inside.
     """
     _engine = build_engine()
     q = """
