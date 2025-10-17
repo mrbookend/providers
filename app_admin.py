@@ -20,11 +20,13 @@ try:
 except Exception:
     pass
 
+from urllib.parse import urlparse
+
 # =============================
 # Configuration / Constants
 # =============================
 
-APP_VER = "admin-2025-10-16.1"
+APP_VER = "admin-2025-10-17.0"
 CKW_VERSION = "ckw-2025-10-16a"  # bump when generator changes
 MAX_ROWS = 1000
 
@@ -52,9 +54,9 @@ SHOW_STATUS = _as_bool(_get_secret("ADMIN_SHOW_STATUS", True), True)
 SHOW_DIAGS  = _as_bool(_get_secret("ADMIN_SHOW_DIAGS", False), False)
 DB_STRATEGY = str(_get_secret("DB_STRATEGY", "embedded_replica")).strip().lower()
 
-TURSO_URL   = _get_secret("TURSO_DATABASE_URL", "")
-TURSO_TOKEN = _get_secret("TURSO_AUTH_TOKEN", "")
-EMBEDDED_PATH = _get_secret("EMBEDDED_DB_PATH", "vendors-embedded.db")
+TURSO_URL   = str(_get_secret("TURSO_DATABASE_URL", "") or "").strip()
+TURSO_TOKEN = str(_get_secret("TURSO_AUTH_TOKEN", "") or "").strip()
+EMBEDDED_PATH = str(_get_secret("EMBEDDED_DB_PATH", "vendors-embedded.db") or "").strip()
 
 # =============================
 # Engine / Retry
@@ -63,27 +65,64 @@ EMBEDDED_PATH = _get_secret("EMBEDDED_DB_PATH", "vendors-embedded.db")
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+def _libsql_url_with_token(raw: str, tok: str) -> str:
+    """Append authToken and tls=true to a libsql URL if missing."""
+    url = (raw or "").strip()
+    if not url:
+        return url
+    if tok and "authToken=" not in url:
+        url += ("&" if "?" in url else "?") + f"authToken={tok}"
+    if "tls=" not in url:
+        url += ("&" if "?" in url else "?") + "tls=true"
+    return url
+
 @st.cache_resource(show_spinner=False)
 def build_engine() -> Engine:
     """
-    Build a stable engine suitable for libsql embedded replica.
+    Build a stable engine.
+      - embedded_replica: use local embedded file (sqlite+libsql:///path)
+      - turso_only: use remote Turso via sqlite+libsql:///?url=libsql://... (with token/tls)
     """
+    target_desc = ""
     if DB_STRATEGY == "embedded_replica":
+        # Local embedded replica file path
         if not os.path.isabs(EMBEDDED_PATH):
             embedded = os.path.join(os.getcwd(), EMBEDDED_PATH)
         else:
             embedded = EMBEDDED_PATH
-        url = f"sqlite+libsql:///{embedded}"
         os.makedirs(os.path.dirname(embedded) or ".", exist_ok=True)
+        dsn = f"sqlite+libsql:///{embedded}"
+        target_desc = f"embedded:{embedded}"
+        eng = create_engine(dsn, pool_pre_ping=True, pool_recycle=300)
     elif DB_STRATEGY == "turso_only":
-        url = TURSO_URL
+        if not TURSO_URL.startswith("libsql://"):
+            st.error("DB_STRATEGY=turso_only but TURSO_DATABASE_URL is not a libsql:// URL.")
+            st.stop()
+        url = _libsql_url_with_token(TURSO_URL, TURSO_TOKEN)
+        host = urlparse(url).netloc
+        dsn = f"sqlite+libsql:///?url={url}"
+        target_desc = f"turso:{host}"
+        eng = create_engine(dsn, pool_pre_ping=True, pool_recycle=300)
     else:
-        url = f"sqlite+libsql:///{EMBEDDED_PATH}"
+        # Fallback to embedded file if strategy unrecognized
+        embedded = os.path.join(os.getcwd(), EMBEDDED_PATH)
+        os.makedirs(os.path.dirname(embedded) or ".", exist_ok=True)
+        dsn = f"sqlite+libsql:///{embedded}"
+        target_desc = f"embedded:{embedded}"
+        eng = create_engine(dsn, pool_pre_ping=True, pool_recycle=300)
+
+    # Quick ping
+    try:
+        with eng.connect() as cx:
+            cx.exec_driver_sql("SELECT 1")
+    except Exception as e:
+        st.error(f"Engine ping failed: {e}")
+        st.caption(f"Strategy: {DB_STRATEGY} | DSN: {dsn[:80]}…")
+        st.stop()
 
     if SHOW_STATUS:
-        st.sidebar.info(f"Engine URL scheme ok: {bool(url)} | Strategy: {DB_STRATEGY}")
+        st.sidebar.info(f"DB strategy: {DB_STRATEGY} | Target: {target_desc}")
 
-    eng = create_engine(url, pool_pre_ping=True, pool_recycle=300)
     return eng
 
 def _exec_with_retry(engine: Engine, sql: str, params: Optional[dict]=None, tries: int=3, delay: float=0.25):
@@ -110,22 +149,22 @@ CREATE TABLE IF NOT EXISTS meta (
 
 DDL_VENDORS = """
 CREATE TABLE IF NOT EXISTS vendors (
-  id               INTEGER PRIMARY KEY,
-  category         TEXT,
-  service          TEXT,
-  business_name    TEXT,
-  contact_name     TEXT,
-  phone            TEXT,          -- digits-only storage
-  address          TEXT,
-  website          TEXT,
-  notes            TEXT,
-  keywords         TEXT,          -- user-entered free-text
-  computed_keywords TEXT,         -- auto-generated
-  ckw_version      TEXT,
-  deleted_at       TEXT,          -- soft delete ISO
-  created_at       TEXT,
-  updated_at       TEXT,
-  updated_by       TEXT
+  id                INTEGER PRIMARY KEY,
+  category          TEXT,
+  service           TEXT,
+  business_name     TEXT,
+  contact_name      TEXT,
+  phone             TEXT,          -- digits-only storage
+  address           TEXT,
+  website           TEXT,
+  notes             TEXT,
+  keywords          TEXT,          -- user-entered free-text
+  computed_keywords TEXT,          -- auto-generated
+  ckw_version       TEXT,
+  deleted_at        TEXT,          -- soft delete ISO
+  created_at        TEXT,
+  updated_at        TEXT,
+  updated_by        TEXT
 );
 """
 
@@ -147,6 +186,7 @@ CREATE TABLE IF NOT EXISTS ckw_seeds (
 """
 
 def ensure_schema(engine: Engine):
+    # Per-statement retries so transient Hrana/libsql blips don't break boot
     _exec_with_retry(engine, DDL_META)
     _exec_with_retry(engine, DDL_VENDORS)
     for ddl in DDL_INDEXES:
@@ -215,6 +255,7 @@ def _get_data_version(engine: Engine) -> str:
             return str(v or "0")
     except Exception:
         return "0"
+
 @st.cache_data(show_spinner=False)
 def load_active_df(_engine: Engine, version: str) -> pd.DataFrame:
     q = """
@@ -228,7 +269,6 @@ def load_active_df(_engine: Engine, version: str) -> pd.DataFrame:
     with _engine.connect() as cx:
         df = pd.read_sql(sql_text(q), cx)
     return df
-
 
 @st.cache_data(show_spinner=False)
 def load_deleted_df(engine: Engine, version: str) -> pd.DataFrame:
@@ -311,7 +351,7 @@ def _fmt_phone_display(s: str) -> str:
     return d
 
 def _info_banner(engine: Engine):
-    if not SHOW_STATUS: 
+    if not SHOW_STATUS:
         return
     try:
         with engine.connect() as cx:
@@ -327,7 +367,7 @@ def _render_table(df: pd.DataFrame):
     if df.empty:
         st.info("No matching providers.")
         return
-    # Tight HTML table for speed; format only visible (≤1000)
+    # Tight HTML/table for speed; format only visible (≤1000)
     disp = df.copy()
     if "phone" in disp.columns:
         disp["phone"] = disp["phone"].map(_fmt_phone_display)
@@ -497,10 +537,35 @@ def main():
     with tabs[2]:
         st.subheader("Maintenance")
         st.caption("Auto-Maintenance already ran on startup. Use this if you changed seeds or after CSV append.")
-        if st.button("Run Maintenance Now", type="secondary"):
-            seeds = _ckw_seed_map(engine)
-            stats = run_auto_maintenance(engine, seeds)
-            st.success(f"Done. {stats}")
+        c1, c2, c3 = st.columns([1,1,2])
+
+        with c1:
+            if st.button("Run Maintenance Now", type="secondary"):
+                seeds = _ckw_seed_map(engine)
+                stats = run_auto_maintenance(engine, seeds)
+                st.success(f"Done. {stats}")
+
+        # --- CSV Export (UI backup) ---
+        with c2:
+            with engine.connect() as cx:
+                df_all = pd.read_sql(sql_text("""
+                    SELECT id, category, service, business_name, contact_name, phone, address,
+                           website, notes, keywords, computed_keywords, ckw_version,
+                           created_at, updated_at, updated_by, deleted_at
+                      FROM vendors
+                     ORDER BY id
+                """), cx)
+            # Create CSV bytes for download
+            csv_bytes = df_all.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="Download CSV Backup",
+                data=csv_bytes,
+                file_name=f"providers-{datetime.now().date().isoformat()}.csv",
+                mime="text/csv",
+                type="secondary",
+                help="Full dump of vendors table (includes deleted_at)."
+            )
+
         if SHOW_DIAGS:
             with st.expander("Diagnostics"):
                 st.write({"APP_VER": APP_VER, "CKW_VERSION": CKW_VERSION, "DB_STRATEGY": DB_STRATEGY})
